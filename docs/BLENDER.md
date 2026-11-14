@@ -5,7 +5,7 @@ pass de falaises et détail continu compris — vers un GLB, des textures cuites
 et un script d'import Blender. Le but est de continuer le texturing dans
 Blender sans reconstruire la géométrie ni deviner les matériaux.
 
-![Rendu Cycles de l'export alpine](../demo-out/blender/alpine/render_cliffs.png)
+![Rendu Cycles de l'export alpine](screenshots/blender_cycles.png)
 
 ---
 
@@ -110,7 +110,7 @@ Validé sur cette machine avec **Blender 5.3** :
 
 ```text
 VistaForge import: 1 mesh object(s), 1054733 vertices, 2 material(s), camera=True
-VistaForge render written to demo-out/blender/alpine/render_cliffs.png
+VistaForge render written to docs/screenshots/blender_cycles.png
 ```
 
 Le rendu Cycles 960×600, 24 échantillons, CPU, prend ~13 s (import compris).

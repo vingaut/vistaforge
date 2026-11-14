@@ -13,7 +13,7 @@ La dynamique du **corps** (drone, oiseau, hélicoptère, dirigeable, chasseur,
 manuel) limite l'accélération de chaque axe et produit le roulis en virage.
 Le tout est déterministe : à seed et temps égaux, la caméra est identique.
 
-![Rig hélicoptère](../demo-out/rig/heli.png)
+![Rig hélicoptère](screenshots/rig_helicopter.png)
 
 ## Presets de dynamique
 

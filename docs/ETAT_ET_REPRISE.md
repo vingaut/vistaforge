@@ -90,7 +90,7 @@ Dernière mise à jour : **2026-11-14 06:40** (sessions P0–P6 : détail, sculp
   `vistaforge blender render <projet> <image> --samples N [--gpu]`.
 - **Validation réelle** : Blender 5.3, import de 1 054 733 sommets, 24
   échantillons Cycles 960×600 en ~13 s ; image
-  `demo-out/blender/alpine/render_cliffs.png`.
+  `docs/screenshots/blender_cycles.png`.
 - **Tests** : 130 verts, clippy `-D warnings` propre.
 - **Limites** : export aller seulement, pas de round-trip ; textures de départ
   non PBR multi-UDIM ; pas encore de végétation instanciée ; le patch de gros
@@ -183,9 +183,9 @@ Dernière mise à jour : **2026-11-14 06:40** (sessions P0–P6 : détail, sculp
   `blender render`; `--validate` pour un import sans rendu.
 - **Validation** : import Blender 5.3 de 1 054 733 sommets, 2 matériaux,
   2 couches UV ; rendu Cycles 960×600 en ~13 s.
-- **Démos** : `demo-out/blender/alpine/render_cliffs.png`,
-  `demo-out/world/seamless3x3.png`, `demo-out/rig/heli.png`,
-  `demo-out/sculpt/comparaison.png`, `demo-out/detail/rock_comparaison.png`.
+- **Démos** : `docs/screenshots/blender_cycles.png`,
+  `docs/screenshots/world_seamless.png`, `docs/screenshots/rig_helicopter.png`,
+  `docs/screenshots/detail_rock.png`.
 - **Tests** : 151 verts, clippy `-D warnings` propre.
 - **Limite** : l'atlas UV1 est par sommet ; les triangles qui changent d'axe
   peuvent montrer une couture. Pas de baking multi-UDIM ni de remesh
@@ -206,13 +206,11 @@ Dernière mise à jour : **2026-11-14 06:40** (sessions P0–P6 : détail, sculp
 | P6 | UV1 atlas de boîte, options Smart UV/remesh/save-blend, docs, démos, reprise | Atlas par sommet (coutures possibles) ; remesh délégué à Blender. |
 
 - **Tests** : 152 verts, clippy `-D warnings` propre.
-- **Commits** : `822b4d2` (P0), `e5ed778` (P1), `9c8cd26` (P2), `83f7685` (P3),
-  `8c8a795` (P4), `26fdefa` (P5), `120979f` (P6), `b918e2f` (LOD adaptatif).
+- **Historique** : dépôt réinitialisé en un commit propre (`923669e`) pour ne conserver que le code et la documentation VistaForge.
 - **Nouveaux crates** : `vf-detail`, `vf-mesh`, `vf-export`.
-- **Démos** : `demo-out/detail/rock_comparaison.png`,
-  `demo-out/micro/gallery.png`, `demo-out/blender/alpine/render_cliffs.png`,
-  `demo-out/sculpt/comparaison.png`, `demo-out/rig/heli.png`,
-  `demo-out/world/seamless3x3.png`.
+- **Démos** : `docs/screenshots/detail_rock.png`,
+  `docs/screenshots/blender_cycles.png`, `docs/screenshots/rig_helicopter.png`,
+  `docs/screenshots/world_seamless.png`.
 - **UI** : compile, mais n'a pas été lancée sur un écran pendant la session.
 - **Reprise** : ce document, `docs/SPEC_REALISME.md` (contrat et faisabilité),
   `docs/MONDE.md`, `docs/RIG.md`, `docs/BLENDER.md`.

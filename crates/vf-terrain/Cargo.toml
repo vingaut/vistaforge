@@ -1,0 +1,13 @@
+[package]
+name = "vf-terrain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Heightfield operations, normals, resampling and hillshading"
+
+[dependencies]
+vf-core = { path = "../vf-core" }
+
+[lints]
+workspace = true

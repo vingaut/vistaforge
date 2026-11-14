@@ -1,0 +1,17 @@
+[package]
+name = "vf-detail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Continuous multi-scale rock detail evaluated above the heightfield"
+
+[dependencies]
+vf-core = { path = "../vf-core" }
+vf-procgen = { path = "../vf-procgen" }
+
+[dev-dependencies]
+vf-procgen = { path = "../vf-procgen" }
+
+[lints]
+workspace = true

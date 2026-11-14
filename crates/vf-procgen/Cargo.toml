@@ -1,0 +1,14 @@
+[package]
+name = "vf-procgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic fractal terrain generation and erosion"
+
+[dependencies]
+vf-core = { path = "../vf-core" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

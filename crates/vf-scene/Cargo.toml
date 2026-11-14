@@ -1,0 +1,15 @@
+[package]
+name = "vf-scene"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Camera framing, lighting and scene presets"
+
+[dependencies]
+glam.workspace = true
+vf-core = { path = "../vf-core" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

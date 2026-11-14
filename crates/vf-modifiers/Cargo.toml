@@ -1,0 +1,15 @@
+[package]
+name = "vf-modifiers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic terrain modifier stack for VistaForge"
+
+[dependencies]
+vf-core = { path = "../vf-core" }
+vf-procgen = { path = "../vf-procgen" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

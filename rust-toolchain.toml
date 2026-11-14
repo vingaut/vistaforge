@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned for reproducible builds on Ubuntu 24.04+ and Windows 11.
+# Bump deliberately and re-run the full CI matrix.
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

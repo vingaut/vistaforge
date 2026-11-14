@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vf-core",
+    "crates/vf-terrain",
+    "crates/vf-detail",
+    "crates/vf-mesh",
+    "crates/vf-export",
+    "crates/vf-geology",
+    "crates/vf-flight",
+    "crates/vf-modifiers",
+    "crates/vf-procgen",
+    "crates/vf-scene",
+    "crates/vf-io",
+    "crates/vf-render",
+    "crates/vf-cli",
+    "crates/vf-mcp",
+    "crates/vf-ui",
+    "crates/vf-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["VistaForge contributors"]
+description = "VistaForge — modern landscape generator and editor"
+
+[workspace.dependencies]
+anyhow = "1.0"
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+base64 = "0.22"
+clap = { version = "4.6", features = ["derive"] }
+glam = { version = "0.30", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1.12"
+ron = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

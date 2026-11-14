@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local research and legacy corpus: never commit or redistribute.
+/re/
+/ile.png
+
+# Generated projects and captures
+*.vfproj
+
+# Demo output
+/demo-out/
+
+# Python
+__pycache__/
+*.pyc

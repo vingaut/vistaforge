@@ -1,0 +1,32 @@
+[package]
+name = "vf-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Model Context Protocol server for VistaForge"
+
+[[bin]]
+name = "vistaforge-mcp"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+glam.workspace = true
+base64.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+vf-core = { path = "../vf-core" }
+vf-geology = { path = "../vf-geology" }
+vf-flight = { path = "../vf-flight" }
+vf-io = { path = "../vf-io" }
+vf-modifiers = { path = "../vf-modifiers" }
+vf-procgen = { path = "../vf-procgen" }
+vf-render = { path = "../vf-render" }
+vf-scene = { path = "../vf-scene" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

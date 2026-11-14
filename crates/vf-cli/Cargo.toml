@@ -1,0 +1,32 @@
+[package]
+name = "vf-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line interface for VistaForge"
+
+[[bin]]
+name = "vistaforge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glam.workspace = true
+image.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+vf-core = { path = "../vf-core" }
+vf-export = { path = "../vf-export" }
+vf-geology = { path = "../vf-geology" }
+vf-flight = { path = "../vf-flight" }
+vf-io = { path = "../vf-io" }
+vf-modifiers = { path = "../vf-modifiers" }
+vf-procgen = { path = "../vf-procgen" }
+vf-render = { path = "../vf-render" }
+vf-scene = { path = "../vf-scene" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

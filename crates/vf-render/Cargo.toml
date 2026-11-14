@@ -1,0 +1,24 @@
+[package]
+name = "vf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic CPU landscape renderer"
+
+[dependencies]
+glam.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
+vf-mesh = { path = "../vf-mesh" }
+vf-geology = { path = "../vf-geology" }
+vf-io = { path = "../vf-io" }
+vf-modifiers = { path = "../vf-modifiers" }
+vf-procgen = { path = "../vf-procgen" }
+vf-scene = { path = "../vf-scene" }
+vf-terrain = { path = "../vf-terrain" }
+
+[lints]
+workspace = true

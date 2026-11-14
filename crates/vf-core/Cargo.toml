@@ -1,0 +1,18 @@
+[package]
+name = "vf-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core data model for VistaForge: seeds, heightfield, scene and project"
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+ron.workspace = true

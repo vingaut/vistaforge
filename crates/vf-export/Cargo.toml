@@ -1,0 +1,23 @@
+[package]
+name = "vf-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "glTF/GLB and Blender bridge export for VistaForge scenes"
+
+[dependencies]
+glam.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
+vf-geology = { path = "../vf-geology" }
+vf-modifiers = { path = "../vf-modifiers" }
+vf-procgen = { path = "../vf-procgen" }
+vf-mesh = { path = "../vf-mesh" }
+
+[lints]
+workspace = true

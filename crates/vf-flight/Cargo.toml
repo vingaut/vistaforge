@@ -1,0 +1,15 @@
+[package]
+name = "vf-flight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic FPV and helicopter camera flight simulation"
+
+[dependencies]
+glam.workspace = true
+vf-core = { path = "../vf-core" }
+vf-procgen = { path = "../vf-procgen" }
+
+[lints]
+workspace = true

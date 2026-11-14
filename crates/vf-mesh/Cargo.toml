@@ -1,0 +1,18 @@
+[package]
+name = "vf-mesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Render and export meshes built from the continuous detail surface"
+
+[dependencies]
+rayon.workspace = true
+vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
+
+[dev-dependencies]
+vf-procgen = { path = "../vf-procgen" }
+
+[lints]
+workspace = true

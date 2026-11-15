@@ -16,10 +16,11 @@ Dernière mise à jour : **2026-11-15 17:52** (lot terminé, binaires Linux publ
 > `clippy -D warnings` propre, `cargo fmt` appliqué, captures UI et validation
 > Blender 5.3 effectuées.
 >
-> **Git** : `origin/master` = `bb3ab21` sur
-> <https://github.com/vingaut/vistaforge>. Commits du lot : `21aad3c`
-> (code/docs), `859104a` (doc de reprise), `bb3ab21` (binaires). Les exécutables
-> Linux x86_64 `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
+> **Git** : `origin/master` = `8234c90` sur
+> <https://github.com/vingaut/vistaforge>. Commits : `21aad3c` (lot principal),
+> `859104a` (doc de reprise), `bb3ab21` (binaires), `6db56ac` (guide MCP),
+> `220cd8f` (suivi caméra), `8234c90` (binaires à jour). Les exécutables Linux
+> x86_64 `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
 > `dist/linux-x86_64/` avec `SHA256SUMS`.
 
 ### Demande initiale

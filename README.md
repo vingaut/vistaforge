@@ -86,6 +86,22 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 | Patagonie, tours verticales | ![Patagonie](docs/screenshots/patagonia.png) |
 | Crépuscule étoilé | ![Crépuscule](docs/screenshots/dusk.png) |
 
+## Binaires précompilés (Linux x86_64)
+
+Les exécutables `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
+[`dist/linux-x86_64/`](dist/linux-x86_64/), avec leurs sommes SHA-256 :
+
+```bash
+cd dist/linux-x86_64
+./vistaforge --help
+./vistaforge-app
+./vistaforge-mcp --workspace .
+```
+
+Voir [`dist/README.md`](dist/README.md) pour les prérequis (Vulkan/OpenGL,
+glibc) et la procédure de vérification. Les binaires sont Linux x86_64 ;
+macOS et Windows se compilent depuis la source.
+
 ## Démarrage rapide
 
 Prérequis : rustup (toolchain épinglée installée automatiquement). Sous Windows, Build Tools MSVC.

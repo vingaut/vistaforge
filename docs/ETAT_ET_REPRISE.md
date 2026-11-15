@@ -5,7 +5,7 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 17:30** (sculpture fine, animation, timeline, fichiers/DEM/Blender — lot terminé).
+Dernière mise à jour : **2026-11-15 17:30** (sculpture fine, animation, timeline, fichiers/DEM/Blender — lot terminé, commit `21aad3c`).
 
 ---
 
@@ -172,8 +172,7 @@ blender --background --python bridge/blender/vistaforge_import.py --   blender-o
 ## 0quaterdecies. Session du 15 novembre — sculpt de terrasses basaltiques (WIP intégré)
 
 > **État : section historique.** Le travail décrit ci-dessous a été repris et
-> terminé dans la section précédente. Les changements sont désormais dans
-> l'arbre de travail (commit à venir).
+> terminé dans la section précédente. Le lot est commité (`21aad3c`).
 
 ### Demande
 

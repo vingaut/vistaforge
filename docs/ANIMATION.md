@@ -207,6 +207,24 @@ caméra statique et règle `fps`/plage d'images. L'addon sait aussi réexporter 
 caméra et l'empty cible vers `.vfcam` pour revenir dans VistaForge. Détails :
 [`FICHIERS.md`](FICHIERS.md).
 
+### Suivi exact et vitesse
+
+Deux modes de suivi coexistent :
+
+- **Suivre exactement le tracé (sans inertie)**, coché par défaut : la caméra
+  est exactement sur la courbe aux temps des clés. La distance parcourue est
+  proportionnelle au temps (échantillonnage par **longueur d'arc** dans chaque
+  segment), donc `vitesse = distance / durée` et `images = durée × fps` sont
+  cohérents. Le profil continue de piloter le roulis, les secousses et la visée.
+- **Inertie du profil** (case décochée) : le ressort, la traînée et l'évitement
+  peuvent faire couper les virages. C'est le mode des comparaisons de profils.
+
+L'échantillonnage par longueur d'arc est le correctif de fond : un Bezier
+paramétré linéairement en `u` avance vite au milieu du segment et lentement près
+des clés, même avec `ease = 0`. Avec l'inversion de longueur d'arc, un segment
+de 475 m sur 17,58 s se parcourt bien à 27 m/s moyens, et la clé est atteinte à
+son temps.
+
 ### Timing par segment et vitesse
 
 ![Timing par segment, vitesse et images](screenshots/animation_timing.png)
@@ -239,10 +257,10 @@ son temps en **secondes ou en images**.
 
 ### Suivi du tracé
 
-Un profil de vol n'est pas une interpolation : il a une vitesse maximale, des
-accélérations bornées et de la traînée. Si la durée est trop courte, la caméra
-coupe les virages et reste derrière la courbe. L'interface mesure cet écart et
-affiche un bandeau dans l'espace Animation :
+En mode **inertie** uniquement, un profil de vol n'est pas une interpolation :
+il a une vitesse maximale, des accélérations bornées et de la traînée. Si la
+durée est trop courte, la caméra coupe les virages et reste derrière la courbe.
+L'interface mesure cet écart et affiche un bandeau dans l'espace Animation :
 
 > Caméra jusqu'à 60 m derrière le tracé…
 
@@ -254,9 +272,9 @@ Trois corrections en un clic :
   peuvent être remises à zéro ;
 - **Profil manuel** : suit exactement le tracé, sans inertie.
 
-Le simulateur démarre à la vitesse du tracé (et non à l'arrêt) et compense la
-traînée par une avance de poussée : sans cela, chaque survol commençait avec un
-retard de `v²/(2a)` et conservait un écart permanent pour vaincre la traînée.
+Même en inertie, le simulateur démarre à la vitesse du tracé et compense la
+traînée par une avance de poussée. En suivi exact, ces écarts n'existent plus :
+la caméra est sur la courbe et la vitesse est celle des clés.
 
 ### Lissage de visée et parois
 

@@ -181,6 +181,9 @@ pub fn profile_curves(rig: &CameraRig, heightfield: &HeightField, seed: Seed) ->
         let mut candidate = rig.clone();
         apply_aircraft_preset(&mut candidate, preset);
         candidate.enabled = true;
+        // The comparison is explicitly about body dynamics: force the
+        // simulated (inertial) mode even though the project default is exact.
+        candidate.exact_path = false;
         // The wall field is a 2D distance to steep cells; on a demo path that
         // flies high above a cliff it would push the comparison sideways even
         // though there is no collision. Keep the authored constraints untouched
@@ -243,6 +246,9 @@ pub fn comparison_trails(
         let mut candidate = rig.clone();
         apply_aircraft_preset(&mut candidate, preset);
         candidate.enabled = true;
+        // The comparison is explicitly about body dynamics: force the
+        // simulated (inertial) mode even though the project default is exact.
+        candidate.exact_path = false;
         // The wall field is a 2D distance to steep cells; on a demo path that
         // flies high above a cliff it would push the comparison sideways even
         // though there is no collision. Keep the authored constraints untouched

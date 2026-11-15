@@ -490,6 +490,11 @@ pub struct CameraRig {
     pub enabled: bool,
     pub name: String,
     pub duration_s: f32,
+    /// Follow the authored curve exactly at the key times, instead of letting
+    /// the motion profile's spring lag behind it. Profiles still drive roll,
+    /// shake and look smoothing; this flag makes key/time/distance authoritative.
+    #[serde(default = "default_exact_path")]
+    pub exact_path: bool,
     pub fps: u32,
     pub eye: Path3D,
     pub target: TargetRig,
@@ -505,6 +510,7 @@ impl Default for CameraRig {
             enabled: false,
             name: "Camera rig".into(),
             duration_s: 8.0,
+            exact_path: true,
             fps: 24,
             eye: Path3D::default(),
             target: TargetRig::default(),
@@ -514,6 +520,10 @@ impl Default for CameraRig {
             seed: 7,
         }
     }
+}
+
+fn default_exact_path() -> bool {
+    true
 }
 
 impl CameraRig {

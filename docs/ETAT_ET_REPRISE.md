@@ -5,7 +5,7 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 21:40** (keyframing, timing par segment et liens caméra/cible — livré, binaires publiés).
+Dernière mise à jour : **2026-11-15 22:05** (vitesse exacte par longueur d'arc, keyframing et liens caméra/cible).
 
 ---
 
@@ -63,13 +63,40 @@ Dernière mise à jour : **2026-11-15 21:40** (keyframing, timing par segment et
 - Capture `docs/screenshots/animation_timing.png`.
 - Aide contextuelle mise à jour.
 
+### Deuxième passe : vitesse exacte (longueur d'arc)
+
+Le premier correctif (durée étirée, vitesse initiale, traînée) ne suffisait pas :
+même avec `ease = 0`, `sample_path` paramétrait le Bezier linéairement en `u`.
+Sur une ligne droite avec poignées automatiques, la clé milieu d'un segment
+0→100 m n'était atteinte qu'à 43,75 % de la distance au temps médian, et la
+vitesse instantanée variait fortement à l'intérieur du segment.
+
+- **Échantillonnage par longueur d'arc** : `sample_path` inverse une table de
+  longueur (24 pas) pour chaque segment. À `ease = 0`, la distance parcourue est
+  proportionnelle au temps ; une clé est atteinte à son temps.
+- **`CameraRig::exact_path`**, activé par défaut : la caméra est exactement sur
+  la courbe ; le profil ne peut plus introduire de retard de position. Le
+  profil pilote toujours roulis, secousses et visée.
+- Case **Suivre exactement le tracé (sans inertie)** dans Réglages. Décochée,
+  on retrouve le ressort/traînée/évitement pour comparer les profils.
+- En mode exact, les contraintes de position de l'œil sont ignorées (sinon la
+  vitesse ne serait plus exacte) ; les comparaisons de profils forcent
+  `exact_path = false`.
+- Cible : le mode Path utilise le même échantillonnage par longueur d'arc ; les
+  modes Avance / Décalage / Retard suivent l'œil exact. Le tableau de timing
+  affiche aussi les segments de la cible (`T0→T1`).
+
+Test clé : `exact_path_matches_key_times_and_target_keys` — à `t=10` la caméra
+est sur la clé, la cible sur sa clé, et à `t=5` elle est à 50 m sur un segment
+de 100 m.
+
 ### Validation
 
-- `cargo test --workspace` : **226 tests verts**.
+- `cargo test --workspace` : **227 tests verts**.
 - `clippy -D warnings` propre, `cargo fmt` appliqué.
 - Capture UI avec le tableau de timing et les barres de segment.
 - Tests ajoutés : répartition par distance, vitesse cible, cible Offset,
-  cible Trail, suivi caméra à durée conseillée.
+  cible Trail, suivi caméra à durée conseillée, longueur d'arc et clés exactes.
 
 ### Limites / suite
 

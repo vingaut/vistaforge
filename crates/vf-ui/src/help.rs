@@ -244,6 +244,7 @@ impl HelpTopic {
                 "Une durée trop courte demande une vitesse que le corps ne peut pas atteindre : il sature et rate les virages.",
                 "Le bouton « Durée conseillée » calcule une durée à partir de la longueur du tracé et de la vitesse de croisière du profil.",
                 "Par défaut, la durée étire les temps des clés (positions 3D inchangées) : le tracé occupe tout le clip. Décochez « Étirer les clés » pour garder des temps absolus.",
+                "« Suivre exactement le tracé » (coché) garantit vitesse = distance / temps et clé atteinte à son temps. Décochez-le pour l'inertie du profil.",
                 "La durée conseillée inclut 15 % de marge pour l'accélération et la stabilisation finale.",
             ],
             Self::Optics => &[

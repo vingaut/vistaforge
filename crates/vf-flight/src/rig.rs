@@ -148,12 +148,16 @@ impl<'a> RigSimulation<'a> {
         let omega = response_omega(body.preset);
         self.prev_vel = self.eye_vel;
 
-        if body.manual_orientation {
-            // Manual mode ignores the spring and follows the authored path
-            // exactly. Constraints still correct the result below.
+        let exact_path = self.rig.exact_path || body.manual_orientation;
+        if exact_path {
+            // Keyframe-authoritative mode: the eye is exactly on the authored
+            // curve at every simulation step. The motion profile still drives
+            // roll and shake, but it cannot introduce a position lag that makes
+            // speed disagree with key times, frames and distances.
             self.eye_vel = path_velocity;
             self.eye_pos = desired;
             self.eye_acc = DVec3::ZERO;
+            self.avoid_acc = DVec3::ZERO;
         } else {
             // Position spring + velocity feed-forward. Without the feed-forward
             // term the spring fights the path velocity, and once the
@@ -233,7 +237,7 @@ impl<'a> RigSimulation<'a> {
         // Terrain floor: sampled a little ahead, then low-passed. The old code
         // clamped the eye to the exact bilinear height of the cell it was
         // over, so the camera followed every facet of the mesh.
-        if self.rig.constraints.enabled && self.rig.constraints.apply_eye {
+        if !exact_path && self.rig.constraints.enabled && self.rig.constraints.apply_eye {
             self.apply_eye_floor(dt64);
         }
 
@@ -243,14 +247,18 @@ impl<'a> RigSimulation<'a> {
         // floor. This is what stops the aim (and therefore the horizon) from
         // snapping when the avoidance vector changes.
         let desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
-        let target_tau = match self.rig.target.mode {
-            TargetMode::Fixed | TargetMode::Path => 0.0,
-            // A rigid offset link must not lag, otherwise it is a second
-            // spring target and the offset is not what the user authored.
-            TargetMode::Offset => f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2,
-            TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Manual => {
-                0.06 + f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2
-                    + f64::from(self.rig.body.look_lag.clamp(0.0, 2.0)) * 0.5
+        let target_tau = if exact_path {
+            0.0
+        } else {
+            match self.rig.target.mode {
+                TargetMode::Fixed | TargetMode::Path => 0.0,
+                // A rigid offset link must not lag, otherwise it is a second
+                // spring target and the offset is not what the user authored.
+                TargetMode::Offset => f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2,
+                TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Manual => {
+                    0.06 + f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2
+                        + f64::from(self.rig.body.look_lag.clamp(0.0, 2.0)) * 0.5
+                }
             }
         };
         if target_tau > 0.0 {
@@ -675,7 +683,7 @@ fn response_omega(preset: AircraftPreset) -> f64 {
 
 fn initial_velocity(rig: &CameraRig, path: &Path3D) -> DVec3 {
     let velocity = path_derivative(path, 0.0);
-    if rig.body.manual_orientation {
+    if rig.exact_path || rig.body.manual_orientation {
         return velocity;
     }
     let speed = velocity.length();
@@ -733,7 +741,14 @@ pub fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DV
     }
 }
 
-/// Cubic Bezier sample by time.
+/// Cubic Bezier sample by time, parameterised by **arc length** inside each
+/// segment.
+///
+/// Linear-in-time Bezier sampling makes the camera move fast where the handles
+/// are long and slow near the keys, even though the key times say "constant
+/// speed". Inverting a small arc-length table per segment makes the travelled
+/// distance proportional to the elapsed time (for `ease = 0`), which is what
+/// the timing panel, the frame count and the author expect.
 pub fn sample_path(path: &Path3D, t: f32) -> DVec3 {
     let keys = &path.keys;
     if keys.is_empty() {
@@ -756,8 +771,11 @@ pub fn sample_path(path: &Path3D, t: f32) -> DVec3 {
     let a = &keys[index];
     let b = &keys[index + 1];
     let span = (b.time_s - a.time_s).max(1e-5);
-    let u = ((t - a.time_s) / span).clamp(0.0, 1.0);
-    let u = u + (u * u * (3.0 - 2.0 * u) - u) * a.ease.clamp(0.0, 1.0);
+    let mut fraction = ((t - a.time_s) / span).clamp(0.0, 1.0);
+    if a.ease > 0.0 {
+        let smooth = fraction * fraction * (3.0 - 2.0 * fraction);
+        fraction += (smooth - fraction) * a.ease.clamp(0.0, 1.0);
+    }
     let p0 = DVec3::from_array(a.position);
     let p1 = DVec3::from_array(b.position);
     let (h0, h1) = auto_handles(keys, index);
@@ -773,9 +791,46 @@ pub fn sample_path(path: &Path3D, t: f32) -> DVec3 {
         } else {
             b.in_handle
         });
-    let u = u as f64;
+    bezier_at_fraction(p0, c1, c2, p1, f64::from(fraction))
+}
+
+fn bezier(p0: DVec3, c1: DVec3, c2: DVec3, p1: DVec3, u: f64) -> DVec3 {
     let v = 1.0 - u;
     p0 * (v * v * v) + c1 * (3.0 * v * v * u) + c2 * (3.0 * v * u * u) + p1 * (u * u * u)
+}
+
+/// Arc-length parameterisation of one cubic without allocating. 24 samples
+/// are enough for a camera path: the error is far below the terrain cell size,
+/// and the cost is negligible next to the rig simulation.
+fn bezier_at_fraction(p0: DVec3, c1: DVec3, c2: DVec3, p1: DVec3, fraction: f64) -> DVec3 {
+    const STEPS: usize = 24;
+    let mut previous = p0;
+    let mut lengths = [0.0f64; STEPS + 1];
+    let mut total = 0.0;
+    for (step, length) in lengths.iter_mut().enumerate().skip(1) {
+        let u = step as f64 / STEPS as f64;
+        let point = bezier(p0, c1, c2, p1, u);
+        total += (point - previous).length();
+        *length = total;
+        previous = point;
+    }
+    if total <= 1e-9 {
+        return p0;
+    }
+    let target = fraction.clamp(0.0, 1.0) * total;
+    let mut index = 1;
+    while index < STEPS && lengths[index] < target {
+        index += 1;
+    }
+    let before = lengths[index - 1];
+    let after = lengths[index];
+    let local = if after - before > 1e-12 {
+        (target - before) / (after - before)
+    } else {
+        0.0
+    };
+    let u = ((index - 1) as f64 + local) / STEPS as f64;
+    bezier(p0, c1, c2, p1, u)
 }
 
 fn auto_handles(keys: &[vf_core::PathKey], index: usize) -> ([f64; 3], [f64; 3]) {
@@ -1162,6 +1217,7 @@ mod tests {
         let mut rig = CameraRig::preset("drone").unwrap();
         preset_path(&mut rig, &hf, "ridge").unwrap();
         rig.constraints.enabled = true;
+        rig.exact_path = false;
         rig.constraints.ground_clearance_m = 40.0;
         for step in 0..20 {
             let sample = sample_rig(&rig, &hf, Seed::new(1), step as f32 * 0.4).unwrap();
@@ -1176,6 +1232,43 @@ mod tests {
         assert!(a.body.accel_forward_mps2 > b.body.accel_forward_mps2);
         assert!(a.body.max_bank_deg > b.body.max_bank_deg);
         assert_eq!(a.body.preset, AircraftPreset::FighterJet);
+    }
+
+    #[test]
+    fn exact_path_matches_key_times_and_target_keys() {
+        let hf = field();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 500.0]),
+            vf_core::PathKey::new(10.0, [100.0, 0.0, 500.0]),
+            vf_core::PathKey::new(20.0, [300.0, 0.0, 500.0]),
+        ];
+        rig.duration_s = 20.0;
+        rig.exact_path = true;
+        rig.constraints.enabled = false;
+        rig.target.mode = TargetMode::Path;
+        rig.target.path.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 100.0, 500.0]),
+            vf_core::PathKey::new(10.0, [100.0, 100.0, 500.0]),
+            vf_core::PathKey::new(20.0, [300.0, 100.0, 500.0]),
+        ];
+        let at_ten = sample_rig(&rig, &hf, Seed::new(1), 10.0).unwrap();
+        assert!(
+            (at_ten.eye - DVec3::new(100.0, 0.0, 500.0)).length() < 1.0,
+            "eye at key: {:?}",
+            at_ten.eye
+        );
+        assert!(
+            (at_ten.target - DVec3::new(100.0, 100.0, 500.0)).length() < 1.0,
+            "target at key: {:?}",
+            at_ten.target
+        );
+        let at_five = sample_rig(&rig, &hf, Seed::new(1), 5.0).unwrap();
+        assert!(
+            (at_five.eye.x - 50.0).abs() < 2.0,
+            "constant segment speed: x={}",
+            at_five.eye.x
+        );
     }
 
     #[test]
@@ -1369,6 +1462,7 @@ mod tests {
         rig.duration_s = 16.0;
         rig.target.mode = TargetMode::EyeAhead;
         rig.constraints.enabled = true;
+        rig.exact_path = false;
         rig.constraints.apply_eye = true;
         rig.constraints.wall_avoidance = true;
         rig.constraints.wall_distance_m = 80.0;
@@ -1412,6 +1506,7 @@ mod tests {
             vf_core::PathKey::new(8.0, [1000.0, 660.0, 230.0]),
         ];
         rig.duration_s = 8.0;
+        rig.exact_path = false;
         rig.constraints.enabled = true;
         rig.constraints.wall_avoidance = true;
         rig.constraints.wall_distance_m = 100.0;

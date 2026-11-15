@@ -3415,6 +3415,15 @@ impl VistaForgeApp {
                     .register(combo.response.rect, help::HelpTopic::Target);
             }
         });
+        if self.project.rig.exact_path {
+            ui.label(
+                egui::RichText::new(
+                    "Suivi exact actif : la visée est verrouillée sur la courbe, le lissage de visée est ignoré. Décochez « Suivre exactement le tracé » pour l'utiliser.",
+                )
+                .small()
+                .weak(),
+            );
+        }
         if mode != previous_mode {
             self.project.rig.target.mode = mode;
             if mode == TargetMode::Path {
@@ -4323,6 +4332,23 @@ impl VistaForgeApp {
         .on_hover_text(
             "La durée étire le temps des clés (les positions 3D ne changent pas). Désactivé, les clés gardent leur temps absolu et la caméra peut atteindre la fin avant la durée.",
         );
+        if ui
+            .checkbox(
+                &mut self.project.rig.exact_path,
+                "Suivre exactement le tracé (sans inertie)",
+            )
+            .on_hover_text(
+                "La caméra est exactement sur la courbe aux temps des clés : la vitesse correspond aux distances et aux images. Décochez pour laisser le profil physique (ressort, traînée, évitement) déformer la trajectoire.",
+            )
+            .changed()
+        {
+            self.mark_animation_changed();
+            self.rig_status = if self.project.rig.exact_path {
+                "Suivi exact du tracé activé : vitesse = distance / temps".into()
+            } else {
+                "Inertie du profil activée : la caméra peut couper les virages".into()
+            };
+        }
         let key_end = self.project.rig.eye.duration_s();
         let duration = self.project.rig.duration_s;
         if (key_end - duration).abs() > 0.05 {
@@ -4491,6 +4517,59 @@ impl VistaForgeApp {
                 .weak(),
             );
         }
+        if self.project.rig.target.mode == TargetMode::Path {
+            let target_segments = vf_flight::rig::path_segments(&self.project.rig.target.path);
+            if !target_segments.is_empty() {
+                ui.label(
+                    egui::RichText::new("Timing de la cible")
+                        .strong()
+                        .size(12.0),
+                );
+                let max_speed = self.project.rig.body.max_speed_mps;
+                let fps = self.project.rig.fps.max(1) as f32;
+                egui::ScrollArea::vertical()
+                    .max_height(110.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("anim-target-segment-grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for header in ["Segment", "Longueur", "Durée", "Vitesse", "Images"]
+                                {
+                                    ui.label(egui::RichText::new(header).small().strong());
+                                }
+                                ui.end_row();
+                                for segment in &target_segments {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "T{}→T{}",
+                                            segment.index,
+                                            segment.index + 1
+                                        ))
+                                        .monospace()
+                                        .size(10.0),
+                                    );
+                                    ui.label(format!("{:.0} m", segment.length_m));
+                                    ui.label(format!("{:.2} s", segment.duration_s()));
+                                    let speed = segment.average_speed_mps;
+                                    ui.label(egui::RichText::new(format!("{speed:.1} m/s")).color(
+                                        if speed > max_speed + 0.5 {
+                                            egui::Color32::from_rgb(255, 150, 110)
+                                        } else {
+                                            egui::Color32::from_rgb(170, 210, 180)
+                                        },
+                                    ));
+                                    ui.label(format!(
+                                        "{:.0}",
+                                        (segment.duration_s() * fps).round()
+                                    ));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button("Répartir les temps par distance")
@@ -4649,6 +4728,15 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Contraintes")
             .default_open(false)
             .show(ui, |ui| {
+                if self.project.rig.exact_path {
+                    ui.label(
+                        egui::RichText::new(
+                            "Suivi exact : les contraintes de position de l'œil (sol, parois) sont ignorées. Décochez le suivi exact pour les appliquer.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
                 let constraints = &mut self.project.rig.constraints;
                 let mut changed = false;
                 changed |= ui
@@ -4730,6 +4818,15 @@ impl VistaForgeApp {
             )
             .small(),
         );
+        if self.project.rig.exact_path {
+            ui.label(
+                egui::RichText::new(
+                    "Suivi exact actif : le profil ne modifie pas la vitesse de position, seulement le roulis et la visée. Décochez le suivi exact pour retrouver l'inertie (les courbes de comparaison utilisent déjà l'inertie).",
+                )
+                .size(10.0)
+                .color(egui::Color32::from_rgb(255, 196, 110)),
+            );
+        }
         if self
             .anim_profile_cache
             .as_ref()

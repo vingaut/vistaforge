@@ -190,8 +190,11 @@ La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
 Design/Caméra et **Timeline**. `Espace` fait la même chose ; `F1` ouvre l'aide.
 La durée étire les clés en temps par défaut (case **Étirer les clés avec la
 durée**) : le tracé occupe tout le clip. Décochez-la pour garder des temps
-absolus. Un bandeau signale quand le profil est trop loin derrière le tracé et
-propose d'allonger la durée, de mettre l'ease à 0 ou de passer en Manuel.
+absolus. Le suivi **exact** est actif par défaut (case **Suivre exactement le
+tracé**) : la caméra est sur la courbe aux temps des clés et la vitesse
+correspond à distance/durée. Décochez-le pour retrouver l'inertie du profil ;
+un bandeau signale alors l'écart et propose d'allonger la durée ou de passer en
+Manuel.
 
 Le CLI expose les deux modèles :
 

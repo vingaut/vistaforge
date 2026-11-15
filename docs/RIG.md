@@ -26,6 +26,12 @@ Le tout est déterministe : à seed et temps égaux, la caméra est identique.
 | `fighter` | 90 | 40 | 60 | 30 | 85° | haute énergie, jerk 140 |
 | `manual` | 200 | 200 | 200 | 200 | 0° | suit la courbe sans ressort |
 
+Par défaut, le rig est en **suivi exact** (`exact_path = true`) : l'œil est
+exactement sur la courbe et le temps des clés fait foi. Le profil physique
+(ressort, traînée, évitement) est optionnel ; décochez **Suivre exactement le
+tracé** pour l'activer. L'échantillonnage du chemin se fait par **longueur
+d'arc**, donc à `ease = 0` la vitesse est constante à l'intérieur d'un segment.
+
 Le corps suit la courbe par un **ressort critique** ; l'accélération demandée
 est projetée sur les axes avant / latéral / vertical, bornée par le preset,
 puis limitée en jerk. L'écart entre la courbe et le corps est le « lag »

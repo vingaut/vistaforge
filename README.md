@@ -55,8 +55,9 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   tracé Bézier éditable au clic, au gizmo X/Y/Z, par **glisser libre** ou au numérique,
   point de vue matérialisé dans le viewport, **timeline + graph editor** avec barres de
   segment (distance · durée · vitesse), édition des clés en **secondes ou en images**,
-  **timing par segment** et actions « temps par distance » / « vitesse cible », durée
-  étirée avec les clés, lecture **en vue design** ou caméra, profils de vol avec
+  **timing par segment** et actions « temps par distance » / « vitesse cible »,
+  échantillonnage par longueur d'arc et **suivi exact** (vitesse = distance/temps),
+  inertie du profil optionnelle, lecture **en vue design** ou caméra, profils de vol avec
   comparaison, cibles **Fixe / Avance / Décalage rigide / Retard / Tracé / Manuel**
   et copie-synchronisation du tracé de l'œil, export PNG/MP4 et **trajectoire seule**
   (`.vfcam`, GLB caméra, CSV) réimportable dans Blender et VistaForge. Voir
@@ -77,7 +78,7 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 226 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 227 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|

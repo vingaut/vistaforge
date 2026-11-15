@@ -245,7 +245,10 @@ impl<'a> RigSimulation<'a> {
         let desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
         let target_tau = match self.rig.target.mode {
             TargetMode::Fixed | TargetMode::Path => 0.0,
-            TargetMode::EyeAhead | TargetMode::Manual => {
+            // A rigid offset link must not lag, otherwise it is a second
+            // spring target and the offset is not what the user authored.
+            TargetMode::Offset => f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2,
+            TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Manual => {
                 0.06 + f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2
                     + f64::from(self.rig.body.look_lag.clamp(0.0, 2.0)) * 0.5
             }
@@ -405,7 +408,13 @@ impl<'a> RigSimulation<'a> {
     }
 
     fn current_sample(&self) -> RigSample {
-        let target = self.target_pos + DVec3::from_array(self.rig.target.offset);
+        // A fixed target is an absolute point; `offset` is a link parameter
+        // for the moving-target modes and would silently shift it otherwise.
+        let target = if self.rig.target.mode == TargetMode::Fixed {
+            self.target_pos
+        } else {
+            self.target_pos + DVec3::from_array(self.rig.target.offset)
+        };
         let mut forward = (target - self.cam_pos).normalize_or_zero();
         if forward.length_squared() < 0.5 {
             forward = DVec3::Y;
@@ -683,10 +692,17 @@ fn initial_target(rig: &CameraRig, eye: DVec3) -> DVec3 {
     sample_target(rig, 0.0, eye, velocity)
 }
 
-fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DVec3 {
+/// Aim point for the authored target, before `TargetRig::offset` is added.
+/// Public so the design overlay uses exactly the same aim as the simulation.
+pub fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DVec3 {
     match rig.target.mode {
         TargetMode::Fixed => DVec3::from_array(rig.target.fixed),
         TargetMode::Path => sample_path(&rig.target.path, t),
+        TargetMode::Offset => eye,
+        TargetMode::Trail => {
+            let delay = f64::from(rig.target.lead_s.clamp(0.0, 5.0));
+            sample_path(&rig.eye, (f64::from(t) - delay).max(0.0) as f32)
+        }
         TargetMode::EyeAhead => {
             let speed = velocity.length();
             let direction = if speed > 0.05 {
@@ -778,6 +794,101 @@ fn auto_handles(keys: &[vf_core::PathKey], index: usize) -> ([f64; 3], [f64; 3])
     let m0 = (p1 - prev) * 0.5;
     let m1 = (next - p0) * 0.5;
     ((m0 / 3.0).to_array(), (-m1 / 3.0).to_array())
+}
+
+/// One authored segment with its measured curve length and speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathSegment {
+    pub index: usize,
+    pub start_time_s: f32,
+    pub end_time_s: f32,
+    pub length_m: f64,
+    pub average_speed_mps: f32,
+}
+
+impl PathSegment {
+    pub fn duration_s(self) -> f32 {
+        (self.end_time_s - self.start_time_s).max(0.0)
+    }
+}
+
+/// Measure each key-to-key segment on the actual Bezier curve. This is what
+/// the timing panel shows: distance, duration, frames and average speed. The
+/// numbers are sampled (64 steps per segment), so they include the effect of
+/// automatic handles and ease.
+pub fn path_segments(path: &Path3D) -> Vec<PathSegment> {
+    if path.keys.len() < 2 {
+        return Vec::new();
+    }
+    let mut segments = Vec::with_capacity(path.keys.len() - 1);
+    for index in 0..path.keys.len() - 1 {
+        let start = path.keys[index].time_s;
+        let end = path.keys[index + 1].time_s.max(start + 1e-5);
+        let mut previous = sample_path(path, start);
+        let mut length = 0.0;
+        const STEPS: usize = 64;
+        for step in 1..=STEPS {
+            let t = start + (end - start) * step as f32 / STEPS as f32;
+            let point = sample_path(path, t);
+            length += (point - previous).length();
+            previous = point;
+        }
+        let duration = (end - start).max(1e-5);
+        segments.push(PathSegment {
+            index,
+            start_time_s: start,
+            end_time_s: end,
+            length_m: length,
+            average_speed_mps: (length / f64::from(duration)) as f32,
+        });
+    }
+    segments
+}
+
+/// Re-time keys so each segment duration is proportional to its curve length.
+/// The first key stays at 0 and the last key lands exactly on `duration_s`;
+/// positions and handles are untouched. Returns false for fewer than two keys.
+pub fn retime_path_by_distance(path: &mut Path3D, duration_s: f32) -> bool {
+    if path.keys.len() < 2 {
+        return false;
+    }
+    let duration = duration_s.clamp(0.1, 600.0);
+    let lengths: Vec<f64> = path_segments(path)
+        .into_iter()
+        .map(|segment| segment.length_m.max(1e-6))
+        .collect();
+    let total: f64 = lengths.iter().sum();
+    let mut cumulative = 0.0;
+    path.keys[0].time_s = 0.0;
+    for index in 0..lengths.len() {
+        cumulative += lengths[index];
+        let fraction = if total > 0.0 {
+            cumulative / total
+        } else {
+            (index + 1) as f64 / lengths.len() as f64
+        };
+        path.keys[index + 1].time_s = (duration as f64 * fraction) as f32;
+    }
+    if let Some(last) = path.keys.last_mut() {
+        last.time_s = duration;
+    }
+    true
+}
+
+/// Re-time keys at a constant average speed. Returns the resulting duration,
+/// or `None` for fewer than two keys or an invalid speed.
+pub fn retime_path_to_speed(path: &mut Path3D, speed_mps: f32) -> Option<f32> {
+    if path.keys.len() < 2 || !speed_mps.is_finite() || speed_mps <= 0.01 {
+        return None;
+    }
+    let lengths: Vec<f64> = path_segments(path)
+        .into_iter()
+        .map(|segment| segment.length_m.max(1e-6))
+        .collect();
+    let total: f64 = lengths.iter().sum();
+    let duration = (total / f64::from(speed_mps)).clamp(0.1, 600.0) as f32;
+    retime_path_by_distance(path, duration);
+    Some(duration)
 }
 
 /// Approximate authored path length, metres.
@@ -1065,6 +1176,73 @@ mod tests {
         assert!(a.body.accel_forward_mps2 > b.body.accel_forward_mps2);
         assert!(a.body.max_bank_deg > b.body.max_bank_deg);
         assert_eq!(a.body.preset, AircraftPreset::FighterJet);
+    }
+
+    #[test]
+    fn distance_retime_makes_segment_speeds_equal() {
+        let mut path = Path3D {
+            keys: vec![
+                vf_core::PathKey::new(0.0, [0.0, 0.0, 0.0]),
+                vf_core::PathKey::new(10.0, [100.0, 0.0, 0.0]),
+                vf_core::PathKey::new(20.0, [400.0, 0.0, 0.0]),
+            ],
+            closed: false,
+        };
+        assert!(retime_path_by_distance(&mut path, 20.0));
+        let segments = path_segments(&path);
+        assert_eq!(segments.len(), 2);
+        let first = segments[0].average_speed_mps;
+        let second = segments[1].average_speed_mps;
+        assert!((first - second).abs() < 0.5, "{first} vs {second}");
+        assert!((path.keys.last().unwrap().time_s - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn target_retime_to_speed_updates_duration() {
+        let mut path = Path3D {
+            keys: vec![
+                vf_core::PathKey::new(0.0, [0.0, 0.0, 0.0]),
+                vf_core::PathKey::new(5.0, [100.0, 0.0, 0.0]),
+                vf_core::PathKey::new(10.0, [300.0, 0.0, 0.0]),
+            ],
+            closed: false,
+        };
+        let duration = retime_path_to_speed(&mut path, 10.0).unwrap();
+        assert!((duration - 30.0).abs() < 1.0, "{duration}");
+        assert!((path.keys[1].time_s - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn offset_and_trail_targets_follow_the_eye() {
+        let hf = field();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 500.0]),
+            vf_core::PathKey::new(10.0, [200.0, 0.0, 500.0]),
+        ];
+        rig.duration_s = 10.0;
+        rig.constraints.enabled = false;
+        rig.target.mode = TargetMode::Offset;
+        rig.target.offset = [0.0, 200.0, 0.0];
+        rig.target.smoothing = 0.0;
+        let offset = sample_rig(&rig, &hf, Seed::new(1), 5.0).unwrap();
+        assert!(
+            (offset.target - (offset.eye + DVec3::new(0.0, 200.0, 0.0))).length() < 1.0,
+            "offset target {:?} eye {:?}",
+            offset.target,
+            offset.eye
+        );
+        rig.target.mode = TargetMode::Trail;
+        rig.target.offset = [0.0; 3];
+        rig.target.lead_s = 2.0;
+        rig.target.smoothing = 0.0;
+        let trail = sample_rig(&rig, &hf, Seed::new(1), 8.0).unwrap();
+        let past = sample_path(&rig.eye, 6.0);
+        assert!(
+            (trail.target - past).length() < 2.0,
+            "{:?} vs {past:?}",
+            trail.target
+        );
     }
 
     #[test]

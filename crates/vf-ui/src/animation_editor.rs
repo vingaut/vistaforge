@@ -9,7 +9,7 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use glam::DVec3;
 use vf_core::{Camera, CameraRig, HeightField, PathKey, TargetMode};
-use vf_flight::rig::{RigSample, path_derivative, sample_path};
+use vf_flight::rig::{RigSample, path_derivative, sample_path, sample_target};
 
 use crate::animation_ui::{
     AnimSelection, ComparisonTrail, pick_terrain, preset_color, screen_ray, world_to_screen,
@@ -657,22 +657,8 @@ fn draw_time_markers(
 }
 
 fn current_target(rig: &CameraRig, eye: DVec3, time: f32) -> Option<DVec3> {
-    Some(match rig.target.mode {
-        TargetMode::Fixed => DVec3::from_array(rig.target.fixed),
-        TargetMode::Path => sample_path(&rig.target.path, time),
-        TargetMode::EyeAhead => {
-            let velocity = path_derivative(&rig.eye, time);
-            eye + velocity * f64::from(rig.target.lead_s)
-        }
-        TargetMode::Manual => {
-            let velocity = path_derivative(&rig.eye, time);
-            if velocity.length_squared() > 0.01 {
-                eye + velocity.normalize() * 500.0
-            } else {
-                eye + DVec3::new(0.0, 400.0, -100.0)
-            }
-        }
-    })
+    let velocity = path_derivative(&rig.eye, time);
+    Some(sample_target(rig, time, eye, velocity) + DVec3::from_array(rig.target.offset))
 }
 
 fn draw_keys(

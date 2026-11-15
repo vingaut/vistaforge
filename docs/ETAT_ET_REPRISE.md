@@ -5,7 +5,89 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 17:52** (lot terminé, binaires Linux publiés, dépôt poussé).
+Dernière mise à jour : **2026-11-15 21:20** (keyframing, timing par segment et liens caméra/cible).
+
+---
+
+## 0sexdecies. Session du 15 novembre — keyframing, vitesse et liens caméra/cible (livré)
+
+> **État : lot terminé, à compiler/publier après validation.** Le suivi caméra
+> du lot précédent est conservé ; cette session ajoute le contrôle du timing et
+> des liens caméra/cible.
+
+### Demande
+
+1. La caméra suit la trajectoire, mais la **vitesse ne correspond pas** au
+   nombre d'images et à la distance entre les clés.
+2. Le **keyframing est peu intuitif** : proposer une édition du tracé caméra et
+   cible inspirée des outils existants, avec plusieurs façons de les lier.
+3. **Conserver le mode Avance**, qui plaît.
+
+### Livré
+
+#### Vitesse et images
+
+- **Tableau de timing par segment** dans l'onglet Réglages : longueur réelle de
+  la courbe, durée, vitesse moyenne, nombre d'images. La vitesse dépasse la
+  vitesse max du profil ? Elle passe en rouge.
+- **Barres de segment dans la timeline** : chaque segment affiche
+  `distance · durée · vitesse`, avec le même avertissement de vitesse.
+- **Temps des clés en secondes ou en images** dans le panneau de la clé
+  sélectionnée.
+- **Répartir les temps par distance** : à durée constante, les durées de
+  segment deviennent proportionnelles aux longueurs ; les vitesses moyennes
+  s'égalisent.
+- **Vitesse cible** : `0 = croisière du profil`, sinon vitesse imposée ; les
+  temps et la durée du clip sont recalculés.
+- **Ease 0** : vitesse constante à l'intérieur de chaque segment.
+- Le simulateur démarre à la vitesse du tracé, compense la traînée et la durée
+  conseillée garde 15 % de marge (correctif du lot précédent).
+
+#### Keyframing caméra/cible
+
+- **Cible Fixe**, **Avance** (conservé), **Décalage rigide** (offset monde
+  constant, sans retard), **Retard** (regard arrière à N secondes), **Tracé
+  animé**, **Manuel**.
+- **Copier le tracé de l'œil** vers la cible, **Copier + décalage**, et
+  **Synchroniser les temps** des clés cible sur l'œil.
+- Timeline : losanges éditables, double-clic pour insérer, clic droit pour
+  supprimer, zoom, segment bars.
+- Le panneau de clé garde le gizmo, le glisser libre et les valeurs numériques,
+  et ajoute l'édition du temps en images.
+- L'overlay de la cible utilise désormais exactement le même calcul que la
+  simulation, offset inclus.
+
+#### Documentation
+
+- `ANIMATION.md` : tableau des modes de cible, timing par segment, images.
+- Capture `docs/screenshots/animation_timing.png`.
+- Aide contextuelle mise à jour.
+
+### Validation
+
+- `cargo test --workspace` : **226 tests verts**.
+- `clippy -D warnings` propre, `cargo fmt` appliqué.
+- Capture UI avec le tableau de timing et les barres de segment.
+- Tests ajoutés : répartition par distance, vitesse cible, cible Offset,
+  cible Trail, suivi caméra à durée conseillée.
+
+### Limites / suite
+
+- Les poignées Bézier restent éditables numériquement, pas encore par drag
+  dans le viewport.
+- Le mode Trail utilise le tracé authored de l'œil, pas l'historique exact de
+  la simulation.
+- On peut ajouter ensuite : édition des poignées au viewport, insertion d'une
+  clé par double-clic sur la courbe, et contraintes de cible « orbite autour
+  d'un point » / « regarde le sol ».
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+```
 
 ---
 

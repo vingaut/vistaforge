@@ -10,7 +10,7 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use vf_core::{CameraRig, PathKey, TargetMode};
-use vf_flight::rig::{path_derivative, sample_path};
+use vf_flight::rig::{path_derivative, path_segments, sample_path};
 
 use crate::animation_ui::AnimSelection;
 
@@ -785,6 +785,8 @@ fn draw_timeline(
                 TargetMode::Path => "Cible",
                 TargetMode::Fixed => "Cible fixe",
                 TargetMode::EyeAhead => "Cible avance",
+                TargetMode::Offset => "Cible décalée",
+                TargetMode::Trail => "Cible retard",
                 TargetMode::Manual => "Cible manuelle",
             }
         } else {
@@ -797,6 +799,60 @@ fn draw_timeline(
             egui::FontId::proportional(11.0),
             if target { TARGET_COLOR } else { EYE_COLOR },
         );
+    }
+
+    // Segment bars: distance, duration and warning when the requested speed
+    // exceeds the body limit. This is the timing information that the key
+    // diamonds alone cannot show.
+    for (target, row) in row_rects(rect, state, rig) {
+        let path = if target {
+            if rig.target.mode == TargetMode::Path {
+                &rig.target.path
+            } else {
+                continue;
+            }
+        } else {
+            &rig.eye
+        };
+        let segments = path_segments(path);
+        for segment in &segments {
+            let x0 = time_to_x(segment.start_time_s);
+            let x1 = time_to_x(segment.end_time_s);
+            let bar = Rect::from_min_max(
+                Pos2::new(x0 + 2.0, row.top() + 5.0),
+                Pos2::new((x1 - 2.0).max(x0 + 3.0), row.bottom() - 5.0),
+            );
+            if bar.width() < 4.0 {
+                continue;
+            }
+            let too_fast = segment.average_speed_mps > rig.body.max_speed_mps + 0.5;
+            let fill = if too_fast {
+                Color32::from_rgba_unmultiplied(180, 78, 50, 90)
+            } else if target {
+                Color32::from_rgba_unmultiplied(90, 68, 36, 70)
+            } else {
+                Color32::from_rgba_unmultiplied(34, 72, 96, 70)
+            };
+            painter.rect_filled(bar, 3.0, fill);
+            if bar.width() > 74.0 {
+                painter.text(
+                    bar.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!(
+                        "{:.0} m · {:.1}s · {:.0} m/s",
+                        segment.length_m,
+                        segment.duration_s(),
+                        segment.average_speed_mps
+                    ),
+                    egui::FontId::monospace(8.0),
+                    if too_fast {
+                        Color32::from_rgb(255, 180, 140)
+                    } else {
+                        Color32::from_rgb(175, 198, 215)
+                    },
+                );
+            }
+        }
     }
 
     // Duration end.
@@ -1072,7 +1128,10 @@ fn channel_value(
             let point = match rig.target.mode {
                 TargetMode::Fixed => glam::DVec3::from_array(rig.target.fixed),
                 TargetMode::Path => sample_path(&rig.target.path, time),
-                TargetMode::EyeAhead | TargetMode::Manual => return None,
+                TargetMode::EyeAhead
+                | TargetMode::Offset
+                | TargetMode::Trail
+                | TargetMode::Manual => return None,
             };
             Some(match channel {
                 Channel::TargetX => point.x as f32,

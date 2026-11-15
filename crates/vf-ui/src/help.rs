@@ -141,7 +141,7 @@ impl HelpTopic {
                 "Le tracé cyan est la trajectoire de l'œil. Les clés E0, E1… portent chacune un temps et une position 3D ; la courbe passe par toutes."
             }
             Self::Target => {
-                "La cible orange matérialise ce que la caméra regarde. Elle n'existe que dans la vue design de l'espace Animation : elle n'apparaît jamais dans le rendu."
+                "La cible orange matérialise ce que la caméra regarde. Elle n'existe que dans la vue design : fixe, en avance, en décalage rigide, en retard ou sur son propre tracé. Ces modes changent le lien caméra/cible, pas la trajectoire de l'œil."
             }
             Self::Timing => {
                 "La durée, les images/s et le nombre d'images déterminent la longueur du clip. La durée ne dilate pas le tracé : elle change la vitesse à laquelle on le parcourt."
@@ -233,8 +233,10 @@ impl HelpTopic {
             ],
             Self::Target => &[
                 "Fixe : un point immobile, utile pour un plan large ou une orbite.",
-                "Tracé animé : une seconde courbe, avec ses propres clés T0, T1…",
                 "Avance : la caméra regarde devant elle (lead et lissage réglables).",
+                "Décalage : la cible reste à un offset monde constant de l'œil (liaison rigide, sans retard).",
+                "Retard : la cible vise l'œil tel qu'il était il y a N secondes (regard arrière).",
+                "Tracé animé : une seconde courbe, avec ses propres clés T0, T1… Copier l'œil ou synchroniser les temps crée un lien éditable.",
                 "Manuel : la caméra suit son axe, sans cible matérialisée.",
             ],
             Self::Timing => &[
@@ -1063,6 +1065,8 @@ fn target_mode_label(mode: TargetMode) -> &'static str {
         TargetMode::Fixed => "Fixe",
         TargetMode::Path => "Tracé animé",
         TargetMode::EyeAhead => "Avance",
+        TargetMode::Offset => "Décalage",
+        TargetMode::Trail => "Retard",
         TargetMode::Manual => "Manuel",
     }
 }

@@ -410,6 +410,7 @@ struct VistaForgeApp {
     anim_curve_cache: Option<(u64, timeline::Curves)>,
     anim_io_path: String,
     anim_stretch_keys: bool,
+    anim_target_speed: f32,
 
     files_status: String,
     files_import_path: String,
@@ -545,6 +546,7 @@ impl VistaForgeApp {
             anim_curve_cache: None,
             anim_io_path: "anim-out/flyover.glb".into(),
             anim_stretch_keys: true,
+            anim_target_speed: 0.0,
             files_status:
                 "Import/export GeoTIFF, ASCII, DEM, heightmap PNG/JPEG, Blender GLB et animations."
                     .into(),
@@ -3399,8 +3401,10 @@ impl VistaForgeApp {
                 .show_ui(ui, |ui| {
                     for candidate in [
                         TargetMode::Fixed,
-                        TargetMode::Path,
                         TargetMode::EyeAhead,
+                        TargetMode::Offset,
+                        TargetMode::Trail,
+                        TargetMode::Path,
                         TargetMode::Manual,
                     ] {
                         ui.selectable_value(&mut mode, candidate, target_mode_label(candidate));
@@ -3423,6 +3427,16 @@ impl VistaForgeApp {
                     self.project.rig.target.fixed = self.terrain_center_point();
                 }
             }
+            if mode == TargetMode::Offset {
+                self.project.rig.target.smoothing = 0.0;
+                if self.project.rig.target.offset == [0.0; 3] {
+                    self.project.rig.target.offset = [0.0, 350.0, -80.0];
+                }
+            }
+            if mode == TargetMode::Trail && self.project.rig.target.lead_s < 0.05 {
+                self.project.rig.target.lead_s = 0.8;
+            }
+            self.anim_edit_target = false;
             self.anim_editor.selection = None;
             self.mark_animation_changed();
         }
@@ -3457,6 +3471,51 @@ impl VistaForgeApp {
                     .small()
                     .weak(),
                 );
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Copier le tracé de l'œil")
+                        .on_hover_text("Duplique les clés de l'œil, sans décalage.")
+                        .clicked()
+                    {
+                        self.copy_eye_path_to_target([0.0; 3]);
+                    }
+                    if ui
+                        .button("Copier + décalage")
+                        .on_hover_text(
+                            "Duplique les clés de l'œil en ajoutant le décalage de la cible.",
+                        )
+                        .clicked()
+                    {
+                        let offset = self.project.rig.target.offset;
+                        self.copy_eye_path_to_target(offset);
+                    }
+                    if self.project.rig.target.path.keys.len() == self.project.rig.eye.keys.len()
+                        && ui
+                            .button("Synchroniser les temps")
+                            .on_hover_text("Copie les temps des clés de l'œil sur la cible.")
+                            .clicked()
+                        && self.sync_target_times()
+                    {
+                        self.mark_animation_changed();
+                        self.rig_status = "Temps de la cible synchronisés sur l'œil".into();
+                    }
+                });
+                let mut changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Décalage");
+                    for axis in 0..3 {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.project.rig.target.offset[axis])
+                                    .speed(10.0)
+                                    .prefix(["X ", "Y ", "Z "][axis]),
+                            )
+                            .changed();
+                    }
+                });
+                if changed {
+                    self.mark_animation_changed();
+                }
             }
             TargetMode::EyeAhead => {
                 let mut changed = param_f32(
@@ -3479,6 +3538,82 @@ impl VistaForgeApp {
                     0.0,
                     1.0,
                     0.35,
+                );
+                if changed {
+                    self.mark_animation_changed();
+                }
+            }
+            TargetMode::Offset => {
+                ui.label(
+                    egui::RichText::new(
+                        "Liaison rigide : la cible reste à un décalage monde constant de l'œil.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                let mut changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Décalage");
+                    for axis in 0..3 {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.project.rig.target.offset[axis])
+                                    .speed(10.0)
+                                    .prefix(["X ", "Y ", "Z "][axis]),
+                            )
+                            .changed();
+                    }
+                });
+                changed |= param_f32(
+                    ui,
+                    "Lissage visée",
+                    "",
+                    &mut self.project.rig.target.smoothing,
+                    0.0,
+                    1.0,
+                    0.2,
+                );
+                if changed {
+                    self.mark_animation_changed();
+                }
+            }
+            TargetMode::Trail => {
+                ui.label(
+                    egui::RichText::new(
+                        "Regard arrière : la cible vise l'œil tel qu'il était il y a N secondes.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                let mut changed = param_f32(
+                    ui,
+                    "Retard",
+                    "s",
+                    &mut self.project.rig.target.lead_s,
+                    0.0,
+                    5.0,
+                    0.8,
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Décalage");
+                    for axis in 0..3 {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.project.rig.target.offset[axis])
+                                    .speed(10.0)
+                                    .prefix(["X ", "Y ", "Z "][axis]),
+                            )
+                            .changed();
+                    }
+                });
+                changed |= param_f32(
+                    ui,
+                    "Lissage visée",
+                    "",
+                    &mut self.project.rig.target.smoothing,
+                    0.0,
+                    1.0,
+                    0.25,
                 );
                 if changed {
                     self.mark_animation_changed();
@@ -3658,6 +3793,7 @@ impl VistaForgeApp {
         }
 
         let mut changed = false;
+        let fps_keys = self.project.rig.fps.max(1) as f32;
         match self.anim_editor.selection {
             Some(animation_ui::AnimSelection::EyeKey(index))
                 if !editing_target && index < self.project.rig.eye.keys.len() =>
@@ -3669,9 +3805,26 @@ impl VistaForgeApp {
                             .add(
                                 egui::DragValue::new(&mut key.time_s)
                                     .speed(0.02)
-                                    .range(0.0..=600.0),
+                                    .range(0.0..=600.0)
+                                    .suffix(" s"),
                             )
                             .changed();
+                        let mut frame = (key.time_s * fps_keys).round() as i64;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut frame)
+                                    .speed(1.0)
+                                    .range(0..=(600.0 * fps_keys) as i64)
+                                    .prefix("image "),
+                            )
+                            .on_hover_text(
+                                "Temps exprimé en images ; modifier synchronise les secondes.",
+                            )
+                            .changed()
+                        {
+                            key.time_s = (frame as f32 / fps_keys).clamp(0.0, 600.0);
+                            changed = true;
+                        }
                     });
                     ui.horizontal_wrapped(|ui| {
                         for axis in 0..3 {
@@ -3684,7 +3837,7 @@ impl VistaForgeApp {
                                 .changed();
                         }
                     });
-                    changed |= param_f32(ui, "Adoucissement", "", &mut key.ease, 0.0, 1.0, 0.5);
+                    changed |= param_f32(ui, "Adoucissement", "", &mut key.ease, 0.0, 1.0, 0.0);
                     if ui.button("Poignées automatiques").clicked() {
                         key.in_handle = [0.0; 3];
                         key.out_handle = [0.0; 3];
@@ -3710,9 +3863,23 @@ impl VistaForgeApp {
                             .add(
                                 egui::DragValue::new(&mut key.time_s)
                                     .speed(0.02)
-                                    .range(0.0..=600.0),
+                                    .range(0.0..=600.0)
+                                    .suffix(" s"),
                             )
                             .changed();
+                        let mut frame = (key.time_s * fps_keys).round() as i64;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut frame)
+                                    .speed(1.0)
+                                    .range(0..=(600.0 * fps_keys) as i64)
+                                    .prefix("image "),
+                            )
+                            .changed()
+                        {
+                            key.time_s = (frame as f32 / fps_keys).clamp(0.0, 600.0);
+                            changed = true;
+                        }
                     });
                     ui.horizontal_wrapped(|ui| {
                         for axis in 0..3 {
@@ -3725,6 +3892,7 @@ impl VistaForgeApp {
                                 .changed();
                         }
                     });
+                    changed |= param_f32(ui, "Adoucissement", "", &mut key.ease, 0.0, 1.0, 0.0);
                 }
                 if changed {
                     self.project
@@ -4032,6 +4200,83 @@ impl VistaForgeApp {
         }
     }
 
+    /// Replace the target path with a copy of the eye path, optionally
+    /// offset in world space. This is the quickest way to create a linked
+    /// "camera + target" pair while keeping both editable.
+    fn copy_eye_path_to_target(&mut self, offset: [f64; 3]) {
+        self.project.rig.target.mode = TargetMode::Path;
+        // Keep the offset in `TargetRig::offset` instead of baking it into the
+        // keys: the renderer already adds that offset, and baking it would
+        // apply it twice. The target path remains an exact copy of the eye
+        // path and stays editable on its own.
+        self.project.rig.target.path.keys = self.project.rig.eye.keys.clone();
+        self.project.rig.target.offset = offset;
+        self.anim_edit_target = true;
+        self.anim_editor.selection = None;
+        self.mark_animation_changed();
+        self.rig_status = "Cible : copie du tracé de l'œil".into();
+    }
+
+    /// Copy the eye key times onto the target path when both have the same
+    /// number of keys. This keeps a target path linked to the camera timing.
+    fn sync_target_times(&mut self) -> bool {
+        if self.project.rig.target.mode != TargetMode::Path
+            || self.project.rig.target.path.keys.len() != self.project.rig.eye.keys.len()
+        {
+            return false;
+        }
+        let mut changed = false;
+        for index in 0..self.project.rig.eye.keys.len() {
+            let time = self.project.rig.eye.keys[index].time_s;
+            let target = &mut self.project.rig.target.path.keys[index];
+            if (target.time_s - time).abs() > 1e-5 {
+                target.time_s = time;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn retime_animation_by_distance(&mut self) {
+        let duration = self.project.rig.duration_s;
+        let mut rig = self.project.rig.clone();
+        if vf_flight::rig::retime_path_by_distance(&mut rig.eye, duration) {
+            self.project.rig.eye = rig.eye;
+            self.project.rig.duration_s = duration;
+            let synced = self.sync_target_times();
+            self.mark_animation_changed();
+            self.rig_status = format!(
+                "Temps répartis par distance sur {duration:.2}s{}",
+                if synced {
+                    " · cible synchronisée"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    fn retime_animation_to_speed(&mut self, speed_mps: f32) {
+        let mut rig = self.project.rig.clone();
+        if let Some(duration) = vf_flight::rig::retime_path_to_speed(&mut rig.eye, speed_mps) {
+            self.project.rig.eye = rig.eye;
+            self.project.rig.duration_s = duration;
+            let synced = self.sync_target_times();
+            self.rig_time = self.rig_time.min(duration);
+            self.mark_animation_changed();
+            self.rig_status = format!(
+                "Vitesse cible {speed_mps:.1} m/s · durée {duration:.2}s{}",
+                if synced {
+                    " · cible synchronisée"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            self.rig_status = "Vitesse cible invalide".into();
+        }
+    }
+
     /// Change the clip duration. When `stretch` is enabled (the default), the
     /// authored key times are scaled to fill the new clip, so the camera keeps
     /// following the whole curve instead of reaching the last key early and
@@ -4177,6 +4422,127 @@ impl VistaForgeApp {
             self.rig_time = self.rig_time.min(self.project.rig.duration_s);
             self.mark_animation_changed();
         }
+
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Timing par segment")
+                .strong()
+                .size(13.0),
+        )
+        .on_hover_text(
+            "Distance réelle de la courbe, durée entre les clés, vitesse moyenne et nombre d'images.",
+        );
+        let segments = vf_flight::rig::path_segments(&self.project.rig.eye);
+        if segments.is_empty() {
+            ui.label(
+                egui::RichText::new("Ajoutez au moins deux clés.")
+                    .small()
+                    .weak(),
+            );
+        } else {
+            let max_speed = self.project.rig.body.max_speed_mps;
+            let fps = self.project.rig.fps.max(1) as f32;
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("anim-segment-grid")
+                        .num_columns(5)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for header in ["Segment", "Longueur", "Durée", "Vitesse", "Images"] {
+                                ui.label(egui::RichText::new(header).small().strong());
+                            }
+                            ui.end_row();
+                            for segment in &segments {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "E{}→E{}",
+                                        segment.index,
+                                        segment.index + 1
+                                    ))
+                                    .monospace()
+                                    .size(10.0),
+                                );
+                                ui.label(format!("{:.0} m", segment.length_m));
+                                ui.label(format!("{:.2} s", segment.duration_s()));
+                                let speed = segment.average_speed_mps;
+                                ui.label(egui::RichText::new(format!("{speed:.1} m/s")).color(
+                                    if speed > max_speed + 0.5 {
+                                        egui::Color32::from_rgb(255, 150, 110)
+                                    } else {
+                                        egui::Color32::from_rgb(170, 210, 180)
+                                    },
+                                ));
+                                ui.label(format!("{:.0}", (segment.duration_s() * fps).round()));
+                                ui.end_row();
+                            }
+                        });
+                });
+            let total: f64 = segments.iter().map(|segment| segment.length_m).sum();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Total {:.0} m · {:.2}s · {} images",
+                    total,
+                    self.project.rig.duration_s,
+                    self.project.rig.frame_count()
+                ))
+                .small()
+                .weak(),
+            );
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Répartir les temps par distance")
+                .on_hover_text(
+                    "Rend la vitesse moyenne identique sur chaque segment, à durée totale constante.",
+                )
+                .clicked()
+            {
+                self.retime_animation_by_distance();
+            }
+            ui.label("Vitesse cible");
+            ui.add(
+                egui::DragValue::new(&mut self.anim_target_speed)
+                    .speed(0.5)
+                    .range(0.0..=200.0)
+                    .suffix(" m/s"),
+            )
+            .on_hover_text("0 = vitesse de croisière du profil.");
+            if ui.button("Appliquer la vitesse").clicked() {
+                let speed = if self.anim_target_speed > 0.1 {
+                    self.anim_target_speed
+                } else {
+                    vf_flight::rig::cruise_speed_mps(&self.project.rig.body)
+                };
+                self.retime_animation_to_speed(speed);
+            }
+            if ui
+                .button("Ease 0")
+                .on_hover_text("Vitesse constante à l'intérieur de chaque segment.")
+                .clicked()
+            {
+                self.flatten_key_easing();
+            }
+            if self.project.rig.target.mode == TargetMode::Path
+                && self.project.rig.target.path.keys.len() == self.project.rig.eye.keys.len()
+                && ui
+                    .button("Synchroniser les temps cible")
+                    .on_hover_text("Copie les temps des clés de l'œil sur la cible.")
+                    .clicked()
+                && self.sync_target_times()
+            {
+                self.mark_animation_changed();
+                self.rig_status = "Temps de la cible synchronisés sur l'œil".into();
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Une vitesse rouge dépasse la vitesse max du profil : allongez la durée ou choisissez un autre profil.",
+            )
+            .small()
+            .weak(),
+        );
 
         let header = egui::CollapsingHeader::new("Optique et caméra")
             .default_open(true)
@@ -7483,6 +7849,8 @@ fn target_mode_label(mode: TargetMode) -> &'static str {
         TargetMode::Fixed => "Fixe",
         TargetMode::EyeAhead => "Avance",
         TargetMode::Path => "Tracé animé",
+        TargetMode::Offset => "Décalage",
+        TargetMode::Trail => "Retard",
         TargetMode::Manual => "Manuel",
     }
 }

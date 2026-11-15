@@ -131,6 +131,10 @@ pub enum TargetMode {
     EyeAhead,
     /// A second authored path.
     Path,
+    /// Follow the eye with a fixed world-space offset (rigid link).
+    Offset,
+    /// Look at where the eye was `lead_s` seconds ago (trailing target).
+    Trail,
     /// Aim along the camera's own axis (manual orientation).
     Manual,
 }
@@ -142,7 +146,8 @@ pub struct TargetRig {
     pub mode: TargetMode,
     pub fixed: [f64; 3],
     pub path: Path3D,
-    /// Look-ahead in seconds for [`TargetMode::EyeAhead`].
+    /// Look-ahead for [`TargetMode::EyeAhead`], delay for
+    /// [`TargetMode::Trail`], seconds.
     pub lead_s: f32,
     /// Offset added to the aim point, metres.
     pub offset: [f64; 3],

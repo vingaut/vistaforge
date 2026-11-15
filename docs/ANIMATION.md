@@ -91,12 +91,20 @@ La cible peut être :
 |---|---|
 | **Fixe** | Un point immobile, utile pour un plan large ou une orbite. |
 | **Tracé animé** | Une seconde courbe avec ses clés `T0`, `T1`… |
-| **Avance** | La caméra regarde devant elle ; `lead` et lissage réglables. |
+| **Avance** | La caméra regarde devant elle ; `lead` et lissage réglables. **Mode conservé et recommandé pour un survol.** |
+| **Décalage** | Liaison rigide : la cible reste à un offset monde constant de l'œil (X/Y/Z). |
+| **Retard** | La cible vise l'œil tel qu'il était il y a N secondes (regard arrière, révélation). |
 | **Manuel** | La caméra suit son axe, sans cible matérialisée. |
 
 Le viewport de conception dessine le **viseur** du point de vue (tronc de
 frustum depuis l'œil vers la cible) et la ligne œil → cible. Le rendu utilise
-exactement la caméra échantillonnée à `t`, sans ces overlays.
+exactement la caméra échantillonnée à `t`, sans ces overlays. L'overlay utilise
+désormais le même calcul de cible que la simulation (offset inclus).
+
+Pour un tracé cible, deux boutons créent un lien éditable :
+**Copier le tracé de l'œil** (même courbe, offset nul) et **Copier + décalage**
+(même courbe, offset monde). **Synchroniser les temps** copie les temps des
+clés de l'œil sur celles de la cible.
 
 ## 2. Réglages
 
@@ -198,6 +206,36 @@ l'addon `bridge/blender/vistaforge_io.py` qui sélectionne la caméra, remplace 
 caméra statique et règle `fps`/plage d'images. L'addon sait aussi réexporter la
 caméra et l'empty cible vers `.vfcam` pour revenir dans VistaForge. Détails :
 [`FICHIERS.md`](FICHIERS.md).
+
+### Timing par segment et vitesse
+
+![Timing par segment, vitesse et images](screenshots/animation_timing.png)
+
+L'onglet **Réglages** affiche un tableau par segment `E0→E1`, `E1→E2`… :
+
+| Segment | Longueur | Durée | Vitesse | Images |
+|---|---|---|---|---|
+| E0→E1 | 312 m | 6,20 s | 50,3 m/s | 149 |
+
+La longueur est mesurée sur la **courbe réelle** (handles automatiques et ease
+compris), pas sur la distance entre clés. Une vitesse supérieure à la vitesse
+max du profil est affichée en rouge.
+
+Trois actions :
+
+- **Répartir les temps par distance** : à durée totale constante, chaque
+  segment reçoit une durée proportionnelle à sa longueur. Les vitesses
+  moyennes deviennent égales.
+- **Vitesse cible** : saisissez une vitesse (0 = croisière du profil) puis
+  **Appliquer la vitesse**. Les temps sont recalculés et la durée du clip est
+  mise à jour en conséquence.
+- **Synchroniser les temps cible** : recopie les temps de l'œil sur la cible.
+
+Dans la **Timeline**, chaque segment est dessiné comme une barre avec
+`longueur · durée · vitesse` ; les segments trop rapides passent en orange.
+Cliquer-glisser un losange change le temps de la clé, double-cliquer insère une
+clé, le clic droit supprime. Le panneau de la clé sélectionnée permet de saisir
+son temps en **secondes ou en images**.
 
 ### Suivi du tracé
 

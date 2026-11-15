@@ -53,10 +53,12 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   (Poisson/SOR) pour des parois verticales continues.
 - **Animation de caméra (Vol et Animation fusionnés)** : un seul espace, quatre étapes —
   tracé Bézier éditable au clic, au gizmo X/Y/Z, par **glisser libre** ou au numérique,
-  point de vue matérialisé dans le viewport de conception, **timeline + graph editor**
-  (canaux X/Y/Z, vitesse, roulis), keyframing, durée indépendante des clés, lecture
-  **en vue design** ou caméra, profils de vol drone/oiseau/hélicoptère/dirigeable/chasseur/
-  manuel avec comparaison des trajectoires, export PNG/MP4 et **trajectoire seule**
+  point de vue matérialisé dans le viewport, **timeline + graph editor** avec barres de
+  segment (distance · durée · vitesse), édition des clés en **secondes ou en images**,
+  **timing par segment** et actions « temps par distance » / « vitesse cible », durée
+  étirée avec les clés, lecture **en vue design** ou caméra, profils de vol avec
+  comparaison, cibles **Fixe / Avance / Décalage rigide / Retard / Tracé / Manuel**
+  et copie-synchronisation du tracé de l'œil, export PNG/MP4 et **trajectoire seule**
   (`.vfcam`, GLB caméra, CSV) réimportable dans Blender et VistaForge. Voir
   [`docs/ANIMATION.md`](docs/ANIMATION.md), [`docs/RIG.md`](docs/RIG.md) et
   [`docs/FICHIERS.md`](docs/FICHIERS.md).
@@ -75,7 +77,7 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 223 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 226 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|

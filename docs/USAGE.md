@@ -179,6 +179,12 @@ L'espace **Animation** réunit ce que l'ancienne version séparait en **Vol** et
    sans quitter l'orbite) ou vue caméra, rendu d'une image et export de la
    séquence PNG.
 
+Les **Réglages** affichent maintenant le timing segment par segment
+(longueur réelle, durée, vitesse, images) avec deux actions : répartir les temps
+par distance et appliquer une vitesse cible. Le panneau cible propose **Fixe**,
+**Avance** (conservé), **Décalage rigide**, **Retard**, **Tracé animé** et
+**Manuel**, avec copie/synchronisation du tracé de l'œil.
+
 La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
 `Lire`, curseur de temps, image précédente/suivante, boucle, bascule
 Design/Caméra et **Timeline**. `Espace` fait la même chose ; `F1` ouvre l'aide.

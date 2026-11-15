@@ -5,16 +5,22 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 17:30** (sculpture fine, animation, timeline, fichiers/DEM/Blender — lot terminé, commit `21aad3c`).
+Dernière mise à jour : **2026-11-15 17:52** (lot terminé, binaires Linux publiés, dépôt poussé).
 
 ---
 
 ## 0quindecies. Session du 15 novembre — sculpture fine, animation, fichiers et Blender (livré)
 
-> **État : lot terminé.** Le WIP « terrasses basaltiques » ci-dessous a été
-> repris, complété et intégré. Workspace compilé, **219 tests verts**,
+> **État : lot terminé et poussé.** Le WIP « terrasses basaltiques » ci-dessous
+> a été repris, complété et intégré. Workspace compilé, **219 tests verts**,
 > `clippy -D warnings` propre, `cargo fmt` appliqué, captures UI et validation
 > Blender 5.3 effectuées.
+>
+> **Git** : `origin/master` = `bb3ab21` sur
+> <https://github.com/vingaut/vistaforge>. Commits du lot : `21aad3c`
+> (code/docs), `859104a` (doc de reprise), `bb3ab21` (binaires). Les exécutables
+> Linux x86_64 `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
+> `dist/linux-x86_64/` avec `SHA256SUMS`.
 
 ### Demande initiale
 

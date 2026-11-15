@@ -123,7 +123,14 @@ cargo run --release -p vf-app
 
 # Serveur MCP
 cargo run --release -p vf-mcp -- --workspace .
+
+# Depuis un clone, avec le binaire publié :
+chmod +x dist/linux-x86_64/vistaforge-mcp
+./dist/linux-x86_64/vistaforge-mcp --workspace ~/VistaForge
 ```
+
+Guide pas à pas pour un autre système et la configuration des clients :
+[`docs/MCP.md`](docs/MCP.md).
 
 L'interface utilise wgpu par défaut (Vulkan sous Linux/Windows) pour son viewport 3D.
 Sur une machine sans pilote compatible, lancer `VISTAFORGE_RENDERER=glow cargo run --release -p vf-app`
@@ -165,6 +172,7 @@ le CLI et le MCP partagent le même noyau que l'interface.
 | Fichier | Contenu |
 |---|---|
 | [`docs/USAGE.md`](docs/USAGE.md) | CLI, rendu, projets, MCP, interface, limites |
+| [`docs/MCP.md`](docs/MCP.md) | installer le MCP depuis un clone, config Claude/Cursor/VS Code, workspace |
 | [`docs/MODIFICATEURS.md`](docs/MODIFICATEURS.md) | les 27 modificateurs, paramètres, CLI/UI/MCP |
 | [`docs/QUALITE_ECARTS.md`](docs/QUALITE_ECARTS.md) | analyse des écarts, plan qualité, essais négatifs |
 | [`docs/ETAT_ET_REPRISE.md`](docs/ETAT_ET_REPRISE.md) | état du projet et reprise |

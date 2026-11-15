@@ -425,6 +425,10 @@ Exemple de configuration client :
 }
 ```
 
+Guide complet pour un clone sur un autre système (Linux précompilé, macOS,
+Windows, Claude Desktop, Claude Code, Cursor, VS Code, Inspector) :
+[`MCP.md`](MCP.md).
+
 Outils exposés :
 
 | Outil | Rôle |

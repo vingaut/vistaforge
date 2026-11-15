@@ -600,9 +600,7 @@ impl DetailSettings {
             if !self.focus_size_m.is_finite() || !(8.0..=5000.0).contains(&self.focus_size_m) {
                 return Err("detail focus size must be in 8..=5000 metres".into());
             }
-            if !self.focus_spacing_m.is_finite()
-                || !(0.02..=50.0).contains(&self.focus_spacing_m)
-            {
+            if !self.focus_spacing_m.is_finite() || !(0.02..=50.0).contains(&self.focus_spacing_m) {
                 return Err("detail focus spacing must be in 0.02..=50 metres".into());
             }
             if !self.focus_center[0].is_finite() || !self.focus_center[1].is_finite() {

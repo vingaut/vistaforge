@@ -30,6 +30,16 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Scène** : caméra look-at/orbite, ciel crépusculaire avec étoiles, canyon creusé,
   soleil (azimut boussole 0 = sud, 90 = ouest), palettes
   alpine/désert/volcanique/côtier/canyon/lunaire/île, brume, exposition, contraste, saturation.
+- **Navigation CAO** : gizmo d'orientation à trois axes dans le viewport (cube cliquable
+  face/arrière/gauche/droite/dessus/dessous, triade X/Y/Z), retour à la vue par défaut
+  d'un clic, double-clic ou raccourcis `1` face, `2` dessus, `3` droite, `0`/`Home` défaut.
+- **Viewport 3D GPU** : rendu interactif wgpu — **Vulkan** sous Linux/Windows, Metal sur macOS —
+  avec ciel, relief ombré, eau et brouillard. La caméra et le zoom restent à 60 fps ;
+  le rendu final déterministe reste sur le rasteriseur CPU. Repli `VISTAFORGE_RENDERER=glow`
+  et bascule dans le panneau **Rendu**.
+- **Aperçu adaptatif** : pendant une interaction, l'aperçu CPU descend jusqu'à 25 % de sa
+  résolution, puis se raffine progressivement (50 → 75 → 100 %) dès que la main s'arrête.
+  La résolution cible est apprise du temps de rendu mesuré (budget ~45 ms).
 - **Rendu CPU déterministe** : rasterisation tuilée multi-thread, z-buffer, PCF 5×5, AO
   multi-échelle à courbe HBAO, ombres 4096 en qualité High, parois verticales (`cliffs`), ciel
   dégradé + soleil + nuages 2.5D, eau avec Fresnel et écume, brume, tone mapping ACES,
@@ -40,25 +50,30 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   `fast` / `refined` / `photoreal`. Voir [`docs/MONDE.md`](docs/MONDE.md).
 - **Falaises** : pass `cliffs` (ladder de hauteurs à poids lissé) et modificateur `recast_cliff`
   (Poisson/SOR) pour des parois verticales continues.
-- **Vol** : caméra FPV/hélicoptère déterministe (gîte physique, inertie, secousses),
-  trajectoires orbite/circuit/crête/piqué, séquences PNG avec flou de mouvement 180°.
-- **Rig caméra** : point de vue Bézier éditable, cible fixe/avance/courbe, caméra
-  rigide ou ressort, FOV/DOF/roulis, presets drone/oiseau/hélicoptère/dirigeable/chasseur/
-  manuel avec accélérations par axe, jerk, roulis en virage, contrainte de hauteur,
-  sol de référence et évitement des parois par champ de distance. Éditeur graphique dans
-  l'espace **Animation**. Voir [`docs/RIG.md`](docs/RIG.md).
+- **Animation de caméra (Vol et Animation fusionnés)** : un seul espace, quatre étapes —
+  tracé Bézier éditable au clic et au gizmo X/Y/Z, point de vue matérialisé dans le viewport
+  de conception, durée/fps/optique, profils de vol drone/oiseau/hélicoptère/dirigeable/
+  chasseur/manuel avec comparaison des trajectoires, barre de lecture toujours accessible
+  et export PNG. Séquences au flou de mouvement 180° via le CLI. Voir
+  [`docs/ANIMATION.md`](docs/ANIMATION.md) et [`docs/RIG.md`](docs/RIG.md).
+- **Aide contextuelle** : une fiche tutorielle s'ouvre dans le viewport au survol d'un
+  espace, d'un panneau ou d'un réglage, avec une capture annotée et l'effet attendu sur la
+  scène d'exemple. 25 fiches, sommaire, épinglage, `F1`. Voir [`docs/AIDE.md`](docs/AIDE.md).
 - **Formats** : `.vfproj` (ZIP + RON + heightmap f32, schéma **v6**), PNG, ESRI ASCII Grid, DEM.
 - **Bridge Blender** : export GLB (maillage détaillé, UV0 planaire + UV1 atlas de boîte,
   couleurs de sommets, 7 matériaux, caméra, soleil), sidecar JSON, textures cuites
   (albédo, normale, masques, heightfield 16 bits), script d'import, Smart UV/remesh optionnels
   et rendu Cycles/OptiX headless. Voir [`docs/BLENDER.md`](docs/BLENDER.md).
-- **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app`, serveur MCP stdio `vistaforge-mcp`
-  (29 outils, confirmation des chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 152 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
+  aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
+  chemins au workspace, aperçus renvoyés en image MCP).
+- **Qualité** : 188 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|
-| Bureau `egui` | ![Interface VistaForge](docs/screenshots/gui.png) |
+| Bureau `egui`, tracé, barre de lecture et aide contextuelle | ![Interface VistaForge](docs/screenshots/gui.png) |
+| Tracé éditable, cible et gizmo X/Y/Z | ![Tracé](docs/screenshots/animation_path.png) |
+| Comparaison des profils de vol sur le même tracé | ![Profils](docs/screenshots/animation_profile.png) |
 | Canyon, falaises et strates | ![Canyon](docs/screenshots/canyon_cliffs.png) |
 | Patagonie, tours verticales | ![Patagonie](docs/screenshots/patagonia.png) |
 | Crépuscule étoilé | ![Crépuscule](docs/screenshots/dusk.png) |
@@ -85,6 +100,10 @@ cargo run --release -p vf-app
 # Serveur MCP
 cargo run --release -p vf-mcp -- --workspace .
 ```
+
+L'interface utilise wgpu par défaut (Vulkan sous Linux/Windows) pour son viewport 3D.
+Sur une machine sans pilote compatible, lancer `VISTAFORGE_RENDERER=glow cargo run --release -p vf-app`
+revient au rendu OpenGL et à l'aperçu CPU ; le rendu final reste identique.
 
 Le CLI accepte aussi `terrain import` (DEM/ASCII), `terrain rock` (géologie sur un DEM),
 `terrain resample`, `terrain smooth`, `terrain modifier ...`, `terrain sculpt`,
@@ -129,6 +148,7 @@ le CLI et le MCP partagent le même noyau que l'interface.
 | [`docs/RIG.md`](docs/RIG.md) | rig caméra, presets de dynamique, contraintes, CLI |
 | [`docs/MONDE.md`](docs/MONDE.md) | tailles, tuilage, seamless, modes de rendu, évitement |
 | [`docs/BLENDER.md`](docs/BLENDER.md) | bridge Blender, GLB, textures cuites, rendu Cycles |
+| [`docs/GPU.md`](docs/GPU.md) | viewport wgpu/Vulkan, aperçu GPU, limites |
 | [`docs/BUILD.md`](docs/BUILD.md) | build Ubuntu/Windows, release, dépannage |
 | [`docs/PLAN_ADDITIONS.md`](docs/PLAN_ADDITIONS.md) | audit 2026, veille, modèle géologique, module de vol, UI en barres |
 

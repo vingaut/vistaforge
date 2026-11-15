@@ -13,6 +13,8 @@ sudo apt update
 sudo apt install -y build-essential curl
 # Bibliothèques d'exécution de l'interface (présentes sur un bureau standard) :
 sudo apt install -y libxkbcommon0 libwayland-client0 libgl1 libegl1
+# Viewport GPU (facultatif mais recommandé) : chargeur + pilote Vulkan.
+sudo apt install -y libvulkan1 mesa-vulkan-drivers
 ```
 
 Installer rustup si nécessaire : <https://rustup.rs/>.
@@ -65,12 +67,14 @@ Sous Windows, les binaires sont dans `target\release\` avec l'extension
 
 ## Architecture matérielle
 
-- **Rendu** : CPU déterministe, multi-thread via `rayon`. Aucun GPU requis.
-  Un terrain 1026² en 1920×1080 qualité haute se rend en quelques secondes sur
-  un CPU de bureau.
-- **Interface** : `eframe`/`egui` avec le backend OpenGL (`glow`). Un pilote
-  OpenGL 3.3+ est nécessaire pour la fenêtre ; le CLI et le MCP fonctionnent
-  sans affichage.
+- **Rendu final** : CPU déterministe, multi-thread via `rayon`. Aucun GPU n'est
+  requis pour exporter une image. Un terrain 1026² en 1920×1080 qualité haute se
+  rend en quelques secondes sur un CPU de bureau.
+- **Interface** : `eframe`/`egui` avec wgpu par défaut (Vulkan sous Linux/Windows,
+  Metal sur macOS, DX12 en repli). Un pilote Vulkan/OpenGL 3.3+ est nécessaire
+  pour la fenêtre. La vue 3D interactive utilise le GPU quand un adaptateur est
+  disponible ; sinon, `VISTAFORGE_RENDERER=glow` force OpenGL et l'aperçu CPU.
+  Le CLI et le MCP fonctionnent sans affichage.
 - **MCP** : transport stdio, JSON-RPC 2.0, aucun accès réseau.
 
 ## CI
@@ -83,7 +87,9 @@ Ubuntu 24.04 et Windows à chaque push et pull request.
 | Symptôme | Cause probable / remède |
 |---|---|
 | `failed to initialize any backend` au lancement de l'UI | Pas de session graphique ; utiliser le CLI ou le MCP, ou lancer depuis un bureau. |
+| Erreur wgpu/Vulkan au lancement de l'UI | Pilote absent ou trop ancien ; installer `libvulkan1` + `mesa-vulkan-drivers`, mettre à jour le pilote, ou lancer avec `VISTAFORGE_RENDERER=glow`. |
 | Erreur OpenGL au lancement de l'UI | Pilote OpenGL absent ; installer `libgl1`/`libegl1` ou utiliser le rendu CPU via le CLI. |
+| Viewport GPU indisponible dans le panneau Rendu | L'application tourne en mode glow, ou la création wgpu a échoué ; le message exact est affiché. |
 | `cargo` télécharge une toolchain | Normal : `rust-toolchain.toml` épingle 1.99.1. |
 | Tests corpus ignorés | `re/unpacked/` absent ; comportement attendu. |
 | Rendu très lent en debug | Utiliser `--release` : le renderer est optimisé pour la release. |

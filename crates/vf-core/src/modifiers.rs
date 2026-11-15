@@ -408,7 +408,14 @@ const UNDERCUT: &[ParamSpec] = &[
     p("depth_m", "Creux", "m", 0.0, 20.0, 2.0),
     p("band_m", "Épaisseur des bancs", "m", 2.0, 200.0, 25.0),
     p("height_m", "Hauteur de la niche", "m", 1.0, 50.0, 5.0),
-    p("spacing_m", "Espacement des contreforts", "m", 5.0, 300.0, 40.0),
+    p(
+        "spacing_m",
+        "Espacement des contreforts",
+        "m",
+        5.0,
+        300.0,
+        40.0,
+    ),
     p("angle_deg", "Orientation", "°", 0.0, 360.0, 90.0),
     p("sharpness", "Netteté", "", 0.0, 1.0, 0.55),
 ];

@@ -156,30 +156,49 @@ Le pass **falaises** (`cliffs`, activé par défaut) façonne les faces raides e
 parois verticales avant la génération du maillage. Il s'applique au terrain
 affiché, pas au fichier ; `--no-cliffs` rend le terrain brut.
 
-## Vol et animation
+## Animation
 
-Le module de vol simule une caméra de drone FPV ou d'hélicoptère le long d'une
-trajectoire générée sur le terrain. La gîte vient de l'accélération
-centripète réelle, l'attitude est lissée, et des secousses déterministes
-ajoutent le grain du vol.
+L'espace **Animation** réunit ce que l'ancienne version séparait en **Vol** et
+**Animation**. Un seul parcours, en quatre étapes :
+
+1. **Tracé** — dessinez le point de vue au clic sur le terrain (mode Tracer,
+   altitude réglable), sélectionnez une clé puis tirez les flèches X/Y/Z.
+   La cible est matérialisée dans le viewport de conception uniquement.
+2. **Réglages** — durée, images/s, nombre d'images, FOV, profondeur de champ,
+   roulis, liaison caméra et contraintes sol/parois. Un encadré indique la
+   vitesse demandée par rapport à la croisière du profil et propose une durée
+   conseillée.
+3. **Profil** — cartes drone / oiseau / hélicoptère / dirigeable / chasse /
+   manuel, caractère du corps, courbes vitesse et roulis comparées, trajectoires
+   superposées et bouton **Tracé de démonstration (S)** pour comparer en
+   quelques secondes. Le profil change la dynamique, pas le tracé.
+4. **Lecture** — timeline, lecture/pause, boucle, vitesse, vue design ou vue
+   caméra, rendu d'une image et export de la séquence PNG.
+
+La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
+`Lire`, curseur de temps, image précédente/suivante, boucle et bascule
+Design/Caméra. `Espace` fait la même chose ; `F1` ouvre l'aide.
+
+Le CLI expose les deux modèles :
 
 ```bash
-# Une image fixe du vol, à t = 2 s
-vistaforge anim still scene.vfproj frame.png \
-  --preset cinematic --time 2 --width 1920 --height 1080
+# Rig édité dans l'UI : une image ou une séquence
+vistaforge rig info scene.vfproj
+vistaforge anim still scene.vfproj frame.png --time 2 --width 1920 --height 1080
+vistaforge anim render scene.vfproj frames/ --fps 24 --width 1280 --height 720
 
-# Une séquence PNG de 4 s à 12 images/s, avec flou de mouvement à 180°
-vistaforge anim render scene.vfproj frames/ \
-  --preset cinematic --seconds 4 --fps 12 \
-  --width 1280 --height 720 --shutter 180 --blur-samples 4
-
-# Encodage MP4 si ffmpeg est installé (sinon la commande à lancer est affichée)
-vistaforge anim render scene.vfproj frames/ --video vol.mp4
+# Ancien modèle de vol par trajectoires générées (toujours disponible en CLI)
+vistaforge anim render scene.vfproj frames/ --preset cinematic --seconds 4 \
+  --fps 12 --shutter 180 --blur-samples 4 --video vol.mp4
 ```
 
-Presets : `cinelifter`, `freestyle`, `racing`, `helicopter`, `cinematic`,
-`dive`. Trajectoires : orbite, circuit, crête, piqué. `--shutter 180` accumule
-4 sous-images par frame : c'est un vrai flou de mouvement, pas un filtre.
+Presets de l'ancien modèle : `cinelifter`, `freestyle`, `racing`,
+`helicopter`, `cinematic`, `dive`. Trajectoires : orbite, circuit, crête,
+piqué. `--shutter 180` accumule 4 sous-images par frame : c'est un vrai flou de
+mouvement, pas un filtre.
+
+Détails du modèle de rig : [`RIG.md`](RIG.md). Parcours UI et captures :
+[`ANIMATION.md`](ANIMATION.md).
 
 ## Projets `.vfproj`
 
@@ -206,7 +225,7 @@ vistaforge scene preset scene.vfproj desert --out desert.vfproj
 
 Le format préserve les réglages de caméra, soleil, palette, eau, nuages,
 brume, rendu et **pile de modificateurs**. Le schéma courant est **v6** ; la
-migration accepte v1→v5 (les champs absents prennent leur valeur par défaut).
+migration accepte v1→v6 (les champs absents prennent leur valeur par défaut).
 
 ## DEM legacy
 
@@ -265,19 +284,72 @@ Détails, contenu du dossier et limites : [`BLENDER.md`](BLENDER.md).
 
 `vistaforge-app [projet.vfproj]` ouvre :
 
-- un **viewport** 3D avec orbite à la souris et zoom à la molette ;
-- une **barre de fonctions** : Terrain, Modificateurs, Roche, Érosion, Eau,
-  Matières, Lumière, Caméra, Vol, Rendu. Chaque famille ouvre un panneau
-  latéral ;
+- un **viewport** 3D avec orbite à la souris, zoom à la molette et gizmo CAO ;
+- une **barre de fonctions** : Terrain, Modificateurs, Roche, Détail, Sculpter,
+  Animation, Érosion, Eau, Matières, Lumière, Caméra, Rendu. Chaque famille
+  ouvre un panneau latéral ; **Animation** contient le tracé, la caméra et le
+  vol, sans onglet Vol séparé ;
 - des lignes de réglage uniformes : libellé, slider, valeur numérique éditable
   (double-clic pour revenir au défaut) ;
 - le panneau **Modificateurs** (pile, paramètres générés, cuisson) ;
-- le panneau **Vol** avec presets, trajectoire, dynamique et aperçu à un temps
-  donné.
+- l'espace **Animation** avec ses quatre onglets Tracé / Réglages / Profil /
+  Lecture, le gizmo de tracé, le viseur du point de vue et la barre de lecture ;
+- l'**aide contextuelle** dans le viewport : survolez un espace, une section ou
+  un réglage, la fiche correspondante s'ouvre avec une capture annotée ;
+- le panneau **Rendu** avec la bascule viewport GPU, les contrôles d'aperçu
+  adaptatif et le rendu final.
 
-Les modifications déclenchent un aperçu 960×540 débouncé ; le bouton
-**Render** produit l'image finale. **Open/Save** utilisent le chemin affiché.
-La séquence de vol complète se rend en CLI (`anim render`).
+### Navigation 3D et gizmo
+
+Le gizmo d'orientation, en haut à droite du viewport, reprend la disposition
+d'une triade CAO :
+
+- le **cube** est solidaire de la caméra ; les faces `FACE`, `DOS`, `GAUCHE`,
+  `DROITE`, `HAUT`, `BAS` sont cliquables (seules les faces visibles le sont) ;
+- les **axes X/Y/Z** (rouge/vert/bleu) et leurs extrémités négatives sont
+  cliquables : un clic place l'œil sur cet axe et cadre le terrain ;
+- le bouton **Défaut** (maison) revient à la vue d'ensemble en perspective ;
+- un **double-clic** dans le viewport fait la même chose que le bouton Défaut ;
+- raccourcis clavier : `1` face, `2` dessus, `3` droite, `0` ou `Home` défaut.
+
+Les vues restent des caméras perspective (le rasteriseur CPU n'a pas de
+projection orthographique), mais l'œil est exactement sur l'axe et le cadrage
+couvre le terrain. Le panneau **Caméra** expose les mêmes vues en boutons, les
+angles yaw/pitch, la distance et le FOV. Le gizmo peut être masqué par la case
+**Gizmo d'orientation**.
+
+### Aperçu adaptatif et viewport GPU
+
+Deux chemins d'affichage coexistent, sans changer le rendu final :
+
+1. **Viewport GPU (wgpu)** — quand un adaptateur est disponible, le viewport
+   est dessiné en temps réel par le GPU (Vulkan sous Linux/Windows, Metal sur
+   macOS). Un maillage du heightfield (jusqu'à 1024 segments par côté) est
+   construit avec la pile de modificateurs et le pass falaises, puis éclairé
+   par le soleil, l'eau et le brouillard. C'est le mode par défaut.
+2. **Aperçu CPU adaptatif** — si le GPU est indisponible, désactivé dans le
+   panneau **Rendu**, ou si l'on force `VISTAFORGE_RENDERER=glow`, l'aperçu
+   est rendu sur le CPU. Sa résolution part de 25–50 % de 960×540 pendant
+   l'interaction, puis se raffine (≈ 50 → 75 → 100 %) après ~200 ms
+   d'inactivité. L'échelle interactive est réapprise à partir du temps de
+   rendu mesuré pour viser ~45 ms par passe. Le HUD et le panneau **Rendu**
+   affichent la résolution et le temps de la dernière passe.
+
+Le bouton **Render** lance toujours le rendu final CPU déterministe, à la
+résolution de sortie. Une fois terminé, son image remplace le viewport ;
+le prochain mouvement de caméra ou changement de scène rebascule sur la vue
+GPU. Le bouton **Revenir à la vue GPU** (panneau Rendu) le fait immédiatement.
+
+Le viewport GPU est volontairement plus léger que le rendu final : pas
+d'ombres portées, d'AO, de nuages, de détail de roche ni de post-traitement.
+La pile de modificateurs, les falaises, l'eau, le soleil, la palette et
+l'exposition sont appliqués. Voir [`GPU.md`](GPU.md) pour l'architecture et
+les limites.
+
+En cas d'absence de pilote wgpu, lancer l'interface avec
+`VISTAFORGE_RENDERER=glow` : le rendu CPU et l'aperçu adaptatif restent
+disponibles. **Open/Save** utilisent le chemin affiché. La séquence de vol
+complète se rend en CLI (`anim render`).
 
 ## Serveur MCP
 
@@ -322,17 +394,18 @@ sans interrompre la session.
 
 - Même projet + même seed + même version ⇒ mêmes hauteurs et mêmes masques.
 - RNG SplitMix64 interne, aucun `thread_rng`.
-- Le rendu CPU ne dépend ni du GPU ni de l'ordre des threads.
+- Le rendu CPU ne dépend ni du GPU ni de l'ordre des threads ; le viewport GPU
+  est un aperçu interactif et n'intervient jamais dans l'image exportée.
 - Les seeds dérivés sont nommés : `seed.derive("erosion")`, `"render"`, etc.
 
 ## Limites de la version 0.2
 
-- Vol par trajectoires générées (orbite, circuit, crête, piqué) ; pas encore de
-  waypoints libres ni de script `.SCR`.
-- Pas de bridge Blender/glTF.
+- Animation : le tracé est un chemin Bézier par clés ; les poignées manuelles
+  ne sont pas encore éditables dans le viewport. L'ancien modèle de vol par
+  trajectoires générées reste disponible en CLI mais n'a plus d'onglet dédié.
 - Pas de végétation instanciée ni d'ombres de nuages volumétriques.
 - Le rendu est un rasteriseur CPU : pas de path tracing.
-- Pas d'undo/redo ; l'UI reste compacte.
+- Undo/redo limité au sculpteur ; pas d'historique global du projet.
 - Surplombs et arches impossibles en heightfield : le pass `cliffs` produit des
   parois verticales, pas des surplombs. Le modificateur `recast_cliff` lisse la
   paroi mais reste un heightfield.

@@ -97,7 +97,8 @@ impl WorldSettings {
         if !(2..=4096).contains(&self.blend_cells) {
             return Err("world blend_cells must be in 2..=4096".into());
         }
-        if !self.macro_variation_m.is_finite() || !(0.0..=2000.0).contains(&self.macro_variation_m) {
+        if !self.macro_variation_m.is_finite() || !(0.0..=2000.0).contains(&self.macro_variation_m)
+        {
             return Err("world macro variation must be in 0..=2000 metres".into());
         }
         if !self.macro_scale_m.is_finite() || !(50.0..=100_000.0).contains(&self.macro_scale_m) {

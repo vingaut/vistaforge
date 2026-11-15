@@ -39,10 +39,15 @@ impl Default for PathKey {
 
 impl PathKey {
     pub fn new(time_s: f32, position: [f64; 3]) -> Self {
+        // Zero handles mean "automatic": `vf_flight::rig::sample_path` derives
+        // a smooth Catmull-Rom tangent from the neighbours. The old ±300 m
+        // default made every key traced by the user overshoot wildly.
         Self {
             time_s,
             position,
-            ..Self::default()
+            in_handle: [0.0; 3],
+            out_handle: [0.0; 3],
+            ease: 0.5,
         }
     }
 
@@ -299,7 +304,7 @@ impl MotionProfile {
             accel_lateral_mps2: 30.0,
             accel_vertical_mps2: 20.0,
             jerk_mps3: 60.0,
-            drag: 0.12,
+            drag: 0.10,
             gravity: 0.0,
             bank_gain: 1.0,
             max_bank_deg: 75.0,
@@ -318,7 +323,7 @@ impl MotionProfile {
                 profile.accel_lateral_mps2 = 12.0;
                 profile.accel_vertical_mps2 = 10.0;
                 profile.jerk_mps3 = 28.0;
-                profile.drag = 0.22;
+                profile.drag = 0.16;
                 profile.gravity = 9.81;
                 profile.bank_gain = 0.9;
                 profile.max_bank_deg = 55.0;
@@ -332,7 +337,7 @@ impl MotionProfile {
                 profile.accel_lateral_mps2 = 6.0;
                 profile.accel_vertical_mps2 = 5.0;
                 profile.jerk_mps3 = 12.0;
-                profile.drag = 0.3;
+                profile.drag = 0.16;
                 profile.bank_gain = 0.55;
                 profile.max_bank_deg = 25.0;
                 profile.roll_response = 4.0;
@@ -346,7 +351,7 @@ impl MotionProfile {
                 profile.accel_lateral_mps2 = 1.5;
                 profile.accel_vertical_mps2 = 1.0;
                 profile.jerk_mps3 = 3.0;
-                profile.drag = 0.45;
+                profile.drag = 0.08;
                 profile.bank_gain = 0.25;
                 profile.max_bank_deg = 8.0;
                 profile.roll_response = 2.0;
@@ -360,7 +365,7 @@ impl MotionProfile {
                 profile.accel_lateral_mps2 = 60.0;
                 profile.accel_vertical_mps2 = 30.0;
                 profile.jerk_mps3 = 140.0;
-                profile.drag = 0.05;
+                profile.drag = 0.04;
                 profile.bank_gain = 1.1;
                 profile.max_bank_deg = 85.0;
                 profile.roll_response = 16.0;
@@ -595,6 +600,14 @@ mod tests {
         let mut path = Path3D::default();
         path.keys[0].time_s = 5.0;
         assert!(path.validate().is_err());
+    }
+
+    #[test]
+    fn new_keys_use_automatic_handles() {
+        let key = PathKey::new(2.0, [10.0, 20.0, 30.0]);
+        assert_eq!(key.in_handle, [0.0; 3]);
+        assert_eq!(key.out_handle, [0.0; 3]);
+        assert_eq!(PathKey::default().out_handle[0], 300.0);
     }
 
     #[test]

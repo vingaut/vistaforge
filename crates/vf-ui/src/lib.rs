@@ -5,23 +5,37 @@
 //! the UI stays responsive; changes trigger a debounced low-resolution preview.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+mod animation_editor;
+mod animation_ui;
+mod gpu_view;
+mod help;
+mod view_gizmo;
+
 use eframe::egui;
+use glam::DVec3;
 use vf_core::{
-    AircraftPreset, CameraLink, ClassicParams, ErosionParams, HeightField, ModifierKind, Palette,
-    PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
+    AircraftPreset, Camera, CameraLink, ClassicParams, ErosionParams, HeightField, ModifierKind,
+    Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
 };
 use vf_io::RgbaImage;
 use vf_render::{RenderOptions, RenderOutput, render_with_options};
 use vf_terrain::HillshadeParams;
-use vf_terrain::brush::{
-    Brush, BrushMode, BrushShape, BrushUndo, Falloff, Stroke, Symmetry,
-};
+use vf_terrain::brush::{Brush, BrushMode, BrushShape, BrushUndo, Falloff, Stroke, Symmetry};
 
 const PREVIEW_SIZE: (u32, u32) = (960, 540);
-const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(350);
+/// Target duration of the quick interactive pass. The scale is learned from
+/// the previous render so the preview adapts to the machine and the terrain.
+const PREVIEW_TARGET_MS: f32 = 45.0;
+const PREVIEW_FIRST_DELAY: Duration = Duration::from_millis(30);
+const PREVIEW_SETTLE_DELAY: Duration = Duration::from_millis(200);
+const PREVIEW_REFINE_DELAY: Duration = Duration::from_millis(180);
+const MIN_PREVIEW_SCALE: f32 = 0.25;
+const MAX_INTERACTIVE_SCALE: f32 = 0.8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workspace {
@@ -30,32 +44,37 @@ enum Workspace {
     Rock,
     Detail,
     Sculpt,
-    Rig,
+    Animation,
     Erosion,
     Water,
     Materials,
     Light,
     Camera,
-    Flight,
     Render,
 }
 
 impl Workspace {
-    const ALL: [Workspace; 13] = [
+    const ALL: [Workspace; 12] = [
         Self::Terrain,
         Self::Modifiers,
         Self::Rock,
         Self::Detail,
         Self::Sculpt,
-        Self::Rig,
+        Self::Animation,
         Self::Erosion,
         Self::Water,
         Self::Materials,
         Self::Light,
         Self::Camera,
-        Self::Flight,
         Self::Render,
     ];
+
+    fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|workspace| workspace.label().to_ascii_lowercase() == normalized)
+    }
 
     fn label(self) -> &'static str {
         match self {
@@ -64,13 +83,12 @@ impl Workspace {
             Self::Rock => "Roche",
             Self::Detail => "Détail",
             Self::Sculpt => "Sculpter",
-            Self::Rig => "Animation",
+            Self::Animation => "Animation",
             Self::Erosion => "Érosion",
             Self::Water => "Eau",
             Self::Materials => "Matières",
             Self::Light => "Lumière",
             Self::Camera => "Caméra",
-            Self::Flight => "Vol",
             Self::Render => "Rendu",
         }
     }
@@ -95,14 +113,185 @@ struct RenderTask {
     receiver: Receiver<std::result::Result<RenderOutput, String>>,
     started: Instant,
     full: bool,
+    /// Project revision captured when the task was queued. A result whose
+    /// revision no longer matches is shown only as a transient interactive
+    /// preview (never applied as a final render).
+    revision: u64,
+    scale: f32,
+}
+
+enum AnimationExportMsg {
+    Progress {
+        done: usize,
+        total: usize,
+    },
+    Finished {
+        written: usize,
+        total: usize,
+        elapsed: Duration,
+    },
+    Cancelled,
+    Failed(String),
+}
+
+struct AnimationExportTask {
+    receiver: Receiver<AnimationExportMsg>,
+    cancel: Arc<AtomicBool>,
+    started: Instant,
+    total: usize,
+    done: usize,
+}
+
+/// Offscreen documentation capture. Enabled with `VISTAFORGE_CAPTURE=DIR`:
+/// the application walks a built-in tour, waits for each preview and writes a
+/// PNG per step. It is a development tool; normal launches ignore it.
+#[derive(Debug, Clone, Copy)]
+struct CaptureStep {
+    name: &'static str,
+    workspace: Workspace,
+    anim_tab: animation_ui::AnimTab,
+    help: Option<help::HelpTopic>,
+    design: bool,
+    compare: bool,
+    select_key: bool,
+}
+
+struct CaptureState {
+    dir: PathBuf,
+    steps: Vec<CaptureStep>,
+    index: usize,
+    frame: u32,
+    requested: bool,
+    wait_after_request: u32,
+}
+
+impl CaptureState {
+    fn new(dir: PathBuf) -> Self {
+        use animation_ui::AnimTab;
+        use help::HelpTopic;
+        let mut steps = vec![
+            CaptureStep {
+                name: "animation_path",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Path,
+                help: None,
+                design: true,
+                compare: false,
+                select_key: true,
+            },
+            CaptureStep {
+                name: "animation_help",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Path,
+                help: Some(HelpTopic::Path),
+                design: true,
+                compare: false,
+                select_key: true,
+            },
+            CaptureStep {
+                name: "animation_target",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Path,
+                help: Some(HelpTopic::Target),
+                design: true,
+                compare: false,
+                select_key: false,
+            },
+            CaptureStep {
+                name: "animation_profile",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Profile,
+                help: Some(HelpTopic::Profile),
+                design: true,
+                compare: true,
+                select_key: false,
+            },
+            CaptureStep {
+                name: "animation_profile_clean",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Profile,
+                help: None,
+                design: true,
+                compare: true,
+                select_key: false,
+            },
+            CaptureStep {
+                name: "animation_target_clean",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Path,
+                help: None,
+                design: true,
+                compare: false,
+                select_key: false,
+            },
+            CaptureStep {
+                name: "animation_transport",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Preview,
+                help: None,
+                design: true,
+                compare: false,
+                select_key: false,
+            },
+            CaptureStep {
+                name: "animation_timing",
+                workspace: Workspace::Animation,
+                anim_tab: AnimTab::Timing,
+                help: Some(HelpTopic::Timing),
+                design: true,
+                compare: false,
+                select_key: false,
+            },
+        ];
+        for (name, workspace) in [
+            ("workspace_terrain", Workspace::Terrain),
+            ("workspace_world", Workspace::Terrain),
+            ("workspace_modifiers", Workspace::Modifiers),
+            ("workspace_rock", Workspace::Rock),
+            ("workspace_detail", Workspace::Detail),
+            ("workspace_sculpt", Workspace::Sculpt),
+            ("workspace_erosion", Workspace::Erosion),
+            ("workspace_water", Workspace::Water),
+            ("workspace_materials", Workspace::Materials),
+            ("workspace_light", Workspace::Light),
+            ("workspace_camera", Workspace::Camera),
+            ("workspace_render", Workspace::Render),
+        ] {
+            steps.push(CaptureStep {
+                name,
+                workspace,
+                anim_tab: AnimTab::Path,
+                help: None,
+                design: true,
+                compare: false,
+                select_key: false,
+            });
+        }
+        Self {
+            dir,
+            steps,
+            index: 0,
+            frame: 0,
+            requested: false,
+            wait_after_request: 0,
+        }
+    }
 }
 
 pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
+    // wgpu uses Vulkan on Linux/Windows and Metal on macOS. Set
+    // VISTAFORGE_RENDERER=glow to fall back to the OpenGL UI renderer (and the
+    // CPU-only preview) on machines where wgpu cannot initialise.
+    let renderer = match std::env::var("VISTAFORGE_RENDERER") {
+        Ok(value) if value.eq_ignore_ascii_case("glow") => eframe::Renderer::Glow,
+        _ => eframe::Renderer::Wgpu,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([1000.0, 640.0])
             .with_title("VistaForge"),
+        renderer,
         ..Default::default()
     };
     eframe::run_native(
@@ -126,6 +315,21 @@ struct VistaForgeApp {
     last_render_ms: u128,
     last_render_size: (u32, u32),
     dirty_since: Option<Instant>,
+    dirty_first: Option<Instant>,
+    preview_scale: f32,
+    interactive_scale: f32,
+    adaptive_preview: bool,
+    refine_at: Option<Instant>,
+    preview_ms: u128,
+    revision: u64,
+    pending_full: bool,
+
+    gpu: Option<gpu_view::GpuViewport>,
+    gpu_enabled: bool,
+    gpu_mesh_dirty: bool,
+    gpu_mesh_due: Option<Instant>,
+    gpu_error: Option<String>,
+    show_final_render: bool,
 
     workspace: Workspace,
     mode: TerrainMode,
@@ -141,7 +345,9 @@ struct VistaForgeApp {
     yaw: f32,
     pitch: f32,
     distance: f64,
+    orbit_center: DVec3,
     fov: f32,
+    show_gizmo: bool,
 
     render_width: u32,
     render_height: u32,
@@ -151,7 +357,6 @@ struct VistaForgeApp {
     clouds: bool,
     water: bool,
     exposure: f32,
-    flight_time: f32,
     selected_modifier: usize,
     add_modifier_kind: ModifierKind,
 
@@ -167,11 +372,31 @@ struct VistaForgeApp {
     sculpt_status: String,
 
     rig_time: f32,
-    rig_selected_key: Option<usize>,
-    rig_zoom: f32,
-    rig_pan: egui::Vec2,
-    rig_cursor: Option<(f64, f64)>,
     rig_status: String,
+
+    anim_tab: animation_ui::AnimTab,
+    anim_view: animation_ui::AnimViewMode,
+    anim_design_camera: Option<Camera>,
+    anim_editor: animation_editor::EditorState,
+    anim_edit_target: bool,
+    anim_camera_dirty: bool,
+    anim_profile_cache: Option<animation_ui::ProfileCache>,
+    anim_trail_cache: Option<(u64, Vec<[f64; 3]>)>,
+    anim_compare: bool,
+    anim_compare_cache: Option<(u64, Vec<animation_ui::ComparisonTrail>)>,
+    anim_transport_rect: egui::Rect,
+    anim_framed: bool,
+    anim_revision: u64,
+    anim_playing: bool,
+    anim_loop: bool,
+    anim_play_speed: f32,
+    anim_last_play_preview: Instant,
+    anim_export_dir: String,
+    anim_export_task: Option<AnimationExportTask>,
+
+    help: help::HelpState,
+    last_viewport_rect: egui::Rect,
+    capture: Option<CaptureState>,
 }
 
 impl VistaForgeApp {
@@ -208,6 +433,20 @@ impl VistaForgeApp {
             last_render_ms: 0,
             last_render_size: (0, 0),
             dirty_since: None,
+            dirty_first: None,
+            preview_scale: 1.0,
+            interactive_scale: 0.5,
+            adaptive_preview: true,
+            refine_at: None,
+            preview_ms: 0,
+            revision: 0,
+            pending_full: false,
+            gpu: None,
+            gpu_enabled: true,
+            gpu_mesh_dirty: false,
+            gpu_mesh_due: None,
+            gpu_error: None,
+            show_final_render: false,
             workspace: Workspace::Terrain,
             mode: TerrainMode::Classic,
             size: 258,
@@ -221,7 +460,9 @@ impl VistaForgeApp {
             yaw: 35.0,
             pitch: 25.0,
             distance: 5000.0,
+            orbit_center: DVec3::ZERO,
             fov: 48.0,
+            show_gizmo: true,
             render_width: 1280,
             render_height: 720,
             quality: Quality::High,
@@ -230,7 +471,6 @@ impl VistaForgeApp {
             clouds: true,
             water: true,
             exposure: 1.0,
-            flight_time: 0.0,
             selected_modifier: 0,
             add_modifier_kind: ModifierKind::Displace,
             sculpt_brush: Brush::default(),
@@ -244,19 +484,93 @@ impl VistaForgeApp {
             sculpt_cursor: None,
             sculpt_status: "Prêt. Clic gauche = sculpter, clic droit = déplacer.".into(),
             rig_time: 0.0,
-            rig_selected_key: None,
-            rig_zoom: 1.0,
-            rig_pan: egui::Vec2::ZERO,
-            rig_cursor: None,
-            rig_status: "Tracez la courbe du point de vue, puis poursuivez la cible.".into(),
+            rig_status: "Tracez le point de vue, puis réglez la cible et le profil de vol.".into(),
+            anim_tab: animation_ui::AnimTab::Path,
+            anim_view: animation_ui::AnimViewMode::Design,
+            anim_design_camera: None,
+            anim_editor: animation_editor::EditorState::new(),
+            anim_edit_target: false,
+            anim_camera_dirty: false,
+            anim_profile_cache: None,
+            anim_trail_cache: None,
+            anim_compare: false,
+            anim_compare_cache: None,
+            anim_transport_rect: egui::Rect::NOTHING,
+            anim_framed: false,
+            anim_revision: 0,
+            anim_playing: false,
+            anim_loop: true,
+            anim_play_speed: 1.0,
+            anim_last_play_preview: Instant::now(),
+            anim_export_dir: "anim-out".into(),
+            anim_export_task: None,
+            help: help::HelpState::new(),
+            last_viewport_rect: egui::Rect::NOTHING,
+            capture: std::env::var("VISTAFORGE_CAPTURE")
+                .ok()
+                .filter(|dir| !dir.trim().is_empty())
+                .map(|dir| CaptureState::new(PathBuf::from(dir))),
         };
+        app.orbit_center = vf_scene::terrain_center(&app.heightfield);
         app.sync_from_project();
         app.sync_orbit_from_camera();
-        app.start_render(cc.egui_ctx.clone(), false);
+        if let Some(state) = cc.wgpu_render_state.as_ref() {
+            match gpu_view::GpuViewport::new(state, &app.project, &app.heightfield, app.water) {
+                Ok(gpu) => {
+                    app.status = format!("Vue 3D GPU : {}", gpu.label());
+                    app.gpu = Some(gpu);
+                }
+                Err(error) => {
+                    app.gpu_error = Some(error.clone());
+                    app.status = format!("GPU indisponible : {error}");
+                }
+            }
+        }
+        if let Some(workspace) = std::env::var("VISTAFORGE_WORKSPACE")
+            .ok()
+            .and_then(|value| Workspace::parse(&value))
+        {
+            app.workspace = workspace;
+        }
+        if let Some(tab) = std::env::var("VISTAFORGE_ANIM_TAB")
+            .ok()
+            .and_then(|value| animation_ui::AnimTab::parse(&value))
+        {
+            app.anim_tab = tab;
+        }
+        if app.workspace == Workspace::Animation {
+            app.ensure_animation_workspace(&cc.egui_ctx);
+        }
+        if let Some(topic) = std::env::var("VISTAFORGE_HELP_TOPIC")
+            .ok()
+            .and_then(|value| help::HelpTopic::parse(&value))
+        {
+            app.help.reveal(topic);
+        }
+        if app.capture.is_some() {
+            // Documentation captures need the full preview, not the
+            // interaction-scale image.
+            app.adaptive_preview = false;
+            app.preview_scale = 1.0;
+        }
+        if app.gpu_active() {
+            // The GPU viewport is live; no CPU preview is needed at startup.
+            app.gpu_mesh_dirty = false;
+            app.gpu_mesh_due = None;
+        } else {
+            app.preview_scale = if app.adaptive_preview {
+                app.interactive_scale
+            } else {
+                1.0
+            };
+            app.start_render(cc.egui_ctx.clone(), false);
+        }
         app
     }
 
     fn sync_from_project(&mut self) {
+        self.anim_framed = false;
+        self.orbit_center = vf_scene::terrain_center(&self.heightfield);
         match &self.project.source {
             TerrainSource::Classic { params } => {
                 self.mode = TerrainMode::Classic;
@@ -295,29 +609,227 @@ impl VistaForgeApp {
     }
 
     fn sync_orbit_from_camera(&mut self) {
-        let center = vf_scene::terrain_center(&self.heightfield);
+        let center = self.orbit_center;
         let delta = self.project.camera.position - center;
+        let horizontal = (delta.x * delta.x + delta.y * delta.y).sqrt();
         self.distance = delta.length().max(1.0);
-        self.yaw = (delta.x.atan2(-delta.y).to_degrees()) as f32;
-        self.pitch = (delta.z / self.distance).asin().to_degrees() as f32;
+        self.pitch = (delta.z / self.distance)
+            .clamp(-1.0, 1.0)
+            .asin()
+            .to_degrees() as f32;
+        // At the poles the yaw is undefined; keep the previous value so the
+        // top/bottom presets do not cause a jump when the user resumes orbiting.
+        if horizontal > 1e-6 {
+            self.yaw = (delta.x.atan2(-delta.y).to_degrees()) as f32;
+        }
         self.rock_preset = self.project.geology.preset.clone();
         self.fov = self.project.camera.fov_y_deg;
     }
 
     fn apply_orbit(&mut self) {
-        let center = vf_scene::terrain_center(&self.heightfield);
-        self.project.camera =
-            vf_scene::orbit(center, self.distance, self.yaw, self.pitch, self.fov);
+        self.project.camera = vf_scene::orbit(
+            self.orbit_center,
+            self.distance,
+            self.yaw,
+            self.pitch,
+            self.fov,
+        );
     }
 
     fn auto_frame(&mut self) {
+        self.orbit_center = vf_scene::terrain_center(&self.heightfield);
         let aspect = f64::from(self.render_width.max(1)) / f64::from(self.render_height.max(1));
-        self.project.camera = vf_scene::auto_frame(&self.heightfield, aspect);
+        self.project.camera = vf_scene::auto_frame_with_fov(&self.heightfield, aspect, self.fov);
         self.sync_orbit_from_camera();
     }
 
+    /// Snap the camera to a standard CAD viewpoint. The camera is placed
+    /// immediately; the preview is refreshed by the adaptive scheduler.
+    fn set_view_preset(&mut self, preset: vf_scene::ViewPreset) {
+        self.orbit_center = vf_scene::terrain_center(&self.heightfield);
+        let aspect = f64::from(self.render_width.max(1)) / f64::from(self.render_height.max(1));
+        self.project.camera = vf_scene::framed_view(&self.heightfield, aspect, preset, self.fov);
+        self.sync_orbit_from_camera();
+        self.mark_camera_dirty();
+        self.status = format!("Vue : {}", preset.label());
+    }
+
+    /// Return to the default three-quarter framing, preserving the current FOV.
+    fn home_view(&mut self) {
+        self.auto_frame();
+        self.mark_camera_dirty();
+        self.status = "Vue par défaut".into();
+    }
+
+    fn apply_gizmo_action(&mut self, action: view_gizmo::GizmoAction) {
+        match action {
+            view_gizmo::GizmoAction::View(preset) => self.set_view_preset(preset),
+            view_gizmo::GizmoAction::Home => self.home_view(),
+        }
+    }
+
+    /// CAD keyboard shortcuts: 1 face, 2 dessus, 3 droite, 0/Home défaut.
+    fn view_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.text_edit_focused() {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
+            let topic = help_topic_for_workspace(self.workspace);
+            if self.help.enabled && self.help.is_open() {
+                self.help.close();
+            } else {
+                self.help.reveal(topic);
+            }
+            return;
+        }
+        let pressed = ctx.input(|input| {
+            [
+                input.key_pressed(egui::Key::Num1),
+                input.key_pressed(egui::Key::Num2),
+                input.key_pressed(egui::Key::Num3),
+                input.key_pressed(egui::Key::Num0),
+                input.key_pressed(egui::Key::Home),
+            ]
+        });
+        if self.workspace == Workspace::Animation
+            && ctx.input(|input| input.key_pressed(egui::Key::Space))
+        {
+            self.toggle_animation_play(ctx);
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && self.help.is_open() {
+            self.help.close();
+        }
+        if self.workspace == Workspace::Animation
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            self.anim_editor.trace = false;
+        }
+        if self.workspace == Workspace::Animation
+            && ctx.input(|input| {
+                input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+            })
+        {
+            self.delete_animation_key();
+        }
+        if pressed[0] {
+            self.set_view_preset(vf_scene::ViewPreset::Front);
+        } else if pressed[1] {
+            self.set_view_preset(vf_scene::ViewPreset::Top);
+        } else if pressed[2] {
+            self.set_view_preset(vf_scene::ViewPreset::Right);
+        } else if pressed[3] || pressed[4] {
+            self.home_view();
+        }
+    }
+
+    fn invalidate_preview(&mut self, mesh_changed: bool) {
+        let now = Instant::now();
+        self.dirty_since = Some(now);
+        // `dirty_since` is refreshed on every drag event; `dirty_first` keeps
+        // the age of the oldest pending change so continuous orbiting still
+        // produces fresh low-resolution frames instead of waiting for release.
+        self.dirty_first.get_or_insert(now);
+        self.refine_at = None;
+        self.revision = self.revision.wrapping_add(1);
+        self.preview_scale = if self.adaptive_preview {
+            self.interactive_scale
+        } else {
+            1.0
+        };
+        self.show_final_render = false;
+        if mesh_changed {
+            self.gpu_mesh_dirty = true;
+            self.gpu_mesh_due = Some(now + Duration::from_millis(150));
+        }
+    }
+
     fn mark_dirty(&mut self) {
-        self.dirty_since = Some(Instant::now());
+        self.invalidate_preview(true);
+    }
+
+    /// Camera-only change: no GPU mesh rebuild, no terrain upload.
+    fn mark_camera_dirty(&mut self) {
+        self.invalidate_preview(false);
+    }
+
+    fn gpu_active(&self) -> bool {
+        self.gpu_enabled && self.gpu.is_some() && !self.show_final_render
+    }
+
+    /// Start a fresh preview after loading/generating a scene. When the GPU
+    /// viewport is active, only the mesh needs refreshing.
+    fn refresh_preview(&mut self, ctx: egui::Context) {
+        self.mark_dirty();
+        if self.gpu_enabled && self.gpu.is_some() {
+            self.gpu_mesh_due = Some(Instant::now());
+            self.dirty_since = None;
+            self.dirty_first = None;
+            ctx.request_repaint();
+        } else {
+            self.preview_scale = if self.adaptive_preview {
+                self.interactive_scale
+            } else {
+                1.0
+            };
+            self.start_render(ctx, false);
+        }
+    }
+
+    /// A camera-only refresh (flight/rig scrubbing). The live GPU view reads
+    /// the camera every frame; the CPU path still needs a preview render.
+    fn refresh_camera_preview(&mut self, ctx: &egui::Context) {
+        self.mark_camera_dirty();
+        if self.gpu_enabled && self.gpu.is_some() {
+            ctx.request_repaint();
+        } else {
+            self.start_render(ctx.clone(), false);
+        }
+    }
+
+    /// Rebuild the GPU mesh after a debounce. Building on the UI thread is
+    /// acceptable because it only happens after the user stops adjusting a
+    /// parameter; camera orbit remains entirely on the GPU.
+    fn pump_gpu(&mut self, ctx: &egui::Context) {
+        if self.gpu.is_none() || !self.gpu_enabled {
+            return;
+        }
+        if !self.gpu_mesh_dirty {
+            return;
+        }
+        let Some(due) = self.gpu_mesh_due else {
+            return;
+        };
+        if Instant::now() < due {
+            ctx.request_repaint_after(Duration::from_millis(40));
+            return;
+        }
+        let started = Instant::now();
+        let result = self
+            .gpu
+            .as_ref()
+            .map(|gpu| gpu.set_terrain(&self.project, &self.heightfield, self.water));
+        match result {
+            Some(Ok(())) => {
+                self.gpu_mesh_dirty = false;
+                self.gpu_mesh_due = None;
+                self.status = format!(
+                    "Maillage GPU synchronisé en {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+            Some(Err(error)) => {
+                self.gpu_error = Some(error.clone());
+                self.gpu_enabled = false;
+                self.gpu_mesh_dirty = false;
+                self.gpu_mesh_due = None;
+                self.mark_dirty();
+                self.gpu_mesh_dirty = false;
+                self.gpu_mesh_due = None;
+                self.status = format!("GPU désactivé : {error}");
+            }
+            None => {}
+        }
     }
 
     fn new_project(&mut self, ctx: egui::Context) {
@@ -335,7 +847,7 @@ impl VistaForgeApp {
         self.sculpt_redo.clear();
         self.sync_from_project();
         self.sync_orbit_from_camera();
-        self.start_render(ctx, false);
+        self.refresh_preview(ctx);
     }
 
     fn open_project(&mut self, ctx: egui::Context) {
@@ -355,7 +867,7 @@ impl VistaForgeApp {
                 self.sculpt_redo.clear();
                 self.sync_from_project();
                 self.sync_orbit_from_camera();
-                self.start_render(ctx, false);
+                self.refresh_preview(ctx);
             }
             Err(error) => self.status = format!("Open failed: {error}"),
         }
@@ -457,7 +969,7 @@ impl VistaForgeApp {
                     started.elapsed().as_millis()
                 );
                 self.sync_orbit_from_camera();
-                self.start_render(ctx, false);
+                self.refresh_preview(ctx);
             }
             Err(error) => self.status = format!("Generation failed: {error}"),
         }
@@ -484,8 +996,13 @@ impl VistaForgeApp {
         options
     }
 
-    fn preview_options(&self) -> RenderOptions {
-        let mut options = RenderOptions::preview(PREVIEW_SIZE.0, PREVIEW_SIZE.1);
+    /// Preview options at a fraction of the 960x540 base size. The scale is
+    /// capped on both axes so very small windows stay readable.
+    fn preview_options_at(&self, scale: f32) -> RenderOptions {
+        let scale = scale.clamp(MIN_PREVIEW_SCALE, 1.0);
+        let width = ((PREVIEW_SIZE.0 as f32) * scale).round().max(160.0) as u32;
+        let height = ((PREVIEW_SIZE.1 as f32) * scale).round().max(90.0) as u32;
+        let mut options = RenderOptions::preview(width, height);
         options.shadows = self.shadows;
         options.ao = false;
         options.cliffs = self.project.render.cliffs;
@@ -497,15 +1014,42 @@ impl VistaForgeApp {
         options
     }
 
-    fn start_render(&mut self, ctx: egui::Context, full: bool) {
+    fn start_preview(&mut self, ctx: egui::Context, scale: f32) {
         if self.render_task.is_some() {
             return;
         }
-        let options = if full {
-            self.full_options()
+        self.preview_scale = scale.clamp(MIN_PREVIEW_SCALE, 1.0);
+        self.start_render(ctx, false);
+    }
+
+    fn start_render(&mut self, ctx: egui::Context, full: bool) {
+        if let Some(task) = &self.render_task {
+            if full && !task.full {
+                self.pending_full = true;
+                self.status = "Rendu final en attente de l'aperçu…".into();
+                ctx.request_repaint();
+            }
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        let revision = self.revision;
+        let (options, scale) = if full {
+            (self.full_options(), 1.0)
         } else {
-            self.preview_options()
+            let scale = if self.adaptive_preview {
+                self.preview_scale.clamp(MIN_PREVIEW_SCALE, 1.0)
+            } else {
+                1.0
+            };
+            (self.preview_options_at(scale), scale)
         };
+        self.preview_scale = scale;
+        self.dirty_since = None;
+        self.dirty_first = None;
+        self.refine_at = None;
+        if full {
+            self.pending_full = false;
+        }
         let project = self.project.clone();
         let heightfield = self.heightfield.clone();
         let width = options.width;
@@ -522,12 +1066,69 @@ impl VistaForgeApp {
             receiver,
             started: Instant::now(),
             full,
+            revision,
+            scale,
         });
         self.status = if full {
             format!("Rendering {width}x{height}…")
         } else {
-            "Rendering preview…".into()
+            format!("Aperçu {width}×{height}…")
         };
+    }
+
+    fn update_interactive_scale(&mut self, scale: f32, elapsed_ms: u128) {
+        if !self.adaptive_preview || elapsed_ms == 0 {
+            return;
+        }
+        self.interactive_scale = adapted_scale(self.interactive_scale, scale, elapsed_ms);
+    }
+
+    /// Start a low-resolution pass as soon as the pointer settles briefly,
+    /// then progressively refine to full preview resolution while idle.
+    fn pump_preview(&mut self, ctx: &egui::Context) {
+        // When a GPU viewport exists, automatic CPU previews are unnecessary:
+        // the GPU scene is live and a manual Render/Preview still works.
+        if self.gpu_enabled && self.gpu.is_some() {
+            return;
+        }
+        if self.render_task.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(30));
+            return;
+        }
+        if self.dirty_since.is_some() {
+            let now = Instant::now();
+            let last = self.dirty_since.map_or(Duration::ZERO, |t| now - t);
+            let first = self.dirty_first.map_or(last, |t| now - t);
+            let delay = if self.adaptive_preview {
+                PREVIEW_FIRST_DELAY
+            } else {
+                PREVIEW_SETTLE_DELAY
+            };
+            if last >= delay || first >= delay {
+                self.dirty_since = None;
+                self.dirty_first = None;
+                let scale = if self.adaptive_preview {
+                    self.preview_scale
+                } else {
+                    1.0
+                };
+                self.start_preview(ctx.clone(), scale);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            return;
+        }
+        if let Some(at) = self.refine_at {
+            if Instant::now() >= at {
+                self.refine_at = None;
+                let next = next_preview_scale(self.preview_scale);
+                if next > self.preview_scale + 0.005 {
+                    self.start_preview(ctx.clone(), next);
+                }
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(40));
+            }
+        }
     }
 
     fn poll_render(&mut self, ctx: &egui::Context) {
@@ -536,15 +1137,42 @@ impl VistaForgeApp {
         };
         match task.receiver.try_recv() {
             Ok(Ok(output)) => {
-                self.apply_render(ctx, output);
+                let stale = task.revision != self.revision;
+                let gpu_available = self.gpu_enabled && self.gpu.is_some();
+                if task.full && stale {
+                    self.status = "Rendu final obsolète (scène modifiée)".into();
+                } else if stale && gpu_available {
+                    // The GPU view already shows the latest scene; do not
+                    // replace it with an outdated CPU preview.
+                    self.status = "Aperçu CPU obsolète (vue GPU active)".into();
+                } else {
+                    // During a drag an older low-resolution frame is still a
+                    // useful intermediate image; it is replaced as soon as the
+                    // queued low-resolution pass completes.
+                    self.apply_render(ctx, output, &task);
+                }
                 self.last_render_ms = task.started.elapsed().as_millis();
+                if !task.full {
+                    self.preview_ms = self.last_render_ms;
+                    if !stale {
+                        self.preview_scale = task.scale;
+                    }
+                    self.update_interactive_scale(task.scale, self.last_render_ms);
+                    if !stale && self.dirty_since.is_none() && task.scale < 0.999 {
+                        self.refine_at = Some(Instant::now() + PREVIEW_REFINE_DELAY);
+                    }
+                }
+                if self.pending_full {
+                    self.pending_full = false;
+                    self.start_render(ctx.clone(), true);
+                }
             }
             Ok(Err(error)) => {
                 self.status = format!("Render failed: {error}");
             }
             Err(TryRecvError::Empty) => {
                 self.render_task = Some(task);
-                ctx.request_repaint_after(Duration::from_millis(80));
+                ctx.request_repaint_after(Duration::from_millis(30));
             }
             Err(TryRecvError::Disconnected) => {
                 self.status = "Render worker disconnected".into();
@@ -552,22 +1180,35 @@ impl VistaForgeApp {
         }
     }
 
-    fn apply_render(&mut self, ctx: &egui::Context, output: RenderOutput) {
+    fn apply_render(&mut self, ctx: &egui::Context, output: RenderOutput, task: &RenderTask) {
         let image = egui::ColorImage::from_rgba_unmultiplied(
             [output.image.width as usize, output.image.height as usize],
             &output.image.pixels,
         );
         self.texture = Some(ctx.load_texture("viewport", image, egui::TextureOptions::LINEAR));
         self.last_render_size = (output.image.width, output.image.height);
-        self.status = format!(
-            "Rendered {}x{} (ssaa {}) in {} ms",
-            output.stats.width, output.stats.height, output.stats.ssaa, output.stats.elapsed_ms
-        );
+        if task.full {
+            self.status = format!(
+                "Rendu {}×{} (ssaa {}) en {} ms",
+                output.stats.width, output.stats.height, output.stats.ssaa, output.stats.elapsed_ms
+            );
+        } else {
+            self.status = format!(
+                "Aperçu {}×{} ({} %) · {} ms",
+                output.stats.width,
+                output.stats.height,
+                (task.scale * 100.0).round() as u32,
+                output.stats.elapsed_ms
+            );
+        }
         self.last_image = Some(output.image);
+        // A completed CPU render becomes the displayed image until the scene
+        // or camera changes; the next change switches back to the live GPU view.
+        self.show_final_render = true;
     }
 
     fn terrain_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Terrain")
+        let header = egui::CollapsingHeader::new("Terrain")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -689,11 +1330,20 @@ impl VistaForgeApp {
                     self.generate_terrain(ctx.clone());
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Terrain,
+        );
         self.world_ui(ui, ctx);
     }
 
     fn world_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Monde et tuilage")
+        let header = egui::CollapsingHeader::new("Monde et tuilage")
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -793,6 +1443,15 @@ impl VistaForgeApp {
                     .weak(),
                 );
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::World,
+        );
     }
 
     fn bake_modifiers(&mut self) {
@@ -826,7 +1485,7 @@ impl VistaForgeApp {
         let mut changed = false;
         let mut action = None;
 
-        egui::CollapsingHeader::new("Pile de modificateurs")
+        let header = egui::CollapsingHeader::new("Pile de modificateurs")
             .default_open(true)
             .show(ui, |ui| {
                 ui.label(
@@ -881,6 +1540,15 @@ impl VistaForgeApp {
                     }
                 });
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Modifiers,
+        );
 
         ui.add_space(6.0);
         let count = self.project.modifiers.items.len();
@@ -1014,7 +1682,7 @@ impl VistaForgeApp {
     }
 
     fn detail_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Géométrie")
+        let header = egui::CollapsingHeader::new("Géométrie")
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.detail.enabled, "Détail continu actif");
@@ -1146,8 +1814,17 @@ impl VistaForgeApp {
                     self.start_render(ctx.clone(), false);
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Detail,
+        );
 
-        egui::CollapsingHeader::new("Sillons et arêtes")
+        let header = egui::CollapsingHeader::new("Sillons et arêtes")
             .default_open(false)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.detail.grooves.enabled, "Sillons");
@@ -1197,8 +1874,17 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Detail,
+        );
 
-        egui::CollapsingHeader::new("Cratères, plaques, vésicules")
+        let header = egui::CollapsingHeader::new("Cratères, plaques, vésicules")
             .default_open(false)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.detail.craters.enabled, "Cratères");
@@ -1224,14 +1910,20 @@ impl VistaForgeApp {
                 ) {
                     self.mark_dirty();
                 }
-                ui.checkbox(
-                    &mut self.project.detail.exfoliation.enabled,
-                    "Exfoliation",
-                );
+                ui.checkbox(&mut self.project.detail.exfoliation.enabled, "Exfoliation");
                 ui.checkbox(&mut self.project.detail.vesicles.enabled, "Vésicules");
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Detail,
+        );
 
-        egui::CollapsingHeader::new("Gros plan")
+        let header = egui::CollapsingHeader::new("Gros plan")
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.detail.focus_enabled, "Patch haute densité");
@@ -1278,10 +1970,19 @@ impl VistaForgeApp {
                     .weak(),
                 );
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Detail,
+        );
     }
 
     fn rock_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Famille de roche")
+        let header = egui::CollapsingHeader::new("Famille de roche")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1329,7 +2030,16 @@ impl VistaForgeApp {
                     .weak(),
                 );
             });
-        egui::CollapsingHeader::new("Bancs")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Rock,
+        );
+        let header = egui::CollapsingHeader::new("Bancs")
             .default_open(true)
             .show(ui, |ui| {
                 let g = &mut self.project.geology;
@@ -1386,7 +2096,16 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
-        egui::CollapsingHeader::new("Fractures")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Rock,
+        );
+        let header = egui::CollapsingHeader::new("Fractures")
             .default_open(true)
             .show(ui, |ui| {
                 let g = &mut self.project.geology;
@@ -1430,7 +2149,16 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
-        egui::CollapsingHeader::new("Dissolution")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Rock,
+        );
+        let header = egui::CollapsingHeader::new("Dissolution")
             .default_open(false)
             .show(ui, |ui| {
                 let g = &mut self.project.geology;
@@ -1469,7 +2197,16 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
-        egui::CollapsingHeader::new("Canyon")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Rock,
+        );
+        let header = egui::CollapsingHeader::new("Canyon")
             .default_open(false)
             .show(ui, |ui| {
                 let g = &mut self.project.geology;
@@ -1507,6 +2244,15 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Rock,
+        );
         if ui
             .add_sized(
                 [ui.available_width(), 28.0],
@@ -1519,7 +2265,7 @@ impl VistaForgeApp {
     }
 
     fn light_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Soleil et ciel")
+        let header = egui::CollapsingHeader::new("Soleil et ciel")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1583,7 +2329,16 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
-        egui::CollapsingHeader::new("Atmosphère")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Light,
+        );
+        let header = egui::CollapsingHeader::new("Atmosphère")
             .default_open(true)
             .show(ui, |ui| {
                 let mut changed = false;
@@ -1611,10 +2366,19 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Light,
+        );
     }
 
     fn water_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Mer et eau")
+        let header = egui::CollapsingHeader::new("Mer et eau")
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.water.enabled, "Eau activée");
@@ -1661,10 +2425,19 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Water,
+        );
     }
 
     fn materials_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Matières")
+        let header = egui::CollapsingHeader::new("Matières")
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.materials.enabled, "Matériaux activés");
@@ -1699,7 +2472,16 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
-        egui::CollapsingHeader::new("Étagement")
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Materials,
+        );
+        let header = egui::CollapsingHeader::new("Étagement")
             .default_open(false)
             .show(ui, |ui| {
                 let (min, max) = self.heightfield.min_max();
@@ -1753,10 +2535,19 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Materials,
+        );
     }
 
     fn erosion_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Érosion")
+        let header = egui::CollapsingHeader::new("Érosion")
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.erosion_enabled, "Érosion activée");
@@ -1812,167 +2603,1882 @@ impl VistaForgeApp {
                     self.generate_terrain(ui.ctx().clone());
                 }
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Erosion,
+        );
     }
 
-    fn flight_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Survol")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Preset");
-                    let mut selected = self.project.flight.preset.clone();
-                    egui::ComboBox::from_id_salt("flight-preset")
-                        .selected_text(&self.project.flight.preset)
-                        .show_ui(ui, |ui| {
-                            for name in vf_core::FLIGHT_PRESETS {
-                                ui.selectable_value(&mut selected, (*name).to_string(), *name);
+    fn ensure_animation_workspace(&mut self, ctx: &egui::Context) {
+        if animation_ui::ensure_animation(&mut self.project.rig, &self.heightfield) {
+            self.project.mark_modified();
+            self.anim_revision = self.anim_revision.wrapping_add(1);
+            self.anim_camera_dirty = true;
+            self.rig_status = "Tracé de démonstration chargé : modifiez-le ou cliquez Lire.".into();
+            let length = vf_flight::rig::path_length(&self.project.rig.eye);
+            if length < 3000.0 {
+                // A fresh demo path is small; frame it so the first open is
+                // immediately readable instead of showing an invisible speck.
+                self.frame_animation_loop();
+                self.anim_framed = true;
+            }
+        }
+        if !self.anim_framed {
+            self.anim_framed = true;
+            let length = vf_flight::rig::path_length(&self.project.rig.eye);
+            // A saved project may already contain a small authored path but a
+            // design camera framed on the whole terrain. Frame the path once
+            // when the workspace is opened, then leave the camera alone.
+            if length > 1.0 && length < 3000.0 {
+                self.frame_animation_loop();
+            }
+        }
+        self.anim_editor.clear_invalid_selection(&self.project.rig);
+        self.rig_time = self
+            .rig_time
+            .clamp(0.0, self.project.rig.duration_s.max(0.1));
+        if self.anim_view == animation_ui::AnimViewMode::Camera && self.anim_camera_dirty {
+            self.sample_animation_camera(ctx);
+        }
+    }
+
+    fn mark_animation_changed(&mut self) {
+        self.anim_revision = self.anim_revision.wrapping_add(1);
+        self.anim_profile_cache = None;
+        self.anim_compare_cache = None;
+        self.anim_camera_dirty = true;
+        self.project.mark_modified();
+    }
+
+    fn sample_animation_camera(&mut self, ctx: &egui::Context) -> bool {
+        match vf_flight::rig::sample_rig(
+            &self.project.rig,
+            &self.heightfield,
+            self.project.seed,
+            self.rig_time,
+        ) {
+            Ok(sample) => {
+                self.project.camera = sample.camera;
+                self.sync_orbit_from_camera();
+                self.rig_status = format!(
+                    "t={:.2}s · {:.0} m sol · gîte {:.1}° · vitesse {:.1} m/s",
+                    self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
+                );
+                self.anim_camera_dirty = false;
+                self.refresh_camera_preview(ctx);
+                true
+            }
+            Err(error) => {
+                self.rig_status = format!("Animation : {error}");
+                false
+            }
+        }
+    }
+
+    fn enter_animation_camera(&mut self, ctx: &egui::Context) {
+        if self.anim_view == animation_ui::AnimViewMode::Design {
+            self.anim_design_camera = Some(self.project.camera.clone());
+        }
+        self.anim_view = animation_ui::AnimViewMode::Camera;
+        self.anim_playing = false;
+        self.sample_animation_camera(ctx);
+    }
+
+    fn enter_animation_design(&mut self, ctx: &egui::Context) {
+        self.anim_playing = false;
+        if let Some(camera) = self.anim_design_camera.take() {
+            self.project.camera = camera;
+            self.sync_orbit_from_camera();
+        }
+        self.anim_view = animation_ui::AnimViewMode::Design;
+        self.anim_editor.trace = false;
+        self.mark_camera_dirty();
+        ctx.request_repaint();
+    }
+
+    fn toggle_animation_play(&mut self, ctx: &egui::Context) {
+        if self.anim_playing {
+            self.anim_playing = false;
+            self.refresh_camera_preview(ctx);
+            return;
+        }
+        let duration = self.project.rig.duration_s.max(0.1);
+        if self.rig_time >= duration - 1e-4 {
+            self.rig_time = 0.0;
+        }
+        self.enter_animation_camera(ctx);
+        self.anim_view = animation_ui::AnimViewMode::Camera;
+        self.anim_playing = true;
+        self.anim_last_play_preview = Instant::now() - Duration::from_secs(1);
+        ctx.request_repaint();
+    }
+
+    fn pump_animation(&mut self, ctx: &egui::Context) {
+        if !self.anim_playing || self.workspace != Workspace::Animation {
+            return;
+        }
+        let duration = self.project.rig.duration_s.max(0.1);
+        let dt = ctx.input(|input| input.stable_dt).min(0.1) * self.anim_play_speed.max(0.05);
+        self.rig_time += dt;
+        if self.rig_time >= duration {
+            if self.anim_loop {
+                self.rig_time %= duration;
+            } else {
+                self.rig_time = duration;
+                self.anim_playing = false;
+            }
+        }
+        if let Ok(sample) = vf_flight::rig::sample_rig(
+            &self.project.rig,
+            &self.heightfield,
+            self.project.seed,
+            self.rig_time,
+        ) {
+            self.project.camera = sample.camera;
+            self.rig_status = format!(
+                "Lecture t={:.2}s · {:.0} m sol · gîte {:.1}° · {:.1} m/s",
+                self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
+            );
+        } else {
+            self.anim_playing = false;
+        }
+        if self.gpu_enabled && self.gpu.is_some() {
+            ctx.request_repaint();
+        } else if self.render_task.is_none()
+            && self.anim_last_play_preview.elapsed() >= Duration::from_millis(90)
+        {
+            self.preview_scale = self.interactive_scale;
+            self.mark_camera_dirty();
+            self.start_render(ctx.clone(), false);
+            self.anim_last_play_preview = Instant::now();
+        }
+        if self.anim_playing {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            self.refresh_camera_preview(ctx);
+        }
+    }
+
+    /// Persistent transport bar at the bottom of the viewport. The animation
+    /// is always one click away, whatever tab is open: this is the missing
+    /// "play" affordance of the old split Flight/Animation workspaces.
+    fn animation_transport_ui(&mut self, ctx: &egui::Context, viewport: egui::Rect) {
+        if viewport.width() < 420.0 || viewport.height() < 220.0 {
+            self.anim_transport_rect = egui::Rect::NOTHING;
+            return;
+        }
+        let duration = self.project.rig.duration_s.max(0.1);
+        let width = (viewport.width() - 28.0).clamp(360.0, 1180.0);
+        let area = egui::Area::new(egui::Id::unique("vf-anim-transport"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::Pos2::new(
+                viewport.center().x,
+                viewport.bottom() - 10.0,
+            ))
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(egui::Color32::from_rgba_unmultiplied(12, 16, 23, 238))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 74, 96)))
+                    .corner_radius(9.0)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_sized([48.0, 24.0], egui::Button::new("Début").small())
+                                .on_hover_text("Revenir au début (t = 0)")
+                                .clicked()
+                            {
+                                self.anim_playing = false;
+                                self.rig_time = 0.0;
+                                self.anim_camera_dirty = true;
+                                if self.anim_view == animation_ui::AnimViewMode::Camera {
+                                    self.sample_animation_camera(ctx);
+                                }
+                            }
+                            let play_label = if self.anim_playing { "Pause" } else { "Lire" };
+                            if ui
+                                .add_sized(
+                                    [78.0, 24.0],
+                                    egui::Button::new(
+                                        egui::RichText::new(play_label).strong().size(12.0),
+                                    )
+                                    .fill(
+                                        if self.anim_playing {
+                                            egui::Color32::from_rgb(74, 48, 48)
+                                        } else {
+                                            egui::Color32::from_rgb(38, 82, 62)
+                                        },
+                                    ),
+                                )
+                                .on_hover_text("Lancer / mettre en pause (Espace)")
+                                .clicked()
+                            {
+                                self.toggle_animation_play(ctx);
+                            }
+                            let fps = self.project.rig.fps.max(1) as f32;
+                            let mut time = self.rig_time.clamp(0.0, duration);
+                            let slider_width = (ui.available_width() - 320.0).clamp(120.0, 620.0);
+                            let slider = ui.add_sized(
+                                [slider_width, 20.0],
+                                egui::Slider::new(&mut time, 0.0..=duration)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            );
+                            if slider.changed() {
+                                self.anim_playing = false;
+                                self.rig_time = time;
+                                self.anim_camera_dirty = true;
+                                if self.anim_view == animation_ui::AnimViewMode::Camera {
+                                    self.sample_animation_camera(ctx);
+                                }
+                                ctx.request_repaint();
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{time:5.2}s"))
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                            if ui
+                                .add_sized([26.0, 22.0], egui::Button::new("−").small())
+                                .on_hover_text("Image précédente")
+                                .clicked()
+                            {
+                                self.anim_playing = false;
+                                self.rig_time = (self.rig_time - 1.0 / fps).max(0.0);
+                                if self.anim_view == animation_ui::AnimViewMode::Camera {
+                                    self.sample_animation_camera(ctx);
+                                }
+                            }
+                            if ui
+                                .add_sized([26.0, 22.0], egui::Button::new("+").small())
+                                .on_hover_text("Image suivante")
+                                .clicked()
+                            {
+                                self.anim_playing = false;
+                                self.rig_time = (self.rig_time + 1.0 / fps).min(duration);
+                                if self.anim_view == animation_ui::AnimViewMode::Camera {
+                                    self.sample_animation_camera(ctx);
+                                }
+                            }
+                            if ui
+                                .selectable_label(self.anim_loop, "Boucle")
+                                .on_hover_text("Lecture en boucle")
+                                .clicked()
+                            {
+                                self.anim_loop = !self.anim_loop;
+                            }
+                            ui.separator();
+                            if ui
+                                .selectable_label(
+                                    self.anim_view == animation_ui::AnimViewMode::Design,
+                                    "Design",
+                                )
+                                .on_hover_text("Voir et éditer le tracé")
+                                .clicked()
+                            {
+                                self.enter_animation_design(ctx);
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.anim_view == animation_ui::AnimViewMode::Camera,
+                                    "Caméra",
+                                )
+                                .on_hover_text("Voir ce que la caméra filme")
+                                .clicked()
+                            {
+                                self.enter_animation_camera(ctx);
                             }
                         });
-                    if selected != self.project.flight.preset
-                        && let Some(settings) = vf_core::FlightSettings::preset(&selected)
-                    {
-                        self.flight_time = self.flight_time.min(settings.duration_s).max(0.0);
-                        self.project.flight = settings;
-                        self.mark_dirty();
-                    }
-                });
-                ui.checkbox(&mut self.project.flight.enabled, "Vol actif");
-                ui.horizontal(|ui| {
-                    ui.label("Trajectoire");
-                    let mut pattern = self.project.flight.pattern;
-                    egui::ComboBox::from_id_salt("flight-pattern")
-                        .selected_text(match pattern {
-                            vf_core::FlightPattern::Orbit => "orbite",
-                            vf_core::FlightPattern::Racetrack => "circuit",
-                            vf_core::FlightPattern::RidgeRun => "crête",
-                            vf_core::FlightPattern::Dive => "piqué",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut pattern,
-                                vf_core::FlightPattern::Orbit,
-                                "orbite",
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} images · {:.2}s · {} fps · profil {}",
+                                    self.project.rig.frame_count(),
+                                    duration,
+                                    self.project.rig.fps,
+                                    self.project.rig.body.preset.label()
+                                ))
+                                .size(9.5)
+                                .color(egui::Color32::from_rgb(150, 168, 186)),
                             );
-                            ui.selectable_value(
-                                &mut pattern,
-                                vf_core::FlightPattern::Racetrack,
-                                "circuit",
-                            );
-                            ui.selectable_value(
-                                &mut pattern,
-                                vf_core::FlightPattern::RidgeRun,
-                                "crête",
-                            );
-                            ui.selectable_value(
-                                &mut pattern,
-                                vf_core::FlightPattern::Dive,
-                                "piqué",
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Espace : lire/pause · F1 : aide")
+                                            .size(9.5)
+                                            .color(egui::Color32::from_rgb(122, 140, 160)),
+                                    );
+                                },
                             );
                         });
-                    if pattern != self.project.flight.pattern {
-                        self.project.flight.pattern = pattern;
-                        self.mark_dirty();
+                    });
+            });
+        self.anim_transport_rect = area.response.rect;
+    }
+
+    /// Development-only documentation capture. See `CaptureState`.
+    fn pump_capture(&mut self, ctx: &egui::Context) {
+        let Some(cap) = self.capture.as_ref() else {
+            return;
+        };
+        let index = cap.index;
+        let steps = cap.steps.len();
+        if index >= steps {
+            self.capture = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        ctx.request_repaint();
+        if cap.requested {
+            let wait = cap.wait_after_request;
+            if wait >= 4 {
+                if let Some(cap) = self.capture.as_mut() {
+                    cap.index += 1;
+                    cap.frame = 0;
+                    cap.requested = false;
+                    cap.wait_after_request = 0;
+                }
+            } else if let Some(cap) = self.capture.as_mut() {
+                cap.wait_after_request += 1;
+            }
+            return;
+        }
+        let frame = cap.frame;
+        if frame == 0 {
+            let step = cap.steps[index];
+            self.capture_apply_step(step, ctx);
+        }
+        if let Some(cap) = self.capture.as_mut() {
+            cap.frame += 1;
+        }
+        if frame < 28 || self.render_task.is_some() {
+            return;
+        }
+        let step = self.capture.as_ref().map(|cap| cap.steps[cap.index]);
+        let dir = self.capture.as_ref().map(|cap| cap.dir.clone());
+        let (Some(step), Some(dir)) = (step, dir) else {
+            return;
+        };
+        let path = dir.join(format!("{}.png", step.name));
+        if let Some(cap) = self.capture.as_mut() {
+            cap.requested = true;
+            cap.wait_after_request = 0;
+        }
+        ctx.request_screenshot(move |image| save_capture_image(&path, &image));
+    }
+
+    fn capture_apply_step(&mut self, step: CaptureStep, ctx: &egui::Context) {
+        self.workspace = step.workspace;
+        self.anim_tab = step.anim_tab;
+        self.anim_compare = step.compare;
+        self.anim_compare_cache = None;
+        match step.help {
+            Some(topic) => self.help.reveal(topic),
+            None => self.help.close(),
+        }
+        if step.workspace == Workspace::Animation {
+            self.ensure_animation_workspace(ctx);
+            if step.compare && animation_ui::TimingFit::measure(&self.project.rig).is_strained() {
+                let _ =
+                    vf_flight::rig::preset_path(&mut self.project.rig, &self.heightfield, "demo");
+                self.rig_time = 0.0;
+                self.anim_editor.selection = None;
+                self.frame_animation_loop();
+                self.anim_revision = self.anim_revision.wrapping_add(1);
+                self.anim_profile_cache = None;
+                self.anim_compare_cache = None;
+            }
+            if step.design {
+                if self.anim_view != animation_ui::AnimViewMode::Design {
+                    self.enter_animation_design(ctx);
+                }
+                self.anim_editor.trace = false;
+                if step.select_key
+                    && let Some(key) = self.project.rig.eye.keys.get(1).cloned()
+                {
+                    self.rig_time = key.time_s;
+                    self.anim_editor.selection = Some(animation_ui::AnimSelection::EyeKey(1));
+                    self.anim_edit_target = false;
+                } else if !step.select_key {
+                    self.anim_editor.selection = None;
+                    self.anim_edit_target = false;
+                }
+            } else {
+                self.enter_animation_camera(ctx);
+            }
+            self.mark_camera_dirty();
+        }
+        ctx.request_repaint();
+    }
+
+    fn animation_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.ensure_animation_workspace(ctx);
+        self.help.register_front(
+            ui.available_rect_before_wrap(),
+            help_topic_for_tab(self.anim_tab),
+        );
+        ui.horizontal_wrapped(|ui| {
+            for tab in animation_ui::AnimTab::ALL {
+                let response = ui.selectable_label(self.anim_tab == tab, tab.short());
+                if response.hovered() {
+                    self.help.register(response.rect, help_topic_for_tab(tab));
+                }
+                if response.clicked() {
+                    self.anim_tab = tab;
+                }
+            }
+        });
+        ui.separator();
+        match self.anim_tab {
+            animation_ui::AnimTab::Path => self.anim_path_tab(ui, ctx),
+            animation_ui::AnimTab::Timing => self.anim_timing_tab(ui, ctx),
+            animation_ui::AnimTab::Profile => self.anim_profile_tab(ui, ctx),
+            animation_ui::AnimTab::Preview => self.anim_preview_tab(ui, ctx),
+        }
+        if self.anim_view == animation_ui::AnimViewMode::Camera
+            && !self.anim_playing
+            && self.anim_camera_dirty
+        {
+            self.sample_animation_camera(ctx);
+        }
+        ui.separator();
+        ui.label(egui::RichText::new(&self.rig_status).small().weak());
+    }
+
+    fn anim_path_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Étape 1 · Dessinez le trajet de l'œil, puis matérialisez la cible. Le gizmo X/Y/Z déplace la clé sélectionnée.",
+            )
+            .small(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(
+                    self.anim_view == animation_ui::AnimViewMode::Design,
+                    "Vue design",
+                )
+                .clicked()
+            {
+                self.enter_animation_design(ctx);
+            }
+            if ui
+                .selectable_label(
+                    self.anim_view == animation_ui::AnimViewMode::Camera,
+                    "Vue caméra",
+                )
+                .clicked()
+            {
+                self.enter_animation_camera(ctx);
+            }
+            if ui.selectable_label(self.anim_playing, "Lecture").clicked() {
+                self.toggle_animation_play(ctx);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let selection_button = ui.selectable_label(!self.anim_editor.trace, "Sélection");
+            if selection_button.hovered() {
+                self.help
+                    .register(selection_button.rect, help::HelpTopic::Path);
+            }
+            if selection_button.clicked() {
+                self.anim_editor.trace = false;
+            }
+            let trace_button = ui.selectable_label(self.anim_editor.trace, "Tracer");
+            if trace_button.hovered() {
+                self.help.register(trace_button.rect, help::HelpTopic::Path);
+            }
+            if trace_button.clicked() {
+                self.anim_editor.trace = true;
+                self.anim_view = animation_ui::AnimViewMode::Design;
+                self.anim_playing = false;
+            }
+            ui.checkbox(&mut self.anim_editor.show_paths, "Tracés");
+            ui.checkbox(&mut self.anim_editor.show_trail, "Trajectoire simulée");
+        });
+        if self.anim_editor.trace {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Ajouter");
+                ui.selectable_value(&mut self.anim_editor.trace_target, false, "Œil");
+                ui.selectable_value(&mut self.anim_editor.trace_target, true, "Cible");
+                ui.label("altitude");
+                ui.add(
+                    egui::DragValue::new(&mut self.anim_editor.trace_altitude)
+                        .speed(2.0)
+                        .range(0.0..=3000.0)
+                        .suffix(" m"),
+                );
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Cliquez sur le terrain pour ajouter un point. Échap ou Sélection pour quitter.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label("Aimant");
+            ui.add(
+                egui::DragValue::new(&mut self.anim_editor.snap_m)
+                    .speed(1.0)
+                    .range(0.0..=1000.0)
+                    .suffix(" m"),
+            );
+            ui.label(egui::RichText::new("0 = libre").small().weak());
+        });
+        ui.separator();
+
+        // Target mode.
+        let previous_mode = self.project.rig.target.mode;
+        let mut mode = previous_mode;
+        ui.horizontal(|ui| {
+            let label = ui.label("Point de vue");
+            if label.hovered() {
+                self.help.register(label.rect, help::HelpTopic::Target);
+            }
+            let combo = egui::ComboBox::from_id_salt("anim-target-mode")
+                .selected_text(target_mode_label(mode))
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        TargetMode::Fixed,
+                        TargetMode::Path,
+                        TargetMode::EyeAhead,
+                        TargetMode::Manual,
+                    ] {
+                        ui.selectable_value(&mut mode, candidate, target_mode_label(candidate));
                     }
                 });
-                let f = &mut self.project.flight;
+            if combo.response.hovered() {
+                self.help
+                    .register(combo.response.rect, help::HelpTopic::Target);
+            }
+        });
+        if mode != previous_mode {
+            self.project.rig.target.mode = mode;
+            if mode == TargetMode::Path {
+                self.ensure_target_path();
+                self.anim_edit_target = true;
+            }
+            if mode == TargetMode::Fixed {
+                self.anim_edit_target = false;
+                if self.project.rig.target.fixed == [0.0; 3] {
+                    self.project.rig.target.fixed = self.terrain_center_point();
+                }
+            }
+            self.anim_editor.selection = None;
+            self.mark_animation_changed();
+        }
+        match self.project.rig.target.mode {
+            TargetMode::Fixed => {
                 let mut changed = false;
-                changed |= param_f32(ui, "Durée", "s", &mut f.duration_s, 0.5, 120.0, 8.0);
-                changed |= param_u32(ui, "Images/s", "", &mut f.fps, 1, 60, 24);
-                changed |= param_f32(ui, "Vitesse", "m/s", &mut f.speed_mps, 0.5, 90.0, 18.0);
-                changed |= param_f32(
-                    ui,
-                    "Altitude sol",
-                    "m",
-                    &mut f.altitude_agl_m,
-                    1.0,
-                    1000.0,
-                    28.0,
-                );
-                changed |= param_f32(
-                    ui,
-                    "Inclinaison",
-                    "°",
-                    &mut f.pitch_bias_deg,
-                    -45.0,
-                    30.0,
-                    0.0,
-                );
-                changed |= param_f32(ui, "Virage max", "°", &mut f.max_bank_deg, 0.0, 85.0, 45.0);
-                changed |= param_f32(ui, "Réactivité", "", &mut f.smoothness, 0.0, 1.0, 0.28);
-                changed |= param_f32(ui, "Uptilt", "°", &mut f.uptilt_deg, 0.0, 60.0, 30.0);
-                changed |= param_f32(ui, "Secousses", "°", &mut f.shake_deg, 0.0, 2.0, 0.12);
-                changed |= param_f32(ui, "Turbulence", "", &mut f.turbulence, 0.0, 1.0, 0.35);
-                let mut gimbal = f.gimbal;
-                if ui.checkbox(&mut gimbal, "Nacelle stabilisée").changed() {
-                    f.gimbal = gimbal;
-                    changed = true;
-                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Position");
+                    for axis in 0..3 {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.project.rig.target.fixed[axis])
+                                    .speed(10.0),
+                            )
+                            .changed();
+                    }
+                    if ui.button("Centre du terrain").clicked() {
+                        self.project.rig.target.fixed = self.terrain_center_point();
+                        changed = true;
+                    }
+                });
                 if changed {
-                    self.status = "Réglages de vol modifiés".into();
+                    self.mark_animation_changed();
+                    self.anim_editor.selection = Some(animation_ui::AnimSelection::FixedTarget);
                 }
-            });
-
-        egui::CollapsingHeader::new("Aperçu")
-            .default_open(true)
-            .show(ui, |ui| {
-                let duration = self.project.flight.duration_s.max(0.5);
-                let mut t = self.flight_time.clamp(0.0, duration);
-                if ui
-                    .add(
-                        egui::Slider::new(&mut t, 0.0..=duration)
-                            .text("Temps de vol (s)")
-                            .fixed_decimals(2),
-                    )
-                    .changed()
-                {
-                    self.flight_time = t;
-                    self.apply_flight_camera(ctx);
-                }
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 26.0],
-                        egui::Button::new("Aperçu à ce temps"),
-                    )
-                    .clicked()
-                {
-                    self.apply_flight_camera(ctx);
-                }
+            }
+            TargetMode::Path => {
                 ui.label(
                     egui::RichText::new(
-                        "La séquence complète se rend en CLI :\n                         vistaforge anim render <projet> <dossier> --preset cinematic",
+                        "La cible suit son propre tracé. Sélectionnez-la puis cliquez sur une de ses clés.",
                     )
                     .small()
                     .weak(),
                 );
-            });
+            }
+            TargetMode::EyeAhead => {
+                let mut changed = param_f32(
+                    ui,
+                    "Avance",
+                    "s",
+                    &mut self.project.rig.target.lead_s,
+                    0.0,
+                    3.0,
+                    0.35,
+                );
+                if changed {
+                    self.mark_animation_changed();
+                }
+                changed = param_f32(
+                    ui,
+                    "Lissage visée",
+                    "",
+                    &mut self.project.rig.target.smoothing,
+                    0.0,
+                    1.0,
+                    0.35,
+                );
+                if changed {
+                    self.mark_animation_changed();
+                }
+            }
+            TargetMode::Manual => {
+                ui.label(
+                    egui::RichText::new("Orientation manuelle : la caméra suit son axe.")
+                        .small()
+                        .weak(),
+                );
+            }
+        }
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            for (name, label) in [("orbit", "Orbite"), ("ridge", "Crête"), ("dive", "Piqué")] {
+                if ui.button(label).clicked() {
+                    match vf_flight::rig::preset_path(
+                        &mut self.project.rig,
+                        &self.heightfield,
+                        name,
+                    ) {
+                        Ok(()) => {
+                            self.anim_editor.selection = None;
+                            self.anim_edit_target = false;
+                            self.rig_time = 0.0;
+                            self.mark_animation_changed();
+                            self.rig_status = format!("Tracé {label} généré");
+                        }
+                        Err(error) => self.rig_status = error,
+                    }
+                }
+            }
+            if ui.button("Durée = fin du tracé").clicked() {
+                let end = self
+                    .project
+                    .rig
+                    .eye
+                    .keys
+                    .last()
+                    .map_or(8.0, |key| key.time_s.max(0.1));
+                self.project.rig.duration_s = end.clamp(0.1, 600.0);
+                self.rig_time = self.rig_time.min(end);
+                self.mark_animation_changed();
+            }
+            if ui
+                .button("Cadrer le tracé")
+                .on_hover_text("Replace la caméra de conception au centre du tracé")
+                .clicked()
+            {
+                self.frame_animation_loop();
+            }
+            let recommended = animation_ui::TimingFit::measure(&self.project.rig);
+            if ui
+                .button(format!(
+                    "Durée conseillée ({:.0} s)",
+                    recommended.recommended_duration_s
+                ))
+                .on_hover_text(
+                    "Durée à laquelle le profil de vol peut suivre le tracé sans saturer",
+                )
+                .clicked()
+            {
+                self.project.rig.duration_s = recommended.recommended_duration_s;
+                self.rig_time = self.rig_time.min(self.project.rig.duration_s);
+                self.mark_animation_changed();
+                self.rig_status = format!(
+                    "Durée ajustée à {:.1}s pour ce profil",
+                    self.project.rig.duration_s
+                );
+            }
+        });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(!self.anim_edit_target, "Clés de l'œil")
+                .clicked()
+            {
+                self.anim_edit_target = false;
+                self.anim_editor.selection = None;
+            }
+            let target_editable = self.project.rig.target.mode == TargetMode::Path;
+            let target_keys = ui.add_enabled(
+                target_editable,
+                egui::Button::selectable(self.anim_edit_target, "Clés de la cible"),
+            );
+            if target_keys.hovered() {
+                self.help
+                    .register(target_keys.rect, help::HelpTopic::Target);
+            }
+            if target_keys.clicked() {
+                self.anim_edit_target = true;
+                self.anim_editor.selection = None;
+            }
+            if !target_editable {
+                ui.label(egui::RichText::new("(cible non animée)").small().weak());
+            }
+        });
+
+        let editing_target =
+            self.anim_edit_target && self.project.rig.target.mode == TargetMode::Path;
+        let keys: Vec<(usize, f32, [f64; 3])> = if editing_target {
+            self.project
+                .rig
+                .target
+                .path
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(index, key)| (index, key.time_s, key.position))
+                .collect()
+        } else {
+            self.project
+                .rig
+                .eye
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(index, key)| (index, key.time_s, key.position))
+                .collect()
+        };
+        let mut clicked_key = None;
+        for (index, time, position) in &keys {
+            let selection = if editing_target {
+                animation_ui::AnimSelection::TargetKey(*index)
+            } else {
+                animation_ui::AnimSelection::EyeKey(*index)
+            };
+            let selected = self.anim_editor.selection == Some(selection);
+            let label = format!(
+                "{} {} · t={:.2}s · ({:.0}, {:.0}, {:.0})",
+                if editing_target { "T" } else { "E" },
+                index,
+                time,
+                position[0],
+                position[1],
+                position[2]
+            );
+            let response = ui.selectable_label(selected, label);
+            if response.hovered() {
+                self.help.register(
+                    response.rect,
+                    if editing_target {
+                        help::HelpTopic::Target
+                    } else {
+                        help::HelpTopic::Path
+                    },
+                );
+            }
+            if response.clicked() {
+                clicked_key = Some((selection, *index, *time));
+            }
+        }
+        if let Some((selection, _index, time)) = clicked_key {
+            self.anim_editor.selection = Some(selection);
+            self.anim_edit_target = editing_target;
+            self.rig_time = time;
+        }
+        if self.project.rig.target.mode == TargetMode::Fixed && !editing_target {
+            let selected =
+                self.anim_editor.selection == Some(animation_ui::AnimSelection::FixedTarget);
+            let fixed_target = ui.selectable_label(selected, "Cible fixe");
+            if fixed_target.hovered() {
+                self.help
+                    .register(fixed_target.rect, help::HelpTopic::Target);
+            }
+            if fixed_target.clicked() {
+                self.anim_editor.selection = Some(animation_ui::AnimSelection::FixedTarget);
+            }
+        }
+
+        let mut changed = false;
+        match self.anim_editor.selection {
+            Some(animation_ui::AnimSelection::EyeKey(index))
+                if !editing_target && index < self.project.rig.eye.keys.len() =>
+            {
+                let duration = self.project.rig.duration_s.max(0.1);
+                if let Some(key) = self.project.rig.eye.keys.get_mut(index) {
+                    ui.horizontal(|ui| {
+                        ui.label("Temps");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut key.time_s)
+                                    .speed(0.02)
+                                    .range(0.0..=duration),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for axis in 0..3 {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut key.position[axis])
+                                        .speed(10.0)
+                                        .prefix(["X ", "Y ", "Z "][axis]),
+                                )
+                                .changed();
+                        }
+                    });
+                    changed |= param_f32(ui, "Adoucissement", "", &mut key.ease, 0.0, 1.0, 0.5);
+                    if ui.button("Poignées automatiques").clicked() {
+                        key.in_handle = [0.0; 3];
+                        key.out_handle = [0.0; 3];
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.project
+                        .rig
+                        .eye
+                        .keys
+                        .sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+                    self.mark_animation_changed();
+                }
+            }
+            Some(animation_ui::AnimSelection::TargetKey(index))
+                if editing_target && index < self.project.rig.target.path.keys.len() =>
+            {
+                let duration = self.project.rig.duration_s.max(0.1);
+                if let Some(key) = self.project.rig.target.path.keys.get_mut(index) {
+                    ui.horizontal(|ui| {
+                        ui.label("Temps");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut key.time_s)
+                                    .speed(0.02)
+                                    .range(0.0..=duration),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for axis in 0..3 {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut key.position[axis])
+                                        .speed(10.0)
+                                        .prefix(["X ", "Y ", "Z "][axis]),
+                                )
+                                .changed();
+                        }
+                    });
+                }
+                if changed {
+                    self.project
+                        .rig
+                        .target
+                        .path
+                        .keys
+                        .sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+                    self.mark_animation_changed();
+                }
+            }
+            Some(animation_ui::AnimSelection::FixedTarget)
+                if !editing_target && self.project.rig.target.mode == TargetMode::Fixed =>
+            {
+                ui.horizontal_wrapped(|ui| {
+                    for axis in 0..3 {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.project.rig.target.fixed[axis])
+                                    .speed(10.0)
+                                    .prefix(["X ", "Y ", "Z "][axis]),
+                            )
+                            .changed();
+                    }
+                });
+                if changed {
+                    self.mark_animation_changed();
+                }
+            }
+            _ => {
+                ui.label(
+                    egui::RichText::new("Sélectionnez une clé dans la liste ou dans le viewport.")
+                        .small()
+                        .weak(),
+                );
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            let add = ui.button("+ Clé au temps courant");
+            if add.hovered() {
+                self.help.register(add.rect, help::HelpTopic::Path);
+            }
+            if add.clicked() {
+                self.add_animation_key(editing_target);
+            }
+            let can_delete = match self.anim_editor.selection {
+                Some(animation_ui::AnimSelection::EyeKey(index)) => {
+                    self.project.rig.eye.keys.len() > 2 && index < self.project.rig.eye.keys.len()
+                }
+                Some(animation_ui::AnimSelection::TargetKey(index)) => {
+                    self.project.rig.target.path.keys.len() > 2
+                        && index < self.project.rig.target.path.keys.len()
+                }
+                _ => false,
+            };
+            if ui
+                .add_enabled(can_delete, egui::Button::new("Supprimer la clé"))
+                .clicked()
+            {
+                self.delete_animation_key();
+            }
+            if ui
+                .button("Insérer au temps courant")
+                .on_hover_text("Ajoute une clé sur le segment, sans déplacer les voisines")
+                .clicked()
+            {
+                self.insert_animation_key(editing_target);
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Astuce : en mode Tracer, chaque clic sur le terrain ajoute une clé et allonge la durée.",
+            )
+            .small()
+            .weak(),
+        );
     }
 
-    fn apply_flight_camera(&mut self, ctx: &egui::Context) {
-        if !self.project.flight.enabled {
-            self.status = "Active d'abord le vol".into();
+    fn ensure_target_path(&mut self) {
+        if self.project.rig.target.path.keys.len() >= 2 {
             return;
         }
-        let seed = Seed::new(self.project.flight.seed);
-        match vf_flight::sample_at(
-            &self.project.flight,
-            &self.heightfield,
-            seed,
-            self.project.camera.fov_y_deg,
-            f64::from(self.flight_time),
-        ) {
-            Ok(sample) => {
-                self.project.camera = sample.camera;
-                self.status = format!(
-                    "Vol t={:.2}s · {:.0} m sol · {:.1}° de gîte",
-                    self.flight_time, sample.altitude_agl_m, sample.bank_deg
-                );
-                self.start_render(ctx.clone(), false);
+        let duration = self.project.rig.duration_s.max(1.0);
+        let center = self.terrain_center_point();
+        self.project.rig.target.mode = TargetMode::Path;
+        self.project.rig.target.path.keys =
+            vec![PathKey::new(0.0, center), PathKey::new(duration, center)];
+    }
+
+    /// Orbit the design camera around a short animation loop so its
+    /// trajectory is readable without losing the terrain context.
+    fn frame_animation_loop(&mut self) {
+        let center = vf_flight::rig::path_center(&self.project.rig.eye);
+        let length = vf_flight::rig::path_length(&self.project.rig.eye);
+        let distance = (length * 1.15).clamp(420.0, 2600.0);
+        self.orbit_center = center;
+        self.project.camera = vf_scene::orbit(center, distance, 35.0, 30.0, self.fov);
+        self.sync_orbit_from_camera();
+        self.mark_camera_dirty();
+    }
+
+    fn terrain_center_point(&self) -> [f64; 3] {
+        let bounds = self.heightfield.bounds();
+        [
+            (bounds.min[0] + bounds.max[0]) * 0.5,
+            (bounds.min[1] + bounds.max[1]) * 0.5,
+            bounds.min[2] + (bounds.max[2] - bounds.min[2]) * 0.38,
+        ]
+    }
+
+    fn add_animation_key(&mut self, target: bool) {
+        if target {
+            self.ensure_target_path();
+        }
+        let time = self
+            .rig_time
+            .clamp(0.0, self.project.rig.duration_s.max(0.1));
+        let fallback = self.terrain_center_point();
+        let position = if target {
+            let p = vf_flight::rig::sample_path(&self.project.rig.target.path, time);
+            [p.x, p.y, p.z]
+        } else {
+            let p = vf_flight::rig::sample_path(&self.project.rig.eye, time);
+            [p.x, p.y, p.z + 80.0]
+        };
+        let position = if position.iter().all(|value| value.is_finite()) {
+            position
+        } else {
+            fallback
+        };
+        let path = if target {
+            &mut self.project.rig.target.path
+        } else {
+            &mut self.project.rig.eye
+        };
+        path.push(PathKey::new(time, position));
+        let index = path
+            .keys
+            .iter()
+            .position(|key| (key.time_s - time).abs() < 1e-4);
+        self.anim_editor.selection = match (target, index) {
+            (true, Some(index)) => Some(animation_ui::AnimSelection::TargetKey(index)),
+            (false, Some(index)) => Some(animation_ui::AnimSelection::EyeKey(index)),
+            _ => None,
+        };
+        self.anim_edit_target = target;
+        self.mark_animation_changed();
+    }
+
+    fn insert_animation_key(&mut self, target: bool) {
+        let time = self
+            .rig_time
+            .clamp(0.0, self.project.rig.duration_s.max(0.1));
+        let path = if target {
+            &self.project.rig.target.path
+        } else {
+            &self.project.rig.eye
+        };
+        if path.keys.len() < 2 {
+            self.rig_status = "Le tracé a besoin d'au moins deux clés".into();
+            return;
+        }
+        if let Some(index) = path
+            .keys
+            .iter()
+            .position(|key| (key.time_s - time).abs() < 0.02)
+        {
+            self.anim_editor.selection = Some(if target {
+                animation_ui::AnimSelection::TargetKey(index)
+            } else {
+                animation_ui::AnimSelection::EyeKey(index)
+            });
+            self.anim_edit_target = target;
+            self.rig_status = format!("Une clé existe déjà à t={time:.2}s");
+            return;
+        }
+        let position = vf_flight::rig::sample_path(path, time);
+        let new_key = PathKey::new(time, [position.x, position.y, position.z]);
+        let path = if target {
+            &mut self.project.rig.target.path
+        } else {
+            &mut self.project.rig.eye
+        };
+        path.push(new_key);
+        let index = path
+            .keys
+            .iter()
+            .position(|key| (key.time_s - time).abs() < 1e-4);
+        self.anim_editor.selection = match (target, index) {
+            (true, Some(index)) => Some(animation_ui::AnimSelection::TargetKey(index)),
+            (false, Some(index)) => Some(animation_ui::AnimSelection::EyeKey(index)),
+            _ => None,
+        };
+        self.anim_edit_target = target;
+        self.mark_animation_changed();
+        self.rig_status = format!("Clé insérée à t={time:.2}s");
+    }
+
+    fn delete_animation_key(&mut self) {
+        if let Some(selection) = self.anim_editor.selection {
+            let removed = match selection {
+                animation_ui::AnimSelection::EyeKey(index)
+                    if self.project.rig.eye.keys.len() > 2 =>
+                {
+                    self.project.rig.eye.keys.remove(index);
+                    true
+                }
+                animation_ui::AnimSelection::TargetKey(index)
+                    if self.project.rig.target.path.keys.len() > 2 =>
+                {
+                    self.project.rig.target.path.keys.remove(index);
+                    true
+                }
+                _ => false,
+            };
+            if removed {
+                self.anim_editor.selection = None;
+                self.mark_animation_changed();
             }
-            Err(error) => self.status = format!("Vol: {error}"),
+        }
+    }
+
+    fn anim_timing_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Étape 2 · Réglez la durée, la cadence et l'optique. La durée peut rester indépendante du dernier point.",
+            )
+            .small(),
+        );
+        let mut changed = false;
+        changed |= param_f32(
+            ui,
+            "Durée",
+            "s",
+            &mut self.project.rig.duration_s,
+            0.1,
+            600.0,
+            8.0,
+        );
+        changed |= param_u32(ui, "Images/s", "", &mut self.project.rig.fps, 1, 120, 24);
+        let frames = self.project.rig.frame_count();
+        ui.label(
+            egui::RichText::new(format!(
+                "{frames} images · {:.2} s · {} fps",
+                self.project.rig.duration_s, self.project.rig.fps
+            ))
+            .small()
+            .weak(),
+        );
+        let fit = animation_ui::TimingFit::measure(&self.project.rig);
+        let (fit_color, fit_icon) = if fit.is_strained() {
+            (egui::Color32::from_rgb(255, 176, 100), "Attention :")
+        } else if fit.pressure < 0.45 {
+            (egui::Color32::from_rgb(150, 190, 230), "Info :")
+        } else {
+            (egui::Color32::from_rgb(130, 210, 160), "OK :")
+        };
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::from_rgba_unmultiplied(22, 28, 38, 180))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{fit_icon}  {:.0} m de tracé · {:.0} m/s demandés · croisière {:.0} m/s",
+                        fit.length_m, fit.required_speed_mps, fit.cruise_speed_mps
+                    ))
+                    .size(10.5)
+                    .color(fit_color),
+                );
+                ui.label(
+                    egui::RichText::new(fit.advice())
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(180, 195, 212)),
+                );
+                if (fit.is_strained() || fit.pressure < 0.45)
+                    && ui
+                        .button(format!(
+                            "Ajuster la durée à {:.0} s (conseillé)",
+                            fit.recommended_duration_s
+                        ))
+                        .clicked()
+                {
+                    self.project.rig.duration_s = fit.recommended_duration_s;
+                    self.rig_time = self.rig_time.min(self.project.rig.duration_s);
+                    self.mark_animation_changed();
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.label("Seed");
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.project.rig.seed).speed(1.0))
+                .changed();
+        });
+        if changed {
+            self.rig_time = self.rig_time.min(self.project.rig.duration_s);
+            self.mark_animation_changed();
+        }
+
+        let header = egui::CollapsingHeader::new("Optique et caméra")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut optics_changed = param_f32(
+                    ui,
+                    "FOV",
+                    "°",
+                    &mut self.project.rig.optics.fov_y_deg,
+                    5.0,
+                    150.0,
+                    50.0,
+                );
+                ui.checkbox(
+                    &mut self.project.rig.optics.dof_enabled,
+                    "Profondeur de champ",
+                );
+                if self.project.rig.optics.dof_enabled {
+                    optics_changed |= param_f32(
+                        ui,
+                        "Ouverture",
+                        "f/",
+                        &mut self.project.rig.optics.fstop,
+                        0.7,
+                        64.0,
+                        8.0,
+                    );
+                    ui.checkbox(
+                        &mut self.project.rig.optics.focus_on_target,
+                        "Mise au point sur la cible",
+                    );
+                    if !self.project.rig.optics.focus_on_target {
+                        optics_changed |= param_f32(
+                            ui,
+                            "Distance",
+                            "m",
+                            &mut self.project.rig.optics.focus_distance_m,
+                            0.1,
+                            100_000.0,
+                            100.0,
+                        );
+                    }
+                }
+                optics_changed |= param_f32(
+                    ui,
+                    "Roulis",
+                    "°",
+                    &mut self.project.rig.optics.roll_deg,
+                    -180.0,
+                    180.0,
+                    0.0,
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Liaison caméra");
+                    let mut link = self.project.rig.optics.link;
+                    egui::ComboBox::from_id_salt("anim-camera-link")
+                        .selected_text(match link {
+                            CameraLink::Eye => "Rigide",
+                            CameraLink::Spring => "Ressort",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut link, CameraLink::Eye, "Rigide");
+                            ui.selectable_value(&mut link, CameraLink::Spring, "Ressort");
+                        });
+                    if link != self.project.rig.optics.link {
+                        self.project.rig.optics.link = link;
+                        optics_changed = true;
+                    }
+                });
+                if self.project.rig.optics.link == CameraLink::Spring {
+                    optics_changed |= param_f32(
+                        ui,
+                        "Raideur",
+                        "",
+                        &mut self.project.rig.optics.spring_stiffness,
+                        0.1,
+                        40.0,
+                        6.0,
+                    );
+                    optics_changed |= param_f32(
+                        ui,
+                        "Amortissement",
+                        "",
+                        &mut self.project.rig.optics.spring_damping,
+                        0.0,
+                        3.0,
+                        0.8,
+                    );
+                }
+                if optics_changed {
+                    self.mark_animation_changed();
+                }
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Optics,
+        );
+
+        let header = egui::CollapsingHeader::new("Contraintes")
+            .default_open(false)
+            .show(ui, |ui| {
+                let constraints = &mut self.project.rig.constraints;
+                let mut changed = false;
+                changed |= ui
+                    .checkbox(&mut constraints.enabled, "Contraintes actives")
+                    .changed();
+                changed |= param_f32(
+                    ui,
+                    "Hauteur sol",
+                    "m",
+                    &mut constraints.ground_clearance_m,
+                    0.0,
+                    2000.0,
+                    25.0,
+                );
+                changed |= ui
+                    .checkbox(&mut constraints.reference_enabled, "Sol de référence fixe")
+                    .changed();
+                if constraints.reference_enabled {
+                    changed |= param_f32(
+                        ui,
+                        "Référence",
+                        "m",
+                        &mut constraints.reference_z_m,
+                        -10_000.0,
+                        20_000.0,
+                        0.0,
+                    );
+                }
+                changed |= param_f32(
+                    ui,
+                    "Distance parois",
+                    "m",
+                    &mut constraints.wall_distance_m,
+                    0.0,
+                    2000.0,
+                    40.0,
+                );
+                changed |= ui
+                    .checkbox(&mut constraints.wall_avoidance, "Évitement des parois")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut constraints.apply_eye, "Appliquer à l'œil")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut constraints.apply_camera, "Appliquer à la caméra")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut constraints.apply_target, "Appliquer à la cible")
+                    .changed();
+                changed |= param_f32(ui, "Douceur", "", &mut constraints.softness, 0.0, 1.0, 0.35);
+                if changed {
+                    self.mark_animation_changed();
+                }
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Constraints,
+        );
+
+        ui.horizontal(|ui| {
+            if ui.button("Vue caméra à t").clicked() {
+                self.enter_animation_camera(ctx);
+            }
+            if ui.button("Vue design").clicked() {
+                self.enter_animation_design(ctx);
+            }
+        });
+    }
+
+    fn anim_profile_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Étape 3 · Choisissez un profil : il change la dynamique du corps, pas votre tracé. Les courbes comparent les profils sur ce trajet.",
+            )
+            .small(),
+        );
+        if self
+            .anim_profile_cache
+            .as_ref()
+            .is_none_or(|cache| cache.revision != self.anim_revision)
+        {
+            let curves = animation_ui::profile_curves(
+                &self.project.rig,
+                &self.heightfield,
+                self.project.seed,
+            );
+            self.anim_profile_cache = Some(animation_ui::ProfileCache {
+                revision: self.anim_revision,
+                curves,
+            });
+        }
+        let active = self.project.rig.body.preset;
+        ui.horizontal_wrapped(|ui| {
+            for preset in AircraftPreset::ALL {
+                let color = animation_ui::preset_color(preset);
+                let label = if preset == active {
+                    format!("✓ {}", preset.label())
+                } else {
+                    preset.label().to_string()
+                };
+                let button = egui::Button::new(egui::RichText::new(label).size(12.0))
+                    .fill(color.gamma_multiply(0.25));
+                let response = ui.add(button);
+                if response.hovered() {
+                    self.help.register(response.rect, help::HelpTopic::Profile);
+                }
+                if response.clicked() && preset != active {
+                    animation_ui::apply_aircraft_preset(&mut self.project.rig, preset);
+                    self.mark_animation_changed();
+                    self.rig_status = format!(
+                        "Profil {} : {}",
+                        preset.label(),
+                        animation_ui::preset_character(preset)
+                    );
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(animation_ui::preset_character(active))
+                .small()
+                .weak(),
+        );
+        let fit = animation_ui::TimingFit::measure(&self.project.rig);
+        if fit.is_strained() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Attention : ce tracé demande {:.0} m/s alors que le profil plafonne à {:.0} m/s : les profils vont se ressembler. Raccourcissez le tracé ou passez à ≈ {:.0} s.",
+                    fit.required_speed_mps,
+                    fit.max_speed_mps,
+                    fit.recommended_duration_s
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(255, 176, 100)),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(format!("Ajuster à {:.0} s", fit.recommended_duration_s))
+                    .clicked()
+                {
+                    self.project.rig.duration_s = fit.recommended_duration_s;
+                    self.rig_time = self.rig_time.min(self.project.rig.duration_s);
+                    self.mark_animation_changed();
+                }
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Tracé de démonstration (S)")
+                .on_hover_text(
+                    "Crée un S adapté au profil, à 90 % de sa vitesse max : idéal pour comparer les profils en quelques secondes",
+                )
+                .clicked()
+            {
+                match vf_flight::rig::preset_path(
+                    &mut self.project.rig,
+                    &self.heightfield,
+                    "demo",
+                ) {
+                    Ok(()) => {
+                        self.anim_editor.selection = None;
+                        self.anim_edit_target = false;
+                        self.rig_time = 0.0;
+                        self.mark_animation_changed();
+                        self.rig_status = format!(
+                            "Tracé de démonstration : {:.1}s, {}",
+                            self.project.rig.duration_s,
+                            active.label()
+                        );
+                        // Frame the small loop so the five trajectories are
+                        // actually visible in the design viewport.
+                        self.frame_animation_loop();
+                    }
+                    Err(error) => self.rig_status = error,
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Tester ce profil").strong()))
+                .on_hover_text("Passe en vue caméra et lance la lecture depuis le début")
+                .clicked()
+            {
+                self.rig_time = 0.0;
+                self.toggle_animation_play(ctx);
+            }
+            let mut compare = self.anim_compare;
+            if ui
+                .checkbox(&mut compare, "Comparer les trajectoires")
+                .on_hover_text(
+                    "Affiche les trajectoires simulées des cinq corps sur le même tracé, en vue design",
+                )
+                .changed()
+            {
+                self.anim_compare = compare;
+                self.anim_compare_cache = None;
+                self.anim_view = animation_ui::AnimViewMode::Design;
+                self.anim_playing = false;
+            }
+            if self.anim_compare {
+                ui.checkbox(&mut self.anim_editor.show_trail, "Jaune = profil actif");
+            }
+        });
+        ui.add_space(4.0);
+        let curves = self
+            .anim_profile_cache
+            .as_ref()
+            .map_or(&[][..], |cache| cache.curves.as_slice());
+        let chart = animation_ui::profile_chart(ui, curves, active);
+        if chart.hovered() {
+            self.help.register(chart.rect, help::HelpTopic::Profile);
+        }
+        ui.horizontal_wrapped(|ui| {
+            for preset in AircraftPreset::ALL {
+                ui.label(
+                    egui::RichText::new(preset.label())
+                        .small()
+                        .color(animation_ui::preset_color(preset)),
+                );
+            }
+        });
+        ui.checkbox(
+            &mut self.anim_editor.show_trail,
+            "Afficher la trajectoire simulée (jaune)",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Vue caméra à t").clicked() {
+                self.enter_animation_camera(ctx);
+            }
+            if ui.button("Vue design").clicked() {
+                self.enter_animation_design(ctx);
+            }
+        });
+        let header = egui::CollapsingHeader::new("Réglages fins du profil")
+            .default_open(false)
+            .show(ui, |ui| {
+                let body = &mut self.project.rig.body;
+                let mut changed = false;
+                changed |= param_f32(
+                    ui,
+                    "Vitesse max",
+                    "m/s",
+                    &mut body.max_speed_mps,
+                    0.5,
+                    300.0,
+                    30.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Accél. avant",
+                    "m/s²",
+                    &mut body.accel_forward_mps2,
+                    0.05,
+                    200.0,
+                    25.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Accél. latérale",
+                    "m/s²",
+                    &mut body.accel_lateral_mps2,
+                    0.05,
+                    200.0,
+                    30.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Accél. verticale",
+                    "m/s²",
+                    &mut body.accel_vertical_mps2,
+                    0.05,
+                    200.0,
+                    20.0,
+                );
+                changed |= param_f32(ui, "Jerk", "m/s³", &mut body.jerk_mps3, 0.1, 1000.0, 60.0);
+                changed |= param_f32(ui, "Traînée", "", &mut body.drag, 0.0, 1.0, 0.12);
+                changed |= param_f32(ui, "Gain de roulis", "", &mut body.bank_gain, 0.0, 2.0, 1.0);
+                changed |= param_f32(
+                    ui,
+                    "Roulis max",
+                    "°",
+                    &mut body.max_bank_deg,
+                    0.0,
+                    89.0,
+                    75.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Réponse roulis",
+                    "",
+                    &mut body.roll_response,
+                    0.1,
+                    40.0,
+                    10.0,
+                );
+                changed |= param_f32(ui, "Secousses", "°", &mut body.shake_deg, 0.0, 5.0, 0.1);
+                changed |= param_f32(ui, "Turbulence", "", &mut body.turbulence, 0.0, 1.0, 0.35);
+                if changed {
+                    self.mark_animation_changed();
+                }
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Profile,
+        );
+    }
+
+    fn anim_preview_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Étape 4 · Lisez l'animation dans le viewport, ou rendez la séquence PNG complète.",
+            )
+            .small(),
+        );
+        let duration = self.project.rig.duration_s.max(0.1);
+        let mut time = self.rig_time.clamp(0.0, duration);
+        if ui
+            .add(
+                egui::Slider::new(&mut time, 0.0..=duration)
+                    .text("Temps")
+                    .fixed_decimals(2),
+            )
+            .changed()
+        {
+            self.anim_playing = false;
+            self.rig_time = time;
+            self.enter_animation_camera(ctx);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let play_label = if self.anim_playing {
+                "⏸ Pause"
+            } else {
+                "▶ Lecture"
+            };
+            if ui.button(play_label).clicked() {
+                self.toggle_animation_play(ctx);
+            }
+            ui.checkbox(&mut self.anim_loop, "Boucle");
+            ui.label("Vitesse");
+            ui.add(
+                egui::DragValue::new(&mut self.anim_play_speed)
+                    .speed(0.05)
+                    .range(0.05..=4.0)
+                    .suffix("×"),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Vue design").clicked() {
+                self.enter_animation_design(ctx);
+            }
+            if ui.button("Vue caméra").clicked() {
+                self.enter_animation_camera(ctx);
+            }
+            if ui.button("Image à ce temps (CPU)").clicked() {
+                self.enter_animation_camera(ctx);
+                self.start_render(ctx.clone(), true);
+            }
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "{} images · {:.2}s · {} fps · espace = lecture/pause",
+                self.project.rig.frame_count(),
+                self.project.rig.duration_s,
+                self.project.rig.fps
+            ))
+            .small()
+            .weak(),
+        );
+        ui.separator();
+        let export_title = ui.label(egui::RichText::new("Séquence PNG").strong());
+        if export_title.hovered() {
+            self.help
+                .register(export_title.rect, help::HelpTopic::Export);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Dossier");
+            let folder = ui.add(
+                egui::TextEdit::singleline(&mut self.anim_export_dir)
+                    .desired_width(ui.available_width() - 8.0),
+            );
+            if folder.hovered() {
+                self.help.register(folder.rect, help::HelpTopic::Export);
+            }
+        });
+        let frames = self.project.rig.frame_count();
+        let frames_label = ui.label(
+            egui::RichText::new(format!(
+                "{} images en {}×{} ({} qualité). Le rendu final CPU peut être long.",
+                frames,
+                self.render_width,
+                self.render_height,
+                quality_label(self.quality)
+            ))
+            .small()
+            .weak(),
+        );
+        if frames_label.hovered() {
+            self.help
+                .register(frames_label.rect, help::HelpTopic::Export);
+        }
+        let exporting = self.anim_export_task.is_some();
+        ui.horizontal(|ui| {
+            let render_sequence =
+                ui.add_enabled(!exporting, egui::Button::new("Rendre la séquence"));
+            if render_sequence.hovered() {
+                self.help
+                    .register(render_sequence.rect, help::HelpTopic::Export);
+            }
+            if render_sequence.clicked() {
+                self.start_animation_export(ctx);
+            }
+            if let Some(task) = &self.anim_export_task {
+                let progress = if task.total == 0 {
+                    0.0
+                } else {
+                    task.done as f32 / task.total as f32
+                };
+                ui.add(
+                    egui::ProgressBar::new(progress)
+                        .text(format!("{}/{}", task.done, task.total))
+                        .desired_width(150.0),
+                );
+                if ui.button("Annuler").clicked() {
+                    task.cancel.store(true, Ordering::Relaxed);
+                }
+                ui.spinner();
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Astuce : l'encodeur MP4 reste disponible en CLI (`vistaforge anim render ... --video`).",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn start_animation_export(&mut self, ctx: &egui::Context) {
+        if self.anim_export_task.is_some() {
+            return;
+        }
+        if let Err(error) = self.project.rig.validate() {
+            self.rig_status = format!("Animation invalide : {error}");
+            return;
+        }
+        let out_dir = PathBuf::from(self.anim_export_dir.trim());
+        if out_dir.as_os_str().is_empty() {
+            self.rig_status = "Choisissez un dossier de sortie".into();
+            return;
+        }
+        let rig = self.project.rig.clone();
+        let total = rig.frame_count();
+        let mut project = self.project.clone();
+        let heightfield = self.heightfield.clone();
+        let options = self.full_options();
+        let seed = self.project.seed;
+        let fps = rig.fps.max(1);
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_worker = Arc::clone(&cancel);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = std::fs::create_dir_all(&out_dir) {
+                let _ = sender.send(AnimationExportMsg::Failed(format!(
+                    "création du dossier : {error}"
+                )));
+                repaint.request_repaint();
+                return;
+            }
+            let mut simulation = match vf_flight::rig::RigSimulation::new(&rig, &heightfield, seed)
+            {
+                Ok(simulation) => simulation,
+                Err(error) => {
+                    let _ = sender.send(AnimationExportMsg::Failed(error));
+                    repaint.request_repaint();
+                    return;
+                }
+            };
+            let mut written = 0usize;
+            let started = Instant::now();
+            for index in 0..total {
+                if cancel_worker.load(Ordering::Relaxed) {
+                    let _ = sender.send(AnimationExportMsg::Cancelled);
+                    repaint.request_repaint();
+                    return;
+                }
+                let time = index as f32 / fps as f32;
+                let sample = simulation.sample_at(time);
+                project.camera = sample.camera;
+                match render_with_options(&project, &heightfield, &options) {
+                    Ok(output) => {
+                        let path = out_dir.join(format!("frame_{index:05}.png"));
+                        if let Err(error) = output.save_png(&path) {
+                            let _ = sender.send(AnimationExportMsg::Failed(format!(
+                                "écriture {} : {error}",
+                                path.display()
+                            )));
+                            repaint.request_repaint();
+                            return;
+                        }
+                        written += 1;
+                    }
+                    Err(error) => {
+                        let _ = sender.send(AnimationExportMsg::Failed(error.to_string()));
+                        repaint.request_repaint();
+                        return;
+                    }
+                }
+                let _ = sender.send(AnimationExportMsg::Progress {
+                    done: index + 1,
+                    total,
+                });
+                if index.is_multiple_of(4) {
+                    repaint.request_repaint();
+                }
+            }
+            let _ = sender.send(AnimationExportMsg::Finished {
+                written,
+                total,
+                elapsed: started.elapsed(),
+            });
+            repaint.request_repaint();
+        });
+        self.anim_export_task = Some(AnimationExportTask {
+            receiver,
+            cancel,
+            started: Instant::now(),
+            total,
+            done: 0,
+        });
+        self.rig_status = format!("Rendu de {total} images…");
+        ctx.request_repaint();
+    }
+
+    fn poll_animation_export(&mut self, ctx: &egui::Context) {
+        let Some(task) = self.anim_export_task.as_mut() else {
+            return;
+        };
+        let mut finished = false;
+        let mut messages = Vec::new();
+        loop {
+            match task.receiver.try_recv() {
+                Ok(message) => messages.push(message),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+        for message in messages {
+            match message {
+                AnimationExportMsg::Progress { done, total } => {
+                    task.done = done;
+                    task.total = total;
+                    if done.is_multiple_of(8) {
+                        self.rig_status = format!("Séquence : {done}/{total} images");
+                    }
+                }
+                AnimationExportMsg::Finished {
+                    written,
+                    total,
+                    elapsed,
+                } => {
+                    self.rig_status = format!(
+                        "Séquence terminée : {written}/{total} images dans {} en {:.1}s",
+                        self.anim_export_dir,
+                        elapsed.as_secs_f32()
+                    );
+                    finished = true;
+                }
+                AnimationExportMsg::Cancelled => {
+                    self.rig_status = "Séquence annulée".into();
+                    finished = true;
+                }
+                AnimationExportMsg::Failed(error) => {
+                    self.rig_status = format!("Séquence : {error}");
+                    finished = true;
+                }
+            }
+        }
+        if finished {
+            self.anim_export_task = None;
+        } else if let Some(task) = &self.anim_export_task {
+            let _ = task.started;
+            ctx.request_repaint_after(Duration::from_millis(120));
         }
     }
 
     fn workspace_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.help.register_front(
+            ui.available_rect_before_wrap(),
+            help_topic_for_workspace(self.workspace),
+        );
         egui::ScrollArea::vertical().show(ui, |ui| {
             match self.workspace {
                 Workspace::Terrain => self.terrain_ui(ui, ctx),
@@ -1980,13 +4486,12 @@ impl VistaForgeApp {
                 Workspace::Rock => self.rock_ui(ui, ctx),
                 Workspace::Detail => self.detail_ui(ui, ctx),
                 Workspace::Sculpt => self.sculpt_panel_ui(ui, ctx),
-                Workspace::Rig => self.rig_panel_ui(ui, ctx),
+                Workspace::Animation => self.animation_panel_ui(ui, ctx),
                 Workspace::Erosion => self.erosion_ui(ui),
                 Workspace::Water => self.water_ui(ui),
                 Workspace::Materials => self.materials_ui(ui),
                 Workspace::Light => self.light_ui(ui),
                 Workspace::Camera => self.camera_ui(ui),
-                Workspace::Flight => self.flight_ui(ui, ctx),
                 Workspace::Render => self.render_ui(ui, ctx),
             }
             ui.add_space(12.0);
@@ -2006,26 +4511,67 @@ impl VistaForgeApp {
     }
 
     fn camera_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Camera")
+        let header = egui::CollapsingHeader::new("Vues CAO")
             .default_open(true)
             .show(ui, |ui| {
-                if ui.button("Auto-frame terrain").clicked() {
-                    self.auto_frame();
-                    self.mark_dirty();
-                }
+                ui.horizontal_wrapped(|ui| {
+                    for preset in [
+                        vf_scene::ViewPreset::Perspective,
+                        vf_scene::ViewPreset::Front,
+                        vf_scene::ViewPreset::Top,
+                        vf_scene::ViewPreset::Right,
+                        vf_scene::ViewPreset::Left,
+                        vf_scene::ViewPreset::Back,
+                        vf_scene::ViewPreset::Bottom,
+                    ] {
+                        if ui
+                            .small_button(preset.label())
+                            .on_hover_text("Cadrer le terrain sur cette vue")
+                            .clicked()
+                        {
+                            self.set_view_preset(preset);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Vue par défaut").clicked() {
+                        self.home_view();
+                    }
+                    ui.checkbox(&mut self.show_gizmo, "Gizmo d'orientation");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Raccourcis : 1 face · 2 dessus · 3 droite · 0/Home défaut",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Camera,
+        );
+        let header = egui::CollapsingHeader::new("Caméra")
+            .default_open(true)
+            .show(ui, |ui| {
                 if ui
                     .add(egui::Slider::new(&mut self.yaw, -180.0..=180.0).text("Yaw"))
                     .changed()
                 {
                     self.apply_orbit();
-                    self.mark_dirty();
+                    self.mark_camera_dirty();
                 }
                 if ui
-                    .add(egui::Slider::new(&mut self.pitch, -20.0..=85.0).text("Pitch"))
+                    .add(egui::Slider::new(&mut self.pitch, -90.0..=90.0).text("Pitch"))
                     .changed()
                 {
                     self.apply_orbit();
-                    self.mark_dirty();
+                    self.mark_camera_dirty();
                 }
                 if ui
                     .add(
@@ -2036,7 +4582,7 @@ impl VistaForgeApp {
                     .changed()
                 {
                     self.apply_orbit();
-                    self.mark_dirty();
+                    self.mark_camera_dirty();
                 }
                 if ui
                     .add(egui::Slider::new(&mut self.fov, 10.0..=110.0).text("FOV (°)"))
@@ -2044,11 +4590,14 @@ impl VistaForgeApp {
                 {
                     self.project.camera.fov_y_deg = self.fov;
                     self.apply_orbit();
-                    self.mark_dirty();
+                    self.mark_camera_dirty();
                 }
                 ui.label(
                     egui::RichText::new(format!(
-                        "eye ({:.0}, {:.0}, {:.0})",
+                        "orbite {:.0}° / {:.0}° · {:.0} m · eye ({:.0}, {:.0}, {:.0})",
+                        self.yaw,
+                        self.pitch,
+                        self.distance,
                         self.project.camera.position.x,
                         self.project.camera.position.y,
                         self.project.camera.position.z
@@ -2057,10 +4606,19 @@ impl VistaForgeApp {
                     .weak(),
                 );
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Camera,
+        );
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Output")
+        let header = egui::CollapsingHeader::new("Output")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2125,6 +4683,18 @@ impl VistaForgeApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.shadows, "Shadows");
                     ui.checkbox(&mut self.ao, "AO");
+                    let adaptive = ui.checkbox(&mut self.adaptive_preview, "Aperçu adaptatif");
+                    if adaptive.hovered() {
+                        self.help
+                            .register(adaptive.rect, help::HelpTopic::Adaptive);
+                    }
+                    if adaptive.changed() {
+                        if !self.adaptive_preview {
+                            self.preview_scale = 1.0;
+                            self.refine_at = None;
+                        }
+                        self.mark_dirty();
+                    }
                     if ui
                         .checkbox(&mut self.project.render.adaptive, "LOD adaptatif")
                         .changed()
@@ -2137,20 +4707,69 @@ impl VistaForgeApp {
                     {
                         self.mark_dirty();
                     }
-                    ui.checkbox(&mut self.clouds, "Clouds");
-                    ui.checkbox(&mut self.water, "Water");
+                    let mut scene_changed = false;
+                    scene_changed |= ui.checkbox(&mut self.clouds, "Clouds").changed();
+                    scene_changed |= ui.checkbox(&mut self.water, "Water").changed();
+                    if scene_changed {
+                        self.mark_dirty();
+                    }
                 });
+                let gpu_info = self
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| (gpu.label().to_owned(), gpu.summary()));
+                if let Some((label, summary)) = gpu_info {
+                    let mut enabled = self.gpu_enabled;
+                    let gpu_check = ui.checkbox(&mut enabled, format!("Vue 3D GPU — {label}"));
+                    if gpu_check.hovered() {
+                        self.help.register(gpu_check.rect, help::HelpTopic::Gpu);
+                    }
+                    if gpu_check.changed() {
+                        self.gpu_enabled = enabled;
+                        self.mark_dirty();
+                        if enabled {
+                            self.gpu_mesh_dirty = true;
+                            self.gpu_mesh_due = Some(Instant::now());
+                        }
+                    }
+                    ui.label(egui::RichText::new(summary).small().weak());
+                    if self.gpu_enabled
+                        && self.show_final_render
+                        && ui.button("Revenir à la vue GPU").clicked()
+                    {
+                        self.show_final_render = false;
+                    }
+                } else if let Some(error) = &self.gpu_error {
+                    ui.label(
+                        egui::RichText::new(format!("GPU indisponible : {error}"))
+                            .small()
+                            .weak(),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Vue GPU indisponible : démarrage en mode OpenGL (VISTAFORGE_RENDERER=wgpu pour l'activer).",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
                 ui.horizontal(|ui| {
                     if ui
                         .add_sized(
                             [ui.available_width() * 0.55, 28.0],
                             egui::Button::new("Render"),
                         )
+                        .on_hover_text("Rendu final CPU déterministe, à la résolution de sortie")
                         .clicked()
                     {
                         self.start_render(ctx.clone(), true);
                     }
-                    if ui.button("Preview").clicked() {
+                    if ui
+                        .button("Preview")
+                        .on_hover_text("Aperçu CPU à la résolution adaptative courante")
+                        .clicked()
+                    {
                         self.start_render(ctx.clone(), false);
                     }
                 });
@@ -2162,8 +4781,24 @@ impl VistaForgeApp {
                 }
                 ui.label(
                     egui::RichText::new(format!(
-                        "last: {}x{} · {} ms",
+                        "dernier rendu : {}×{} · {} ms",
                         self.last_render_size.0, self.last_render_size.1, self.last_render_ms
+                    ))
+                    .small()
+                    .weak(),
+                );
+                let preview_w = ((PREVIEW_SIZE.0 as f32) * self.preview_scale)
+                    .round()
+                    .max(160.0) as u32;
+                let preview_h = ((PREVIEW_SIZE.1 as f32) * self.preview_scale)
+                    .round()
+                    .max(90.0) as u32;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "aperçu adaptatif : {preview_w}×{preview_h} · {} ms · échelle {:.0} % (cible {} ms)",
+                        self.preview_ms,
+                        self.preview_scale * 100.0,
+                        PREVIEW_TARGET_MS
                     ))
                     .small()
                     .weak(),
@@ -2176,601 +4811,19 @@ impl VistaForgeApp {
                     }
                 });
             });
-    }
-
-    fn rig_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let duration = self.project.rig.duration_s.max(0.1);
-        self.rig_time = self.rig_time.clamp(0.0, duration);
-        egui::CollapsingHeader::new("Point de vue")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.checkbox(&mut self.project.rig.enabled, "Rig actif");
-                ui.horizontal(|ui| {
-                    ui.label("Aéronef");
-                    let mut preset = self.project.rig.body.preset;
-                    egui::ComboBox::from_id_salt("rig-body")
-                        .selected_text(preset.label())
-                        .show_ui(ui, |ui| {
-                            for candidate in AircraftPreset::ALL {
-                                ui.selectable_value(&mut preset, candidate, candidate.label());
-                            }
-                        });
-                    if preset != self.project.rig.body.preset {
-                        let body = vf_core::MotionProfile::preset(preset);
-                        self.project.rig.body = body;
-                        self.rig_status = format!("Profil {}", preset.label());
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    for (name, label) in [("orbit", "Orbite"), ("ridge", "Crête"), ("dive", "Piqué")] {
-                        if ui.button(label).clicked() {
-                            match vf_flight::rig::preset_path(
-                                &mut self.project.rig,
-                                &self.heightfield,
-                                name,
-                            ) {
-                                Ok(()) => {
-                                    self.rig_selected_key = None;
-                                    self.rig_time = 0.0;
-                                    self.project.mark_modified();
-                                    self.rig_status = format!("Trajectoire {label}");
-                                }
-                                Err(error) => self.rig_status = error,
-                            }
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Cible");
-                    let mut mode = self.project.rig.target.mode;
-                    egui::ComboBox::from_id_salt("rig-target")
-                        .selected_text(match mode {
-                            TargetMode::Fixed => "Fixe",
-                            TargetMode::EyeAhead => "Avance",
-                            TargetMode::Path => "Courbe",
-                            TargetMode::Manual => "Manuelle",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut mode, TargetMode::Fixed, "Fixe");
-                            ui.selectable_value(&mut mode, TargetMode::EyeAhead, "Avance");
-                            ui.selectable_value(&mut mode, TargetMode::Path, "Courbe");
-                            ui.selectable_value(&mut mode, TargetMode::Manual, "Manuelle");
-                        });
-                    self.project.rig.target.mode = mode;
-                });
-                if self.project.rig.target.mode == TargetMode::Fixed {
-                    ui.horizontal(|ui| {
-                        ui.label("Point");
-                        for axis in 0..3 {
-                            ui.add(
-                                egui::DragValue::new(&mut self.project.rig.target.fixed[axis])
-                                    .speed(10.0),
-                            );
-                        }
-                    });
-                }
-                param_f32(
-                    ui,
-                    "Avance",
-                    "s",
-                    &mut self.project.rig.target.lead_s,
-                    0.0,
-                    3.0,
-                    0.35,
-                );
-                param_f32(
-                    ui,
-                    "Lissage visée",
-                    "",
-                    &mut self.project.rig.target.smoothing,
-                    0.0,
-                    1.0,
-                    0.35,
-                );
-            });
-
-        egui::CollapsingHeader::new("Clés et temps")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut self.rig_time, 0.0..=duration)
-                        .text("Temps (s)")
-                        .fixed_decimals(2),
-                );
-                let mut clip_duration = self.project.rig.duration_s;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut clip_duration, 0.1..=600.0)
-                            .text("Durée du clip (s)")
-                            .fixed_decimals(2),
-                    )
-                    .changed()
-                {
-                    self.project.rig.duration_s = clip_duration;
-                    self.rig_time = self.rig_time.min(clip_duration);
-                    self.project.mark_modified();
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Aperçu à ce temps").clicked() {
-                        self.apply_rig_camera(ctx.clone());
-                    }
-                    if ui.button("+ Clé ici").clicked() {
-                        let (x, y) = self.rig_cursor.unwrap_or_else(|| {
-                            let b = self.heightfield.bounds();
-                            (
-                                (b.min[0] + b.max[0]) * 0.5,
-                                (b.min[1] + b.max[1]) * 0.5,
-                            )
-                        });
-                        let z = self.terrain_height(x, y) as f64 + 180.0;
-                        self.project.rig.eye.push(PathKey::new(self.rig_time, [x, y, z]));
-                        self.rig_selected_key = None;
-                        self.project.mark_modified();
-                    }
-                    if ui
-                        .add_enabled(
-                            self.project.rig.eye.keys.len() > 2,
-                            egui::Button::new("Supprimer la clé"),
-                        )
-                        .clicked()
-                        && let Some(index) = self.rig_selected_key
-                        && index < self.project.rig.eye.keys.len()
-                    {
-                        self.project.rig.eye.keys.remove(index);
-                        self.rig_selected_key = None;
-                        self.project.mark_modified();
-                    }
-                });
-                let mut selected = self.rig_selected_key;
-                for (index, key) in self.project.rig.eye.keys.iter().enumerate() {
-                    let label = format!(
-                        "{index}. t={:.2}s  ({:.0}, {:.0}, {:.0})",
-                        key.time_s, key.position[0], key.position[1], key.position[2]
-                    );
-                    if ui.selectable_label(selected == Some(index), label).clicked() {
-                        selected = Some(index);
-                    }
-                }
-                self.rig_selected_key = selected;
-                if let Some(index) = self.rig_selected_key
-                    && let Some(key) = self.project.rig.eye.keys.get_mut(index)
-                {
-                    ui.horizontal(|ui| {
-                        ui.label("Temps de la clé");
-                        ui.add(
-                            egui::DragValue::new(&mut key.time_s)
-                                .speed(0.05)
-                                .range(0.0..=duration),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Altitude");
-                        ui.add(egui::DragValue::new(&mut key.position[2]).speed(10.0));
-                    });
-                    ui.label(
-                        egui::RichText::new("Glissez la clé sur la carte pour X/Y.")
-                            .small()
-                            .weak(),
-                    );
-                }
-                ui.label(
-                    egui::RichText::new(&self.rig_status)
-                        .small()
-                        .weak(),
-                );
-            });
-
-        egui::CollapsingHeader::new("Optique et poursuite")
-            .default_open(true)
-            .show(ui, |ui| {
-                param_f32(
-                    ui,
-                    "FOV",
-                    "°",
-                    &mut self.project.rig.optics.fov_y_deg,
-                    5.0,
-                    150.0,
-                    50.0,
-                );
-                ui.checkbox(
-                    &mut self.project.rig.optics.dof_enabled,
-                    "Profondeur de champ",
-                );
-                if self.project.rig.optics.dof_enabled {
-                    param_f32(
-                        ui,
-                        "Ouverture",
-                        "f/",
-                        &mut self.project.rig.optics.fstop,
-                        0.7,
-                        64.0,
-                        8.0,
-                    );
-                    ui.checkbox(
-                        &mut self.project.rig.optics.focus_on_target,
-                        "Mise au point sur la cible",
-                    );
-                    if !self.project.rig.optics.focus_on_target {
-                        param_f32(
-                            ui,
-                            "Distance de mise au point",
-                            "m",
-                            &mut self.project.rig.optics.focus_distance_m,
-                            0.1,
-                            100_000.0,
-                            100.0,
-                        );
-                    }
-                }
-                param_f32(
-                    ui,
-                    "Roulis explicite",
-                    "°",
-                    &mut self.project.rig.optics.roll_deg,
-                    -180.0,
-                    180.0,
-                    0.0,
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Liaison caméra");
-                    let mut link = self.project.rig.optics.link;
-                    egui::ComboBox::from_id_salt("rig-link")
-                        .selected_text(match link {
-                            CameraLink::Eye => "Rigide",
-                            CameraLink::Spring => "Ressort",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut link, CameraLink::Eye, "Rigide");
-                            ui.selectable_value(&mut link, CameraLink::Spring, "Ressort");
-                        });
-                    self.project.rig.optics.link = link;
-                });
-                if self.project.rig.optics.link == CameraLink::Spring {
-                    param_f32(
-                        ui,
-                        "Raideur",
-                        "",
-                        &mut self.project.rig.optics.spring_stiffness,
-                        0.1,
-                        40.0,
-                        6.0,
-                    );
-                    param_f32(
-                        ui,
-                        "Amortissement",
-                        "",
-                        &mut self.project.rig.optics.spring_damping,
-                        0.0,
-                        3.0,
-                        0.8,
-                    );
-                }
-            });
-
-        egui::CollapsingHeader::new("Dynamique du corps")
-            .default_open(false)
-            .show(ui, |ui| {
-                let body = &mut self.project.rig.body;
-                param_f32(ui, "Vitesse max", "m/s", &mut body.max_speed_mps, 0.5, 300.0, 30.0);
-                param_f32(
-                    ui,
-                    "Accél. avant",
-                    "m/s²",
-                    &mut body.accel_forward_mps2,
-                    0.05,
-                    200.0,
-                    25.0,
-                );
-                param_f32(
-                    ui,
-                    "Accél. latérale",
-                    "m/s²",
-                    &mut body.accel_lateral_mps2,
-                    0.05,
-                    200.0,
-                    30.0,
-                );
-                param_f32(
-                    ui,
-                    "Accél. verticale",
-                    "m/s²",
-                    &mut body.accel_vertical_mps2,
-                    0.05,
-                    200.0,
-                    20.0,
-                );
-                param_f32(ui, "Jerk", "m/s³", &mut body.jerk_mps3, 0.1, 1000.0, 60.0);
-                param_f32(ui, "Traînée", "", &mut body.drag, 0.0, 1.0, 0.12);
-                param_f32(ui, "Gain de roulis", "", &mut body.bank_gain, 0.0, 2.0, 1.0);
-                param_f32(
-                    ui,
-                    "Roulis max",
-                    "°",
-                    &mut body.max_bank_deg,
-                    0.0,
-                    89.0,
-                    75.0,
-                );
-                param_f32(
-                    ui,
-                    "Réponse roulis",
-                    "",
-                    &mut body.roll_response,
-                    0.1,
-                    40.0,
-                    10.0,
-                );
-                param_f32(
-                    ui,
-                    "Secousses",
-                    "°",
-                    &mut body.shake_deg,
-                    0.0,
-                    5.0,
-                    0.1,
-                );
-                param_f32(
-                    ui,
-                    "Turbulence",
-                    "",
-                    &mut body.turbulence,
-                    0.0,
-                    1.0,
-                    0.35,
-                );
-            });
-
-        egui::CollapsingHeader::new("Contraintes")
-            .default_open(false)
-            .show(ui, |ui| {
-                let constraints = &mut self.project.rig.constraints;
-                ui.checkbox(&mut constraints.enabled, "Contraintes actives");
-                param_f32(
-                    ui,
-                    "Hauteur sol",
-                    "m",
-                    &mut constraints.ground_clearance_m,
-                    0.0,
-                    2000.0,
-                    25.0,
-                );
-                ui.checkbox(
-                    &mut constraints.reference_enabled,
-                    "Sol de référence fixe",
-                );
-                if constraints.reference_enabled {
-                    param_f32(
-                        ui,
-                        "Altitude de référence",
-                        "m",
-                        &mut constraints.reference_z_m,
-                        -10_000.0,
-                        20_000.0,
-                        0.0,
-                    );
-                }
-                param_f32(
-                    ui,
-                    "Distance parois",
-                    "m",
-                    &mut constraints.wall_distance_m,
-                    0.0,
-                    2000.0,
-                    40.0,
-                );
-                ui.checkbox(&mut constraints.wall_avoidance, "Évitement des parois");
-                ui.checkbox(&mut constraints.apply_eye, "Appliquer au point de vue");
-                ui.checkbox(&mut constraints.apply_camera, "Appliquer à la caméra");
-                ui.checkbox(&mut constraints.apply_target, "Appliquer à la cible");
-                param_f32(
-                    ui,
-                    "Douceur",
-                    "",
-                    &mut constraints.softness,
-                    0.0,
-                    1.0,
-                    0.35,
-                );
-            });
-
-        ui.add_space(6.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 26.0],
-                egui::Button::new("Rendre l'aperçu de ce temps"),
-            )
-            .clicked()
-        {
-            self.apply_rig_camera(ctx.clone());
-        }
-    }
-
-    fn apply_rig_camera(&mut self, ctx: egui::Context) {
-        match vf_flight::rig::sample_rig(
-            &self.project.rig,
-            &self.heightfield,
-            self.project.seed,
-            self.rig_time,
-        ) {
-            Ok(sample) => {
-                self.project.camera = sample.camera;
-                self.rig_status = format!(
-                    "t={:.2}s · {:.1} m sol · gîte {:.1}° · {:.1} m/s",
-                    self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
-                );
-                self.start_render(ctx, false);
-            }
-            Err(error) => self.rig_status = format!("Rig: {error}"),
-        }
-    }
-
-    fn terrain_height(&self, x: f64, y: f64) -> f32 {
-        let (ox, oy) = self.heightfield.origin();
-        let (sx, sy) = self.heightfield.spacing();
-        self.heightfield
-            .sample_bilinear((x - ox) / sx, (y - oy) / sy)
-    }
-
-    fn rig_canvas_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.ensure_hillshade(ctx);
-        let available = ui.available_size();
-        let (rect, response) =
-            ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 15, 19));
-
-        let bounds = self.heightfield.bounds();
-        let world_w = (bounds.max[0] - bounds.min[0]).max(1.0);
-        let world_h = (bounds.max[1] - bounds.min[1]).max(1.0);
-        let fit = ((rect.width() as f64 / world_w).min(rect.height() as f64 / world_h) * 0.92)
-            as f32
-            * self.rig_zoom;
-        let image_size = egui::vec2(world_w as f32 * fit, world_h as f32 * fit);
-        let center = rect.center() + self.rig_pan;
-        let image_rect = egui::Rect::from_center_size(center, image_size);
-        if let Some(texture) = &self.sculpt_texture {
-            painter.image(
-                texture.id(),
-                image_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-        }
-        let to_screen = |world: [f64; 3]| -> egui::Pos2 {
-            let u = ((world[0] - bounds.min[0]) / world_w) as f32;
-            let v = ((bounds.max[1] - world[1]) / world_h) as f32;
-            egui::pos2(
-                image_rect.left() + u * image_size.x,
-                image_rect.top() + v * image_size.y,
-            )
-        };
-        let to_world = |screen: egui::Pos2| -> (f64, f64) {
-            let u = ((screen.x - image_rect.left()) / image_size.x.max(1.0)).clamp(0.0, 1.0);
-            let v = ((screen.y - image_rect.top()) / image_size.y.max(1.0)).clamp(0.0, 1.0);
-            (
-                bounds.min[0] + f64::from(u) * world_w,
-                bounds.max[1] - f64::from(v) * world_h,
-            )
-        };
-
-        if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-            if scroll.abs() > 0.1 {
-                let old_zoom = self.rig_zoom;
-                self.rig_zoom = (self.rig_zoom * (scroll * 0.0015).exp()).clamp(0.2, 40.0);
-                if let Some(pointer) = response.hover_pos() {
-                    let offset = pointer - center;
-                    self.rig_pan += offset * (1.0 - self.rig_zoom / old_zoom);
-                }
-            }
-        }
-        if response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
-        {
-            self.rig_pan += response.drag_delta();
-        }
-        self.rig_cursor = response.hover_pos().map(to_world);
-
-        // Eye path and target path.
-        let duration = self.project.rig.duration_s.max(0.1);
-        let mut previous: Option<egui::Pos2> = None;
-        for i in 0..=160 {
-            let t = duration * i as f32 / 160.0;
-            let p = vf_flight::rig::sample_path(&self.project.rig.eye, t);
-            let screen = to_screen(p.to_array());
-            if let Some(prev) = previous {
-                painter.line_segment(
-                    [prev, screen],
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 190, 90)),
-                );
-            }
-            previous = Some(screen);
-        }
-        if self.project.rig.target.mode == TargetMode::Path {
-            let mut previous: Option<egui::Pos2> = None;
-            for i in 0..=80 {
-                let t = duration * i as f32 / 80.0;
-                let p = vf_flight::rig::sample_path(&self.project.rig.target.path, t);
-                let screen = to_screen(p.to_array());
-                if let Some(prev) = previous {
-                    painter.line_segment(
-                        [prev, screen],
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 200, 255)),
-                    );
-                }
-                previous = Some(screen);
-            }
-        }
-
-        // Keys.
-        let mut hit: Option<usize> = None;
-        for (index, key) in self.project.rig.eye.keys.iter().enumerate() {
-            let screen = to_screen(key.position);
-            let selected = self.rig_selected_key == Some(index);
-            let radius = if selected { 7.0 } else { 5.0 };
-            painter.circle_filled(
-                screen,
-                radius,
-                if selected {
-                    egui::Color32::from_rgb(255, 230, 140)
-                } else {
-                    egui::Color32::from_rgb(255, 170, 70)
-                },
-            );
-            painter.text(
-                screen + egui::vec2(8.0, -8.0),
-                egui::Align2::LEFT_TOP,
-                format!("{:.1}s", key.time_s),
-                egui::FontId::monospace(10.0),
-                egui::Color32::from_rgb(230, 220, 190),
-            );
-            if let Some(pointer) = response.hover_pos()
-                && pointer.distance(screen) < 12.0
-            {
-                hit = Some(index);
-            }
-        }
-
-        if ui.input(|input| input.pointer.primary_pressed()) && response.contains_pointer() {
-            self.rig_selected_key = hit;
-        }
-        if response.dragged_by(egui::PointerButton::Primary)
-            && let Some(pointer) = response.hover_pos()
-            && let Some(index) = self.rig_selected_key
-            && let Some(key) = self.project.rig.eye.keys.get_mut(index)
-        {
-            let (x, y) = to_world(pointer);
-            key.position[0] = x;
-            key.position[1] = y;
-            self.project.mark_modified();
-            self.rig_status = format!("Clé {index} déplacée en ({x:.0}, {y:.0})");
-        }
-
-        if let Some(world) = self.rig_cursor {
-            let screen = to_screen([world.0, world.1, 0.0]);
-            painter.circle_stroke(
-                screen,
-                9.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 210, 120)),
-            );
-        }
-        painter.text(
-            rect.left_top() + egui::vec2(10.0, 10.0),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "Animation · t={:.2}s · {} clés · cible {:?} · zoom {:.1}×",
-                self.rig_time,
-                self.project.rig.eye.keys.len(),
-                self.project.rig.target.mode,
-                self.rig_zoom
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
             ),
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190),
+            help::HelpTopic::RenderFinal,
         );
     }
 
     fn sculpt_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CollapsingHeader::new("Pinceau")
+        let header = egui::CollapsingHeader::new("Pinceau")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2953,8 +5006,17 @@ impl VistaForgeApp {
                 }
                 ui.checkbox(&mut self.sculpt_brush.invert, "Inverser");
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Sculpt,
+        );
 
-        egui::CollapsingHeader::new("Symétrie et presets")
+        let header = egui::CollapsingHeader::new("Symétrie et presets")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -3012,8 +5074,17 @@ impl VistaForgeApp {
                     }
                 });
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Sculpt,
+        );
 
-        egui::CollapsingHeader::new("Historique")
+        let header = egui::CollapsingHeader::new("Historique")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -3024,7 +5095,10 @@ impl VistaForgeApp {
                         self.sculpt_undo_action();
                     }
                     if ui
-                        .add_enabled(!self.sculpt_redo.is_empty(), egui::Button::new("↷ Rétablir"))
+                        .add_enabled(
+                            !self.sculpt_redo.is_empty(),
+                            egui::Button::new("↷ Rétablir"),
+                        )
                         .clicked()
                     {
                         self.sculpt_redo_action();
@@ -3043,11 +5117,7 @@ impl VistaForgeApp {
                     self.sculpt_undo.clear();
                     self.sculpt_redo.clear();
                 }
-                ui.label(
-                    egui::RichText::new(&self.sculpt_status)
-                        .small()
-                        .weak(),
-                );
+                ui.label(egui::RichText::new(&self.sculpt_status).small().weak());
                 ui.separator();
                 if ui.button("Recalculer le hillshade").clicked() {
                     self.sculpt_texture_dirty = true;
@@ -3061,6 +5131,15 @@ impl VistaForgeApp {
                     .weak(),
                 );
             });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Sculpt,
+        );
 
         let _ = ctx;
     }
@@ -3077,11 +5156,8 @@ impl VistaForgeApp {
         };
         let shaded = vf_terrain::hillshade(&self.heightfield, params);
         let image = egui::ColorImage::from_gray([shaded.width, shaded.height], &shaded.pixels);
-        self.sculpt_texture = Some(ctx.load_texture(
-            "sculpt-hillshade",
-            image,
-            egui::TextureOptions::LINEAR,
-        ));
+        self.sculpt_texture =
+            Some(ctx.load_texture("sculpt-hillshade", image, egui::TextureOptions::LINEAR));
         self.sculpt_texture_dirty = false;
     }
 
@@ -3089,8 +5165,7 @@ impl VistaForgeApp {
         self.ensure_hillshade(ctx);
 
         let available = ui.available_size();
-        let (rect, response) =
-            ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 15, 19));
 
@@ -3140,8 +5215,7 @@ impl VistaForgeApp {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 let old_zoom = self.sculpt_zoom;
-                self.sculpt_zoom =
-                    (self.sculpt_zoom * (scroll * 0.0015).exp()).clamp(0.2, 40.0);
+                self.sculpt_zoom = (self.sculpt_zoom * (scroll * 0.0015).exp()).clamp(0.2, 40.0);
                 if let Some(pointer) = response.hover_pos() {
                     let offset = pointer - center;
                     self.sculpt_pan += offset * (1.0 - self.sculpt_zoom / old_zoom);
@@ -3211,7 +5285,11 @@ impl VistaForgeApp {
             let radius_px = (f64::from(self.sculpt_brush.radius_m) * f64::from(fit)) as f32;
             let color = egui::Color32::from_rgb(255, 210, 120);
             painter.circle_stroke(screen, radius_px, egui::Stroke::new(1.5, color));
-            painter.circle_stroke(screen, radius_px * 0.5, egui::Stroke::new(1.0, color.gamma_multiply(0.35)));
+            painter.circle_stroke(
+                screen,
+                radius_px * 0.5,
+                egui::Stroke::new(1.0, color.gamma_multiply(0.35)),
+            );
             painter.line_segment(
                 [
                     screen - egui::vec2(radius_px + 6.0, 0.0),
@@ -3273,9 +5351,52 @@ impl VistaForgeApp {
         }
     }
 
+    fn leave_animation_shot_for_orbit(&mut self) {
+        if self.workspace == Workspace::Animation
+            && self.anim_view == animation_ui::AnimViewMode::Camera
+        {
+            self.anim_playing = false;
+            self.anim_view = animation_ui::AnimViewMode::Design;
+            self.anim_design_camera = None;
+            self.sync_orbit_from_camera();
+        }
+    }
+
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
-        let available = ui.available_size();
-        let Some(texture) = &self.texture else {
+        let gpu_active = self.gpu_active();
+        let texture = self.texture.clone();
+        let ppp = ui.ctx().pixels_per_point();
+        let (rect, response, image_px) = if gpu_active {
+            // The live GPU view uses the whole central panel.
+            let rect = ui.available_rect_before_wrap();
+            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            let pixels = [
+                (rect.width() * ppp).round().max(1.0) as u32,
+                (rect.height() * ppp).round().max(1.0) as u32,
+            ];
+            (rect, response, pixels)
+        } else if let Some(texture) = texture {
+            let available = ui.available_size();
+            let image_px = [texture.size()[0] as u32, texture.size()[1] as u32];
+            let image_size = egui::vec2(image_px[0] as f32, image_px[1] as f32);
+            let scale = (available.x / image_size.x)
+                .min(available.y / image_size.y)
+                .max(0.01);
+            let size = image_size * scale;
+            let (rect, response) = ui
+                .with_layout(
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| ui.allocate_exact_size(size, egui::Sense::click_and_drag()),
+                )
+                .inner;
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            (rect, response, image_px)
+        } else {
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
@@ -3289,43 +5410,204 @@ impl VistaForgeApp {
             );
             return;
         };
-        let image_size = egui::vec2(texture.size()[0] as f32, texture.size()[1] as f32);
-        let scale = (available.x / image_size.x)
-            .min(available.y / image_size.y)
-            .max(0.01);
-        let size = image_size * scale;
-        let (rect, response) = ui
-            .with_layout(
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| ui.allocate_exact_size(size, egui::Sense::click_and_drag()),
-            )
-            .inner;
-        ui.painter().image(
-            texture.id(),
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
-        if response.dragged() {
+
+        self.last_viewport_rect = rect;
+
+        if gpu_active && let Some(gpu) = self.gpu.as_ref() {
+            let camera = self.project.camera.clone();
+            if let Some(callback) = gpu.callback(&camera, &self.project, image_px[0], image_px[1]) {
+                ui.painter()
+                    .add(eframe::egui_wgpu::Callback::new_paint_callback(
+                        rect, callback,
+                    ));
+            }
+        }
+
+        let mut editor_consumed = false;
+        let mut pointer_over_transport = false;
+        if self.workspace == Workspace::Animation
+            && self.anim_view == animation_ui::AnimViewMode::Design
+        {
+            let camera = self.project.camera.clone();
+            let trail = if self.anim_editor.show_trail {
+                let stale = self
+                    .anim_trail_cache
+                    .as_ref()
+                    .is_none_or(|(revision, _)| *revision != self.anim_revision);
+                if stale && !self.anim_editor.is_dragging() {
+                    let computed = animation_ui::trail(
+                        &self.project.rig,
+                        &self.heightfield,
+                        self.project.seed,
+                    );
+                    self.anim_trail_cache = Some((self.anim_revision, computed));
+                }
+                self.anim_trail_cache
+                    .as_ref()
+                    .map(|(_, trail)| trail.clone())
+            } else {
+                None
+            };
+            let comparison = if self.anim_compare {
+                let stale = self
+                    .anim_compare_cache
+                    .as_ref()
+                    .is_none_or(|(revision, _)| *revision != self.anim_revision);
+                if stale && !self.anim_editor.is_dragging() {
+                    let computed = animation_ui::comparison_trails(
+                        &self.project.rig,
+                        &self.heightfield,
+                        self.project.seed,
+                    );
+                    self.anim_compare_cache = Some((self.anim_revision, computed));
+                }
+                self.anim_compare_cache
+                    .as_ref()
+                    .map(|(_, trails)| trails.clone())
+            } else {
+                None
+            };
+            let blocked = self.help.last_rect().union(self.anim_transport_rect);
+            let editor = animation_editor::show(
+                ui,
+                rect,
+                &camera,
+                &mut self.project.rig,
+                &self.heightfield,
+                self.rig_time,
+                &mut self.anim_editor,
+                trail.as_deref(),
+                comparison.as_deref(),
+                blocked,
+            );
+            editor_consumed = editor.consumed;
+            if editor.changed {
+                self.anim_revision = self.anim_revision.wrapping_add(1);
+                self.anim_profile_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_camera_dirty = true;
+                self.project.mark_modified();
+            }
+            if let Some(time) = editor.last_added_time {
+                self.rig_time = time;
+            }
+            if let Some(status) = editor.status {
+                self.rig_status = status;
+            }
+            match self.anim_editor.selection {
+                Some(animation_ui::AnimSelection::TargetKey(_)) => self.anim_edit_target = true,
+                Some(
+                    animation_ui::AnimSelection::EyeKey(_)
+                    | animation_ui::AnimSelection::FixedTarget,
+                ) => {
+                    self.anim_edit_target = false;
+                }
+                None => {}
+            }
+            if editor.changed {
+                ui.ctx().request_repaint();
+            }
+        }
+        if self.workspace == Workspace::Animation {
+            pointer_over_transport = self.anim_transport_rect.contains(
+                ui.input(|input| input.pointer.interact_pos())
+                    .unwrap_or(egui::Pos2::ZERO),
+            );
+            self.animation_transport_ui(ui.ctx(), rect);
+            if self.anim_view == animation_ui::AnimViewMode::Design && self.anim_compare {
+                draw_animation_legend(ui, rect, self.project.rig.body.preset);
+            }
+        }
+
+        let gizmo_rect = if self.show_gizmo {
+            view_gizmo::rect_for(rect)
+        } else {
+            None
+        };
+        let pointer_over_gizmo = gizmo_rect.is_some_and(|gizmo| {
+            ui.input(|input| {
+                input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|pointer| gizmo.contains(pointer))
+            })
+        });
+        if response.dragged() && !pointer_over_gizmo && !editor_consumed && !pointer_over_transport
+        {
+            self.leave_animation_shot_for_orbit();
             let delta = response.drag_delta();
             self.yaw = (self.yaw + delta.x * 0.25).clamp(-180.0, 180.0);
-            self.pitch = (self.pitch - delta.y * 0.25).clamp(-20.0, 85.0);
+            self.pitch = (self.pitch - delta.y * 0.25).clamp(-90.0, 90.0);
             self.apply_orbit();
-            self.mark_dirty();
+            self.mark_camera_dirty();
         }
-        if response.hovered() {
+        if response.double_clicked()
+            && !pointer_over_gizmo
+            && !editor_consumed
+            && !pointer_over_transport
+        {
+            self.home_view();
+        }
+        if response.hovered() && !pointer_over_gizmo && !editor_consumed && !pointer_over_transport
+        {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
+                self.leave_animation_shot_for_orbit();
                 self.distance =
                     (self.distance * (-f64::from(scroll) * 0.0015).exp()).clamp(100.0, 80_000.0);
                 self.apply_orbit();
-                self.mark_dirty();
+                self.mark_camera_dirty();
             }
         }
+
+        if self.show_gizmo {
+            let camera = self.project.camera.clone();
+            let gizmo = view_gizmo::show(ui, rect, &camera);
+            // The viewport owns the whole image and may win the click
+            // hit-test; fall back to the gizmo's hover target in that case.
+            let action = gizmo.action.or_else(|| {
+                if response.clicked() && pointer_over_gizmo {
+                    gizmo.hovered
+                } else {
+                    None
+                }
+            });
+            if let Some(action) = action {
+                self.apply_gizmo_action(action);
+                ui.ctx().request_repaint();
+            }
+        }
+
+        let view_name = vf_scene::ViewPreset::from_normal(-self.project.camera.forward())
+            .map_or("Perspective", vf_scene::ViewPreset::label);
+        let source = if gpu_active {
+            self.gpu
+                .as_ref()
+                .map_or_else(|| "GPU".to_string(), |gpu| format!("GPU · {}", gpu.label()))
+        } else {
+            format!("aperçu {}×{}", image_px[0], image_px[1])
+        };
+        let animation = if self.workspace == Workspace::Animation {
+            let mode = match self.anim_view {
+                animation_ui::AnimViewMode::Design => "design",
+                animation_ui::AnimViewMode::Camera => "caméra",
+            };
+            format!(
+                " · Animation {mode} · t={:.2}/{:.2}s{}",
+                self.rig_time,
+                self.project.rig.duration_s,
+                if self.anim_playing { " · lecture" } else { "" }
+            )
+        } else {
+            String::new()
+        };
         ui.painter().text(
             rect.left_top() + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
-            format!("{} · drag to orbit · wheel to zoom", self.project.meta.name),
+            format!(
+                "{} · {} · {}{} · drag to orbit · wheel to zoom · double-clic = défaut",
+                self.project.meta.name, view_name, source, animation
+            ),
             egui::FontId::proportional(13.0),
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170),
         );
@@ -3335,18 +5617,14 @@ impl VistaForgeApp {
 impl eframe::App for VistaForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.help.begin_frame();
         self.poll_render(&ctx);
+        self.poll_animation_export(&ctx);
+        self.pump_gpu(&ctx);
+        self.pump_animation(&ctx);
+        self.view_shortcuts(&ctx);
 
-        if let Some(since) = self.dirty_since {
-            if since.elapsed() >= PREVIEW_DEBOUNCE {
-                if self.render_task.is_none() {
-                    self.dirty_since = None;
-                    self.start_render(ctx.clone(), false);
-                }
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(80));
-            }
-        }
+        self.pump_preview(&ctx);
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3364,13 +5642,24 @@ impl eframe::App for VistaForgeApp {
                     self.save_project();
                 }
                 ui.separator();
-                if ui.button("Render").clicked() {
+                let render_button = ui.button("Render");
+                if render_button.hovered() {
+                    self.help
+                        .register(render_button.rect, help::HelpTopic::RenderFinal);
+                }
+                if render_button.clicked() {
                     self.start_render(ctx.clone(), true);
                 }
                 if self.render_task.is_some() {
                     ui.spinner();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let help_button = ui
+                        .selectable_label(self.help.enabled, "?")
+                        .on_hover_text("Aide contextuelle et tutoriels (F1)");
+                    if help_button.clicked() {
+                        self.help.toggle(help_topic_for_workspace(self.workspace));
+                    }
                     ui.label(egui::RichText::new(&self.status).small());
                 });
             });
@@ -3381,8 +5670,22 @@ impl eframe::App for VistaForgeApp {
                 for workspace in Workspace::ALL {
                     let active = self.workspace == workspace;
                     let text = egui::RichText::new(workspace.label()).size(13.0);
-                    if ui.selectable_label(active, text).clicked() {
+                    let tab = ui.selectable_label(active, text);
+                    if tab.hovered() {
+                        self.help
+                            .register(tab.rect, help_topic_for_workspace(workspace));
+                    }
+                    if tab.clicked() {
+                        if self.workspace == Workspace::Animation
+                            && workspace != Workspace::Animation
+                        {
+                            self.anim_playing = false;
+                            self.anim_editor.trace = false;
+                        }
                         self.workspace = workspace;
+                        if workspace == Workspace::Animation {
+                            self.ensure_animation_workspace(&ctx);
+                        }
                     }
                 }
             });
@@ -3400,17 +5703,61 @@ impl eframe::App for VistaForgeApp {
                 self.workspace_panel(ui, &ctx);
             });
 
+        // Register the overlays that are drawn inside the viewport. Their
+        // rectangles are stored from the previous frame because the actual
+        // transport/gizmo widgets are created after the help resolution (the
+        // help card must be known before the viewport draws).
+        if self.workspace == Workspace::Animation && self.anim_transport_rect.is_positive() {
+            self.help
+                .register(self.anim_transport_rect, help::HelpTopic::Transport);
+        }
+        if self.show_gizmo
+            && self.last_viewport_rect.is_positive()
+            && let Some(rect) = view_gizmo::rect_for(self.last_viewport_rect)
+        {
+            self.help.register(rect, help::HelpTopic::Navigation);
+        }
+        // Resolve the hovered topic and draw the help card *before* the
+        // viewport so the path editor sees its current rectangle and never
+        // treats a click in the card as a terrain click.
+        self.help.resolve(&ctx);
+        let help_viewport = if self.last_viewport_rect.is_positive() {
+            self.last_viewport_rect
+        } else {
+            ctx.content_rect()
+        };
+        let help_context = help::HelpContext {
+            rig: &self.project.rig,
+            playing: self.anim_playing,
+            time_s: self.rig_time,
+            view_mode: match self.anim_view {
+                animation_ui::AnimViewMode::Design => "design",
+                animation_ui::AnimViewMode::Camera => "caméra",
+            },
+        };
+        self.help.show(
+            &ctx,
+            help_viewport,
+            &help_context,
+            &help::HelpTopic::ALL,
+            if self.workspace == Workspace::Animation {
+                (self.anim_transport_rect.height() + 16.0).max(78.0)
+            } else {
+                0.0
+            },
+        );
+
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_rgb(16, 18, 22)))
             .show(ui, |ui| {
                 if self.workspace == Workspace::Sculpt {
                     self.sculpt_canvas_ui(ui, &ctx);
-                } else if self.workspace == Workspace::Rig {
-                    self.rig_canvas_ui(ui, &ctx);
                 } else {
                     self.viewport_ui(ui);
                 }
             });
+
+        self.pump_capture(&ctx);
     }
 }
 
@@ -3568,6 +5915,101 @@ fn default_scene() -> (Project, HeightField) {
     (project, heightfield)
 }
 
+/// Pick the next interactive preview scale from a measured render time.
+///
+/// Render cost grows with the pixel count, hence the square root. The result
+/// is smoothed so a single slow frame (a compile, a disk flush) does not make
+/// the preview permanently tiny.
+fn adapted_scale(current: f32, measured_scale: f32, elapsed_ms: u128) -> f32 {
+    if elapsed_ms == 0 {
+        return current;
+    }
+    let elapsed = elapsed_ms as f32;
+    let ideal = (measured_scale * (PREVIEW_TARGET_MS / elapsed).sqrt())
+        .clamp(MIN_PREVIEW_SCALE, MAX_INTERACTIVE_SCALE);
+    (current * 0.55 + ideal * 0.45).clamp(MIN_PREVIEW_SCALE, MAX_INTERACTIVE_SCALE)
+}
+
+/// Next progressive refinement step after a quick interactive pass.
+fn next_preview_scale(current: f32) -> f32 {
+    let next = (current * 1.5).min(1.0);
+    if next - current < 0.08 { 1.0 } else { next }
+}
+
+/// Small colour key for the simulated profile trajectories.
+fn draw_animation_legend(ui: &mut egui::Ui, rect: egui::Rect, active_preset: AircraftPreset) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let mut x = rect.left() + 14.0;
+    let y = rect.top() + 34.0;
+    painter.text(
+        egui::Pos2::new(x, y),
+        egui::Align2::LEFT_TOP,
+        "Trajectoires simulées :",
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(185, 198, 214),
+    );
+    x += 122.0;
+    for preset in AircraftPreset::ALL {
+        if preset == AircraftPreset::Manual {
+            continue;
+        }
+        let active = preset == active_preset;
+        let color = if active {
+            egui::Color32::from_rgb(255, 226, 120)
+        } else {
+            animation_ui::preset_color(preset)
+        };
+        painter.circle_filled(egui::Pos2::new(x + 4.0, y + 6.0), 3.5, color);
+        painter.text(
+            egui::Pos2::new(x + 12.0, y),
+            egui::Align2::LEFT_TOP,
+            if active {
+                format!("{} (actif)", preset.label())
+            } else {
+                preset.label().to_string()
+            },
+            egui::FontId::proportional(10.0),
+            color,
+        );
+        x += preset.label().len() as f32 * 5.4 + if active { 46.0 } else { 22.0 };
+    }
+}
+
+fn help_topic_for_workspace(workspace: Workspace) -> help::HelpTopic {
+    match workspace {
+        Workspace::Terrain => help::HelpTopic::Terrain,
+        Workspace::Modifiers => help::HelpTopic::Modifiers,
+        Workspace::Rock => help::HelpTopic::Rock,
+        Workspace::Detail => help::HelpTopic::Detail,
+        Workspace::Sculpt => help::HelpTopic::Sculpt,
+        Workspace::Animation => help::HelpTopic::Path,
+        Workspace::Erosion => help::HelpTopic::Erosion,
+        Workspace::Water => help::HelpTopic::Water,
+        Workspace::Materials => help::HelpTopic::Materials,
+        Workspace::Light => help::HelpTopic::Light,
+        Workspace::Camera => help::HelpTopic::Camera,
+        Workspace::Render => help::HelpTopic::RenderFinal,
+    }
+}
+
+fn help_topic_for_tab(tab: animation_ui::AnimTab) -> help::HelpTopic {
+    match tab {
+        animation_ui::AnimTab::Path => help::HelpTopic::Path,
+        animation_ui::AnimTab::Timing => help::HelpTopic::Timing,
+        animation_ui::AnimTab::Profile => help::HelpTopic::Profile,
+        animation_ui::AnimTab::Preview => help::HelpTopic::Preview,
+    }
+}
+
+fn target_mode_label(mode: TargetMode) -> &'static str {
+    match mode {
+        TargetMode::Fixed => "Fixe",
+        TargetMode::EyeAhead => "Avance",
+        TargetMode::Path => "Tracé animé",
+        TargetMode::Manual => "Manuel",
+    }
+}
+
 fn quality_label(quality: Quality) -> &'static str {
     match quality {
         Quality::Low => "Low",
@@ -3575,5 +6017,84 @@ fn quality_label(quality: Quality) -> &'static str {
         Quality::High => "High",
         Quality::Ultra => "Ultra",
         Quality::Custom => "Custom",
+    }
+}
+
+/// Write a screenshot produced by `egui::Context::request_screenshot`.
+fn save_capture_image(path: &Path, image: &egui::ColorImage) {
+    let width = image.size[0] as u32;
+    let height = image.size[1] as u32;
+    let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+    for pixel in &image.pixels {
+        bytes.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) =
+        image::save_buffer(path, &bytes, width, height, image::ExtendedColorType::Rgba8)
+    {
+        eprintln!("capture {} : {error}", path.display());
+    } else {
+        println!("capture {}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn slow_renders_lower_the_interactive_scale() {
+        let next = adapted_scale(0.6, 0.6, 200);
+        assert!(next < 0.6);
+        assert!(next >= MIN_PREVIEW_SCALE);
+    }
+
+    #[test]
+    fn fast_renders_raise_the_interactive_scale() {
+        let next = adapted_scale(0.3, 0.3, 10);
+        assert!(next > 0.3);
+        assert!(next <= MAX_INTERACTIVE_SCALE);
+    }
+
+    #[test]
+    fn adaptation_ignores_zero_time() {
+        assert!((adapted_scale(0.43, 0.43, 0) - 0.43).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn refinement_reaches_full_resolution() {
+        let mut scale = MIN_PREVIEW_SCALE;
+        for _ in 0..8 {
+            scale = next_preview_scale(scale);
+        }
+        assert!((scale - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn workspace_and_tab_names_are_parsed_for_captures() {
+        assert_eq!(Workspace::parse("Animation"), Some(Workspace::Animation));
+        assert_eq!(Workspace::parse("matières"), Some(Workspace::Materials));
+        assert_eq!(Workspace::parse("nope"), None);
+        assert_eq!(
+            animation_ui::AnimTab::parse("Timing"),
+            Some(animation_ui::AnimTab::Timing)
+        );
+        assert_eq!(
+            animation_ui::AnimTab::parse("3 · Profil"),
+            Some(animation_ui::AnimTab::Profile)
+        );
+    }
+
+    #[test]
+    fn refinement_is_strictly_monotonic() {
+        let mut scale = MIN_PREVIEW_SCALE;
+        while scale < 0.999 {
+            let next = next_preview_scale(scale);
+            assert!(next > scale);
+            scale = next;
+        }
+        assert!((scale - 1.0).abs() < f32::EPSILON);
     }
 }

@@ -92,10 +92,10 @@ impl ClearanceField {
         let gy = ((y - oy) / sy).clamp(0.0, (self.height - 1) as f64);
         let d = self.bilinear(gx, gy).min(self.max_distance);
         let eps = 1.0;
-        let dx = (self.bilinear(gx + eps, gy) - self.bilinear(gx - eps, gy))
-            / (2.0 * eps * sx) as f32;
-        let dy = (self.bilinear(gx, gy + eps) - self.bilinear(gx, gy - eps))
-            / (2.0 * eps * sy) as f32;
+        let dx =
+            (self.bilinear(gx + eps, gy) - self.bilinear(gx - eps, gy)) / (2.0 * eps * sx) as f32;
+        let dy =
+            (self.bilinear(gx, gy + eps) - self.bilinear(gx, gy - eps)) / (2.0 * eps * sy) as f32;
         (d, dx, dy)
     }
 
@@ -116,7 +116,11 @@ impl ClearanceField {
         let a = v00 + (v10 - v00) * tx;
         let b = v01 + (v11 - v01) * tx;
         let value = a + (b - a) * ty;
-        if value.is_finite() { value } else { self.max_distance }
+        if value.is_finite() {
+            value
+        } else {
+            self.max_distance
+        }
     }
 }
 

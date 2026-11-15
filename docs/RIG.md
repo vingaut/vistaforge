@@ -43,21 +43,28 @@ s'ajoute. Un preset `manual` conserve la courbe et n'ajoute pas de gîte.
   au-dessus du terrain + `ground_clearance_m`, avec une douceur réglable.
 - **Sol de référence fixe** : un plan d'altitude `reference_z_m` peut remplacer
   ou compléter le terrain (utile pour un survol au-dessus d'une mer).
-- **Parois** : les champs `wall_distance_m` et `wall_avoidance` sont présents
-  dans le modèle ; l'évitement latéral est branché au lot P5.
+- **Parois** : `wall_distance_m` et `wall_avoidance` construisent un champ de
+  distance (chamfer) aux cellules de pente > 45° ; le rig échantillonne devant
+  le point de vue et applique une accélération latérale répulsive. Le champ est
+  2D : il ignore l'altitude et peut pousser au-dessus d'une falaise.
 
 ## Édition graphique
 
-L'espace **Animation** de l'interface affiche le terrain à plat, la courbe du
-point de vue en orange, la courbe de cible en bleu et les clés. On peut :
+L'espace **Animation** affiche le terrain en 3D dans le viewport de conception :
+tracé de l'œil en cyan, cible en orange, viseur du point de vue, clés `E0/T0…`
+et gizmo de translation. On peut :
 
-- glisser une clé pour changer X/Y (l'altitude se règle dans le panneau) ;
-- ajouter une clé au temps courant ;
-- supprimer une clé (minimum deux) ;
-- choisir un preset et générer une trajectoire orbite / crête / piqué ;
-- régler le FOV, la profondeur de champ, le roulis, la liaison caméra ;
+- tracer une clé au clic sur le terrain (altitude réglable) ;
+- sélectionner une clé et la déplacer sur X, Y ou Z avec le gizmo, avec aimant ;
+- insérer une clé au temps courant, en supprimer une (minimum deux) ;
+- choisir un preset et générer une trajectoire orbite / crête / piqué ou un
+  **tracé de démonstration (S)** adapté au profil ;
+- régler durée, images/s, FOV, profondeur de champ, roulis, liaison caméra ;
 - régler chaque accélération, le jerk, le gain et le roulis max ;
-- rendre un aperçu au temps courant.
+- comparer les trajectoires des cinq corps et lire l'animation dans le viewport.
+
+Le parcours complet, la barre de lecture et l'export sont décrits dans
+[`ANIMATION.md`](ANIMATION.md).
 
 ## CLI
 
@@ -86,8 +93,10 @@ sur le rig.
 ## Limites
 
 - Pas de flou de mouvement sur le rig pour l'instant.
-- L'évitement de parois est modélisé mais pas encore actif.
-- Le DOF est calculé et exporté dans `RigSample`, mais le rasteriseur CPU ne
-  l'applique pas encore ; le bridge Blender lira ces valeurs au lot P5.
+- L'évitement de parois est actif mais son champ de distance est 2D (il ignore
+  l'altitude).
+- Le DOF est calculé et exporté dans `RigSample` ; le rasteriseur CPU ne
+  l'applique pas encore, mais le bridge Blender importe la caméra et ses
+  réglages.
 - Pas d'IK, pas d'expressions, pas de graphe de scène complet : le trio
   eye/target/optics couvre le cas cinématique visé.

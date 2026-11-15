@@ -1,11 +1,142 @@
 # État du projet et reprise
 
-> Document de reprise des sessions des **13 et 14 novembre 2026**.
+> Document de reprise des sessions des **13, 14 et 15 novembre 2026**.
 > Objectif : reprendre le travail sans relire l'historique, sur cette machine ou
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-14 06:40** (sessions P0–P6 : détail, sculpteur, rig, mondes, Blender).
+Dernière mise à jour : **2026-11-15 04:20** (fusion Animation et aide contextuelle terminées).
+
+---
+
+## 0terdecies. Session du 15 novembre — finition Animation et aide (état livré)
+
+> Cette section **remplace** l'état « en cours » du 14 novembre. Elle décrit ce
+> qui est réellement livré, ce qui a été corrigé et ce qui reste ouvert.
+
+### Demande
+
+1. Fusionner **Vol** et **Animation** : un seul parcours, et un moyen évident de
+   lancer l'animation une fois les réglages terminés.
+2. Éditer le tracé de la caméra **et** le point de vue associé, matérialisé
+   seulement dans le viewport de conception, sur les trois axes avec un gizmo.
+3. Accéder ensuite aux réglages standards (durée, fps) puis au profil de vol,
+   avec une différence de mouvement lisible entre drone, hélicoptère, etc.
+4. Ajouter une **aide dynamique** dans le viewport, liée au contrôle survolé :
+   captures annotées et effets attendus, pour toutes les rubriques.
+
+### Livré
+
+- **Un seul espace Animation**, quatre onglets : `1 · Tracé`, `2 · Réglages`,
+  `3 · Profil`, `4 · Lecture`. L'onglet Vol a disparu ; `FlightSettings` reste
+  uniquement dans le modèle et le CLI pour compatibilité.
+- **Barre de transport ancrée dans le viewport**, visible dans tous les onglets :
+  Début, Lire/Pause, curseur de temps, image −/+, Boucle, Design/Caméra,
+  nombre d'images, durée, fps et profil. `Espace` = lire/pause.
+- **Éditeur de tracé 3D** : tracé cyan, cible orange, clés E/T, viseur (tronc de
+  frustum) et ligne de visée. Mode Tracer avec aperçu du point d'impact, de la
+  verticale et de l'altitude. Gizmo X/Y/Z, aimant, insertion/suppression de clé,
+  `Suppr`, `Échap`, cadrage du tracé. La sélection d'une clé cible bascule
+  automatiquement l'onglet sur les clés de cible.
+- **Profils de vol** : cartes, caractère, comparaison des courbes vitesse/roulis,
+  superposition des trajectoires (corps actif en jaune), test en lecture,
+  **tracé de démonstration (S)** adapté au profil et cadré automatiquement.
+- **Calage durée/profil** : longueur du tracé, vitesse demandée vs croisière
+  (75 % de la vitesse max), encadré d'avertissement et bouton **Ajuster la durée**.
+- **Corrections du rig** (importantes pour la lisibilité des profils) :
+  - `PathKey::new` utilise désormais des **poignées automatiques** (0,0,0) au
+    lieu de ±300 m : les clés tracées ne bouclent plus.
+  - Le ressort du rig reçoit une **avance de vitesse** `(path_velocity - eye_vel)`
+    et les temps de réponse ne sont plus multipliés par 2π. Sans cela, les corps
+    rapides saturaient l'accélération et oscillaient autour de la courbe.
+  - Les valeurs de traînée des presets permettent à chaque corps d'atteindre sa
+    vitesse max (le dirigeable était plafonné à ~3 m/s par la traînée).
+  - Le tracé de démonstration est chronométré par longueur d'arc et vise 90 % de
+    la vitesse max du corps actif.
+- **Aide contextuelle** (`crates/vf-ui/src/help.rs`) :
+  - **25 fiches** couvrant tous les espaces, les quatre onglets d'animation,
+    l'optique, les contraintes, le rendu, le GPU, l'aperçu adaptatif et l'export.
+  - Carte plus large et scrollable, résumé, puces ciblées, **capture annotée**,
+    légende « effet attendu », « à essayer », valeurs live pour le tracé, la
+    cible, le timing, l'optique, les contraintes, le profil et la lecture.
+  - **Sommaire**, fiches précédente/suivante, épinglage, fermeture, `F1`,
+    bouton `?`.
+  - Enregistrement par **section entière** (union en-tête + corps) : survoler
+    n'importe quel slider d'« Optique et caméra » ouvre la fiche Optique. Un
+    fallback de panneau couvre les contrôles hors section (onglet courant).
+  - La carte est dessinée **avant** le viewport : l'éditeur connaît son rectangle
+    courant et ne confond plus un clic dans l'aide avec un clic terrain.
+- **Mode capture** (`VISTAFORGE_CAPTURE`) : parcours intégré, attente de
+  l'aperçu, capture eframe, écriture PNG et fermeture. Utilisé pour les captures
+  de documentation et les visuels d'aide. Variables `VISTAFORGE_WORKSPACE`,
+  `VISTAFORGE_ANIM_TAB`, `VISTAFORGE_HELP_TOPIC`.
+- **Tests ajoutés** : ajout d'une clé par clic simulé en mode Tracer, hit-test du
+  gizmo, priorité de résolution de l'aide, contenu/validité des 25 fiches,
+  calage de durée, déterminisme des trajectoires comparées, différence de
+  vitesse entre profils, poignées automatiques.
+- **Docs** : `docs/ANIMATION.md`, `docs/AIDE.md`, README, USAGE, RIG, ce fichier.
+- **Captures** : `docs/screenshots/gui.png` (Animation + aide),
+  `animation_path.png`, `animation_profile.png` ; `docs/help/*.png` (21 visuels).
+
+### Vérifications
+
+- `cargo test --workspace` : **188 tests verts**.
+- `cargo clippy --workspace --all-targets -- -D warnings` : propre.
+- `cargo fmt -p vf-ui -p vf-flight -p vf-core -p vf-app` : appliqué.
+- Application lancée sous X11/Xwayland avec `VISTAFORGE_RENDERER=glow` puis
+  avec le renderer **wgpu/Vulkan** par défaut : tour de capture complet
+  (Animation + 12 espaces), captures inspectées.
+- Mode capture testé avec `demo-out/geology/alpine.vfproj` et `ile.vfproj`.
+
+### Non validé / limites
+
+- **Souris réelle** : XTest n'injecte ni mouvement ni clic dans cette session
+  (Xwayland). Les interactions sont couvertes par des tests headless (clic de
+  tracé, gizmo, priorité d'aide), mais le drag réel des axes, les boutons de la
+  barre de transport et l'export n'ont pas été cliqués à la main.
+- **GPU wgpu** : le tour de capture a aussi été exécuté avec le renderer wgpu
+  par défaut (Quadro RTX 5000, Vulkan) ; les captures de `docs/screenshots/`
+  viennent de ce passage. Les visuels `path/target/profile` de `docs/help/`
+  sont également composés depuis ces captures GPU ; les schémas restent des
+  composites déterministes.
+- **Aide** : la carte n'est pas déplaçable ; elle peut masquer une partie du
+  viewport. Les visuels sont embarqués (environ 9 Mo de PNG).
+- **Rig** : poignées Bézier manuelles non éditables ; l'évitement de parois est
+  un champ 2D qui ignore l'altitude (les comparaisons de profils le désactivent
+  pour isoler la dynamique) ; le DOF n'est pas rasterisé côté CPU.
+- **Export** : pas de MP4 depuis l'UI, pas de choix brouillon/final ; un export
+  pleine résolution est long.
+- **Ancien modèle** : `FlightSettings` et `anim --preset` restent dans le CLI,
+  sans UI. Décider plus tard de le migrer ou de le retirer.
+
+### Fichiers touchés
+
+| Fichier | Rôle |
+|---|---|
+| `crates/vf-flight/src/rig.rs` | avance de vitesse, réponses, traînée, longueur/durée conseillée, démo S, centre du tracé |
+| `crates/vf-core/src/rig.rs` | poignées automatiques de `PathKey::new` |
+| `crates/vf-ui/src/lib.rs` | transport, onglets, profils, calage, aide, capture, cadrage démo |
+| `crates/vf-ui/src/animation_editor.rs` | viseur, aperçu de tracé, comparaison, correction du clic, tests |
+| `crates/vf-ui/src/animation_ui.rs` | `TimingFit`, trajectoires comparées, démo, tests |
+| `crates/vf-ui/src/help.rs` | 25 fiches, carte, images, tests |
+| `scripts/make_help_images.py` | visuels annotés depuis les rendus |
+| `scripts/make_help_screenshots.py` | captures réelles annotées |
+| `docs/ANIMATION.md`, `docs/AIDE.md` | documentation utilisateur |
+| `docs/help/*.png`, `docs/screenshots/*` | visuels |
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+VISTAFORGE_RENDERER=glow cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+
+# Captures de documentation
+VISTAFORGE_RENDERER=glow VISTAFORGE_CAPTURE=/tmp/vf-captures \
+  cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+python3 scripts/make_help_images.py
+VISTAFORGE_CAPTURES=/tmp/vf-captures python3 scripts/make_help_screenshots.py
+```
 
 ---
 
@@ -217,6 +348,227 @@ Dernière mise à jour : **2026-11-14 06:40** (sessions P0–P6 : détail, sculp
 
 ---
 
+## 0undecies. Session du 14 novembre — navigation CAO et viewport GPU
+
+- **Vues CAO (`vf-scene`)** : `ViewPreset` (perspective, face, arrière, gauche,
+  droite, dessus, dessous), `framed_view`, `fit_distance`. Le dessus utilise un
+  `up` horizontal (`+Y`) et le dessous `-Y` pour éviter la singularité du
+  look-at au zénith ; les tests vérifient l'absence de dégénérescence et le
+  cadrage.
+- **Gizmo d'orientation** (`vf-ui/src/view_gizmo.rs`) : cube solidaire de la
+  caméra, faces cliquables, triade X/Y/Z et extrémités négatives, bouton
+  **Défaut**, info-bulles et raccourcis `1`/`2`/`3`/`0`/`Home`. Tests d'interface
+  headless : un clic simulé sur l'axe Z renvoie bien la vue Dessus, le bouton
+  maison renvoie Home.
+- **Aperçu adaptatif** : l'aperçu CPU démarre à 25–50 % de 960×540 pendant une
+  interaction, puis se raffine (≈ 50 → 75 → 100 %) après ~200 ms. L'échelle
+  interactive est réapprise du temps mesuré pour viser ~45 ms par passe. Le
+  HUD affiche la résolution et le temps de la passe ; le panneau Rendu expose
+  la case **Aperçu adaptatif** et les compteurs.
+- **Viewport GPU wgpu/Vulkan** (`vf-ui/src/gpu_view.rs` + shaders WGSL) :
+  maillage du heightfield (modificateurs + falaises), ciel + soleil, eau,
+  brouillard ; rendu offscreen couleur + `Depth32Float`, puis blit dans egui
+  (le pass egui n'a pas de depth). `eframe` utilise désormais wgpu par défaut,
+  avec repli `VISTAFORGE_RENDERER=glow`.
+- **Rendu final inchangé** : le bouton Render produit toujours l'image CPU
+  déterministe ; le viewport GPU est un aperçu de navigation et n'intervient
+  pas dans les exports. Voir `docs/GPU.md`.
+- **UI** : première exécution réelle de l'interface sur écran (X11/Xwayland),
+  captures GPU et CPU, vérification du repli OpenGL.
+- **Tests** : 173 verts (dont 5 tests de maillage GPU, 3 tests de clic gizmo,
+  5 tests d'échelle adaptative), clippy `-D warnings` propre.
+
+---
+
+## 0duodecies. Session du 14 novembre — fusion Vol/Animation, éditeur de tracé, aide contextuelle (archive)
+
+> **État : implémentation fonctionnelle mais non terminée.** Le code compile,
+> les tests passent et les écrans principaux ont été vérifiés au moins une
+> fois. Les interactions souris réelles, la lecture, l'export et une partie de
+> l'aide restent à valider. Ne pas considérer cette session comme livrée.
+
+### Demande initiale
+
+- Supprimer la séparation contre-intuitive entre **Vol** et **Animation**.
+- Éditer un tracé de caméra **et** le point de vue associé, matérialisé
+  uniquement dans le viewport de conception.
+- Dessiner / éditer le tracé sur les trois axes avec un gizmo.
+- Accéder ensuite aux réglages standards (durée, fps, etc.) puis au profil de
+  vol, avec une différence de mouvement lisible entre drone, hélicoptère, etc.
+- Ajouter une **aide dynamique** dans le viewport, liée à l'option survolée,
+  avec des visuels annotés.
+
+### Ce qui a été fait
+
+- **Fusion des espaces** : `Workspace::Flight` a été supprimé et
+  `Workspace::Rig` renommé `Workspace::Animation`. L'ancien panneau Vol et
+  l'ancien canevas 2D du rig ont été retirés de l'UI. Le modèle `CameraRig` est
+  désormais l'unique modèle d'animation de l'interface ; `FlightSettings` reste
+  dans le projet et le CLI pour compatibilité, mais n'a plus d'onglet.
+- **Nouvel espace Animation** (`crates/vf-ui/src/lib.rs`) avec quatre onglets :
+  1. **Tracé** : liste des clés œil/cible, temps, XYZ, adoucissement,
+     poignées automatiques, ajout/suppression, modes de cible, génération
+     orbite/crête/piqué, mode **Tracer**.
+  2. **Animation** : durée, fps, nombre d'images, seed, FOV, liaison caméra
+     rigide/ressort, roulis, DOF, contraintes sol/parois.
+  3. **Profil de vol** : cartes de presets (drone, oiseau, hélicoptère,
+     dirigeable, chasse, manuel), description du caractère, courbes comparées
+     vitesse/roulis, trajectoire simulée, réglages fins.
+  4. **Aperçu & export** : timeline, lecture/pause, boucle, vitesse, vue
+     design/caméra, rendu d'une image à t, export de séquence PNG avec
+     progression et annulation.
+- **Éditeur de tracé 3D** (`crates/vf-ui/src/animation_editor.rs`) :
+  - tracé cyan de l'œil, tracé orange de la cible, clés E/T, marqueur du temps
+    courant, ligne œil → cible ;
+  - cible fixe ou animée matérialisée uniquement dans l'espace Animation ;
+  - sélection d'une clé au clic, gizmo de translation X/Y/Z avec flèches et
+    étiquettes, drag sur un axe, aimant (snap) en mètres ;
+  - mode **Tracer** : clic sur le terrain (raycast + bisection) pour ajouter
+    une clé, altitude réglable pour l'œil, ajout à la fin du tracé et
+    allongement automatique de la durée ;
+  - l'éditeur signale au viewport s'il consomme le pointeur, pour ne pas
+    déclencher l'orbite en même temps.
+- **Helpers d'animation** (`crates/vf-ui/src/animation_ui.rs`) : tabs,
+  application d'un preset sans écraser le tracé, `ensure_animation` (première
+  ouverture : active le rig et génère une orbite si le tracé est resté celui
+  par défaut), courbes de comparaison des six profils, trajectoire simulée,
+  projection monde → écran, raycast terrain, graphique vitesse/roulis.
+- **Lecture** : `pump_animation` avance `rig_time`, échantillonne `CameraRig`,
+  met à jour la caméra ; en GPU la vue est continue, en CPU un aperçu est
+  relancé au plus toutes les 90 ms. Espace = lecture/pause. Entrer en vue
+  caméra mémorise la caméra de design ; orbiter depuis la vue caméra repasse
+  en vue design.
+- **Export séquence PNG** : `AnimationExportTask` + thread, `RigSimulation`,
+  `render_with_options`, fichiers `frame_00000.png`, progression, annulation
+  par `AtomicBool`, dossier de sortie (`anim-out` par défaut).
+- **Aide contextuelle** (`crates/vf-ui/src/help.rs`) :
+  - carte flottante en bas à gauche du viewport, ouverte au survol d'un
+    contrôle enregistré ;
+  - titre, résumé, puces, visuel, bouton **Épingler**, fermeture, bascule `?`
+    dans la barre d'outils ;
+  - visuels : captures annotées `docs/help/path.png` (tracé + cible + gizmo) et
+    `docs/help/gizmo.png` (cube), plus des schémas egui pour cible, durée,
+    lecture, aperçu adaptatif, GPU et rendu CPU ;
+  - thèmes enregistrés : onglets d'espaces, gizmo d'orientation, onglets
+    Tracé/Animation/Profil/Aperçu, boutons Tracer/Sélection, cible, clés,
+    cartes de profils, graphique, case GPU, case aperçu adaptatif, bouton
+    Render.
+- **Assets** : `docs/help/path.png`, `docs/help/gizmo.png` (captures annotées
+  avec PIL à partir d'une capture de l'espace Animation).
+- **Dépendance** : `image` ajoutée à `vf-ui` pour décoder ces captures au
+  démarrage.
+
+### Vérifications faites
+
+- `cargo check -p vf-app` : OK.
+- `cargo test --workspace` : **175 tests passent** (19 dans `vf-ui`, dont les
+  tests de l'éditeur de tracé et le gizmo).
+- `cargo clippy --workspace --all-targets -- -D warnings` : OK.
+- `cargo fmt -p vf-ui -p vf-scene -p vf-app` : appliqué.
+- Vérifié à l'écran (X11/Xwayland, GPU Vulkan Quadro RTX 5000) :
+  - espace Animation en vue design, tracé + cible + clés + gizmo affiché sur
+    une clé sélectionnée par code de test ;
+  - onglet Profil : cartes, courbes comparées, légende ;
+  - aide contextuelle ouverte au survol du bouton **Tracer**, capture annotée
+    affichée ;
+  - viewport GPU en vue design (la vue caméra et la lecture restent à tester).
+
+### Ce qui n'a pas encore été validé
+
+- **Interactions souris réelles** dans le gizmo de tracé : le rendu et le
+  hit-test sont en place, mais XTest n'injecte pas les clics dans cette
+  session ; seuls les tests headless du gizmo d'orientation couvrent le clic.
+- **Vue caméra / lecture / pause / boucle** avec de vraies entrées.
+- **Export PNG** : thread, progression, annulation et écriture des fichiers.
+- **Échelle du graphique Profil** : le correctif vient d'exclure le profil
+  Manuel de l'échelle (il suivait le tracé à vitesse libre et écrasait les
+  autres courbes) ; il n'a pas été re-capturé après ce changement.
+- **Couverture de l'aide** : les thèmes sont branchés sur les principaux
+  contrôles, mais pas sur tous les sliders/panneaux ; les captures Profil et
+  Aperçu manquent encore. La largeur de la carte est de 380 px (à agrandir).
+- **CPU pur** : la lecture et l'export n'ont pas été testés avec
+  `VISTAFORGE_RENDERER=glow`.
+- **Formatage global** : `cargo fmt --all --check` signale toujours un drift
+  préexistant dans 14 fichiers hors périmètre ; ne pas le confondre avec cette
+  session.
+
+### Problèmes connus / points à trancher
+
+1. **Durée du tracé généré** : `preset_path` fournit une orbite de 8 s sur un
+   terrain de ~15 km. La vitesse résultante est énorme et la dynamique des
+   profils sature. Il faut soit calculer une durée conseillée à partir de la
+   longueur du tracé et du profil, soit proposer un bouton « durée conseillée »,
+   soit assumer un vol stylisé et l'indiquer dans l'aide.
+2. **Profil Manuel** : il suit le tracé exact à vitesse libre. Il est exclu du
+   graphique mais reste sélectionnable ; décider s'il faut le garder comme
+   référence ou le retirer de la comparaison.
+3. **Cache des profils** : `profile_curves` lance six simulations à l'ouverture
+   de l'onglet Profil et à chaque changement ; c'est acceptable à 514² mais
+   lent sur un grand terrain. La trajectoire simulée a son propre cache indexé
+   sur `anim_revision` et n'est pas recalculée pendant un drag.
+4. **Export** : utilise la résolution et la qualité du panneau Rendu; à
+   pleine résolution c'est très long. Prévoir un choix « brouillon / final »,
+   éventuellement une résolution réduite par défaut, et un test de
+   l'annulation.
+5. **Temps de lecture CPU** : `sample_rig` repart de 0 à chaque image ; en CPU
+   l'aperçu est throttlé à 90 ms. En GPU la lecture est fluide. À documenter.
+6. **Aide** : `resolve` utilise le `last_rect` de la frame précédente pour
+   exclure les clics dans la carte ; en mode Tracer un clic très rapide sur la
+   carte juste après son apparition pourrait ajouter une clé. À vérifier.
+7. **Ancien modèle Vol** : toujours dans le projet et le CLI (`anim`), sans UI.
+   Décider si on le conserve pour les scripts ou si on le migre vers `CameraRig`.
+8. **`ensure_animation`** écrase un tracé par défaut si le rig était désactivé ;
+   c'est voulu pour le premier lancement, mais un projet avec un rig désactivé
+   et un tracé par défaut sera remplacé.
+
+### Fichiers touchés / ajoutés cette session
+
+| Fichier | Rôle |
+|---|---|
+| `crates/vf-ui/src/animation_editor.rs` | nouveau : overlay, clés, gizmo, tracé au clic |
+| `crates/vf-ui/src/animation_ui.rs` | nouveau : tabs, presets, courbes, raycast, projection |
+| `crates/vf-ui/src/help.rs` | nouveau : aide contextuelle, cartes, visuels |
+| `crates/vf-ui/src/lib.rs` | fusion des espaces, panneaux Animation, lecture, export |
+| `crates/vf-ui/Cargo.toml` | dépendance `image` |
+| `docs/help/path.png`, `docs/help/gizmo.png` | captures annotées de l'aide |
+| `docs/ETAT_ET_REPRISE.md` | ce document |
+
+Non modifiés cette session (stables de la session précédente) :
+`gpu_view.rs`, `view_gizmo.rs`, shaders WGSL, `vf-scene`, `vf-flight`.
+
+### Reprise conseillée, dans l'ordre
+
+1. Lancer l'app, ouvrir **Animation**, sélectionner une clé, tester le drag des
+   trois axes, l'aimant, le clic sur une autre clé, le mode Tracer, Escape.
+2. Tester **Vue caméra**, lecture/pause/espace, boucle, vitesse, retour design.
+3. Ouvrir **Profil**, vérifier l'échelle après exclusion de Manuel, appliquer
+   hélicoptère/dirigeable, regarder la trajectoire simulée jaune.
+4. Tester **Export** sur une petite résolution (320×180, qualité Low) dans un
+   dossier temporaire, vérifier progression et annulation.
+5. Faire un passage **CPU** (`VISTAFORGE_RENDERER=glow`) : aide, traceur,
+   lecture, export.
+6. Compléter l'aide : captures Profil et Aperçu, élargir la carte, enregistrer
+   les sliders importants (FOV, durée, fps, profils).
+7. Trancher la durée par défaut et le sort du profil Manuel.
+8. Mettre à jour `README.md`, `docs/USAGE.md`, `docs/GPU.md` et les captures
+   pour refléter la fusion Vol/Animation et l'aide.
+9. Relancer `cargo test --workspace`, clippy, fmt ciblé, et refaire une capture
+   d'écran de l'onglet Animation et du Profil.
+
+### Commandes utiles
+
+```bash
+cargo run -p vf-app
+VISTAFORGE_RENDERER=glow cargo run -p vf-app
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt -p vf-ui -p vf-scene -p vf-app
+```
+
+---
+
+---
+
 ## 0bis. Session du 14 novembre — falaises, lumière, modificateurs
 
 - **Falaises** : pass `cliffs` (activé par défaut) qui façonne le heightfield
@@ -292,7 +644,7 @@ Le tout est testé (110 tests), clippy propre, versionné dans Git.
 
 | Domaine | État | Commande |
 |---|---|---|
-| Workspace Rust | compile, **152 tests verts**, clippy `-D warnings` | `cargo test --workspace` |
+| Workspace Rust | compile, **175 tests verts**, clippy `-D warnings` | `cargo test --workspace` |
 | Terrain Classic / Modern | 7 presets, taille jusqu'à 4096 | `terrain generate` |
 | Géologie | 9 presets (dont `canyon`, `patagonia`), schéma projet v5 | `--rock canyon` |
 | Matériaux | éboulis / neige / végétation / détail | rendu, panneau Matières |
@@ -302,7 +654,7 @@ Le tout est testé (110 tests), clippy propre, versionné dans Git.
 | Géologie sur DEM | applique un preset au heightfield courant | `terrain rock` |
 | Flou de mouvement | accumulation 1–32 sous-images, obturateur 0–360° | `--shutter 180` |
 | Vidéo | MP4 via ffmpeg, sinon séquence PNG + commande affichée | `--video out.mp4` |
-| UI | barre de fonctions, panneaux, aperçu débouncé | `cargo run --release -p vf-app` |
+| UI | barre de fonctions, panneaux, gizmo CAO, viewport GPU wgpu/Vulkan, aperçu CPU adaptatif | `cargo run --release -p vf-app` |
 | MCP | 29 outils dont `geology.set`, `modifiers.*`, `flight.info` | `vf-mcp --workspace .` |
 | Git | dépôt initialisé, baseline + 8 commits | `git log --oneline` |
 
@@ -461,8 +813,9 @@ Diagnostic : ce n'est plus la géologie, c'est la **densité de détail** et les
 - **Vent et rafales directionnelles** : aujourd'hui isotropes.
 - **Évitement de collision** : la garde au sol est un maximum local ; un vrai
   lissage de trajectoire éviterait les montées brutales.
-- **Aperçu temps réel** : le viewport ne montre qu'une image fixe ; il faut un
-  rendu basse résolution pendant la lecture (et cache shadow/AO).
+- **Lecture de séquence** : le viewport GPU couvre l'orbite et le cadrage en
+  temps réel ; la lecture d'une séquence de vol complète reste un rendu CPU
+  (CLI `anim render`), avec le cache shadow/AO à ajouter.
 
 ### 5.3 Performance
 
@@ -471,6 +824,9 @@ Diagnostic : ce n'est plus la géologie, c'est la **densité de détail** et les
   séparer permettrait de réutiliser l'ombre et l'AO pour toutes les frames
   (gain estimé 1,5–2×).
 - **Rendu tuilé adaptatif** : réduire l'échantillonnage des zones lointaines.
+- **Aperçu** : fait (résolution dynamique + raffinement progressif + viewport GPU).
+  Reste à porter ombres/AO/nuages dans le shader GPU et à déporter la
+  reconstruction du maillage sur un worker pour les très grandes grilles.
 
 ### 5.4 Robustesse
 
@@ -563,22 +919,27 @@ ligne à lancer pour produire le MP4.
    off : appliquer « canyon » à un grès sur une scène alpine surprend.
 6. **Nuages en incidence rasante.** Ils formaient une bande striée à l'horizon ;
    atténuation par angle et distance.
-7. **Pas de cache d'ombre** pour l'instant : chaque frame reconstruit la shadow
-   map. C'est le prochain gain de performance.
-8. **UI non testée visuellement** : le serveur n'a ni écran ni GPU. Elle
-   compile, les calculs sont testés, mais il faut la lancer sur un poste avec
-   affichage pour valider la mise en page.
+7. **Pas de cache d'ombre** pour le rendu CPU : chaque frame reconstruit la
+   shadow map. Le viewport GPU n'a pas encore d'ombres.
+8. **UI validée visuellement** le 14 novembre sur X11/Xwayland, avec le
+   viewport GPU Vulkan (Quadro RTX 5000) et le repli `VISTAFORGE_RENDERER=glow`.
 
 ---
 
 ## 8. Tests
 
-- 152 tests passent (`cargo test --workspace`), dont :
+- 175 tests passent (`cargo test --workspace`), dont :
   - géologie : déterminisme, presets, invariance sur terrain plat ;
   - vol : déterminisme, garde au sol, gîte visible, cohérence `camera_at` ;
   - CLI : `anim still` de bout en bout ;
   - MCP : `geology.set` + `flight.info` dans une session JSON-RPC ;
-  - projet : round-trip, masque + preview.
+  - projet : round-trip, masque + preview ;
+  - vues CAO : cadrage, pôle non dégénéré, aller-retour yaw/pitch ;
+  - gizmo : clic simulé sur l'axe Z et sur le bouton Défaut ;
+  - aperçu adaptatif : convergence et monotonicité du raffinement ;
+  - maillage GPU : eau, plafond de résolution, normales ;
+  - éditeur de tracé : édition des composantes œil/cible, distance aux segments ;
+  - aide contextuelle : non testée unitairement à ce stade.
 - clippy `-D warnings` propre sur tout le workspace.
 
 ---

@@ -9,6 +9,10 @@ Usage:
 Options:
   -h, --help       Print this help and exit
   -V, --version    Print the version and exit
+
+Environment:
+  VISTAFORGE_RENDERER=glow   Force the OpenGL UI renderer and the CPU preview
+                             instead of the default wgpu/Vulkan viewport.
 ";
 
 fn main() -> anyhow::Result<()> {

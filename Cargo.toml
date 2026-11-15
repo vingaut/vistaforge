@@ -29,8 +29,9 @@ description = "VistaForge — modern landscape generator and editor"
 
 [workspace.dependencies]
 anyhow = "1.0"
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "wgpu", "default_fonts", "wayland", "x11"] }
 base64 = "0.22"
+bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.6", features = ["derive"] }
 glam = { version = "0.30", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

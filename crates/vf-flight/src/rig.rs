@@ -9,7 +9,8 @@
 
 use glam::DVec3;
 use vf_core::{
-    AircraftPreset, Camera, CameraLink, CameraRig, HeightField, Path3D, Seed, TargetMode,
+    AircraftPreset, Camera, CameraLink, CameraRig, HeightField, MotionProfile, Path3D, Seed,
+    TargetMode,
 };
 use vf_procgen::Noise;
 
@@ -115,8 +116,12 @@ impl<'a> RigSimulation<'a> {
         let path_velocity = path_derivative(&self.rig.eye, t);
         let body = &self.rig.body;
         let omega = response_omega(body.preset);
+        // Position spring + velocity feed-forward. Without the feed-forward
+        // term the spring fights the path velocity, and once the acceleration
+        // clamp saturates the damping collapses: fast bodies then limit-cycle
+        // around the curve instead of following it.
         let accel = (desired - self.eye_pos) * (omega * omega)
-            - self.eye_vel * (2.0 * omega);
+            + (path_velocity - self.eye_vel) * (2.0 * omega);
         // Manual mode ignores the spring and follows the authored path exactly.
         if body.manual_orientation {
             self.eye_vel = path_velocity;
@@ -171,7 +176,8 @@ impl<'a> RigSimulation<'a> {
         // Ground / reference-plane clearance. `apply_eye` and friends decide
         // which objects are constrained.
         if self.rig.constraints.enabled && self.rig.constraints.apply_eye {
-            let floor = self.floor_at(self.eye_pos) + f64::from(self.rig.constraints.ground_clearance_m);
+            let floor =
+                self.floor_at(self.eye_pos) + f64::from(self.rig.constraints.ground_clearance_m);
             if self.eye_pos.z < floor {
                 let soft = f64::from(self.rig.constraints.softness);
                 self.eye_pos.z += (floor - self.eye_pos.z) * (1.0 - soft);
@@ -184,13 +190,14 @@ impl<'a> RigSimulation<'a> {
         if self.rig.constraints.enabled && self.rig.constraints.wall_avoidance {
             let threshold = f64::from(self.rig.constraints.wall_distance_m);
             if threshold > 0.0 {
-                let ahead = self.eye_pos
-                    + self.eye_vel * f64::from(self.rig.constraints.look_ahead_s);
+                let ahead =
+                    self.eye_pos + self.eye_vel * f64::from(self.rig.constraints.look_ahead_s);
                 let (distance, gx, gy) = self.clearance.sample(ahead.x, ahead.y);
                 let distance = f64::from(distance);
                 if distance.is_finite() && distance < threshold {
                     let pressure = (1.0 - distance / threshold).clamp(0.0, 1.0);
-                    let push_dir = DVec3::new(f64::from(gx), f64::from(gy), 0.0).normalize_or_zero();
+                    let push_dir =
+                        DVec3::new(f64::from(gx), f64::from(gy), 0.0).normalize_or_zero();
                     // A lateral acceleration of up to ~18 m/s², applied to the
                     // velocity: smooth enough for a drone, strong enough to
                     // read as an evasive move.
@@ -205,8 +212,8 @@ impl<'a> RigSimulation<'a> {
 
         self.target_pos = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
         if self.rig.constraints.enabled && self.rig.constraints.apply_target {
-            let floor = self.floor_at(self.target_pos)
-                + f64::from(self.rig.constraints.ground_clearance_m);
+            let floor =
+                self.floor_at(self.target_pos) + f64::from(self.rig.constraints.ground_clearance_m);
             self.target_pos.z = self.target_pos.z.max(floor);
         }
 
@@ -223,7 +230,8 @@ impl<'a> RigSimulation<'a> {
             self.cam_vel = self.eye_vel;
         }
         if self.rig.constraints.enabled && self.rig.constraints.apply_camera {
-            let floor = self.floor_at(self.cam_pos) + f64::from(self.rig.constraints.ground_clearance_m);
+            let floor =
+                self.floor_at(self.cam_pos) + f64::from(self.rig.constraints.ground_clearance_m);
             self.cam_pos.z = self.cam_pos.z.max(floor);
         }
 
@@ -277,20 +285,24 @@ impl<'a> RigSimulation<'a> {
         let shake = &self.rig.body;
         if shake.shake_deg > 0.0 && shake.turbulence > 0.0 {
             let t = self.time * 2.1;
-            let yaw = f64::from(
-                self.shake.fbm2(t, 0.0, 4, 2.0, 0.5) * shake.shake_deg.to_radians(),
-            );
+            let yaw =
+                f64::from(self.shake.fbm2(t, 0.0, 4, 2.0, 0.5) * shake.shake_deg.to_radians());
             let pitch = f64::from(
-                self.shake
-                    .fbm2(t + 13.7, 4.2, 4, 2.0, 0.5)
-                    * shake.shake_deg.to_radians()
-                    * 0.7,
+                self.shake.fbm2(t + 13.7, 4.2, 4, 2.0, 0.5) * shake.shake_deg.to_radians() * 0.7,
             );
             let (s, c) = yaw.sin_cos();
-            let yaw_rot = DVec3::new(c * forward.x - s * forward.z, forward.y, s * forward.x + c * forward.z);
+            let yaw_rot = DVec3::new(
+                c * forward.x - s * forward.z,
+                forward.y,
+                s * forward.x + c * forward.z,
+            );
             forward = yaw_rot;
             let (s, c) = pitch.sin_cos();
-            let pitch_rot = DVec3::new(forward.x, c * forward.y - s * forward.z, s * forward.y + c * forward.z);
+            let pitch_rot = DVec3::new(
+                forward.x,
+                c * forward.y - s * forward.z,
+                s * forward.y + c * forward.z,
+            );
             forward = pitch_rot;
             right = forward.cross(UP).normalize_or_zero();
             up = right.cross(forward).normalize_or_zero();
@@ -307,7 +319,8 @@ impl<'a> RigSimulation<'a> {
         } else {
             self.rig.optics.focus_distance_m.max(0.1)
         };
-        let altitude = self.eye_pos.z - f64::from(self.terrain_height(self.eye_pos.x, self.eye_pos.y));
+        let altitude =
+            self.eye_pos.z - f64::from(self.terrain_height(self.eye_pos.x, self.eye_pos.y));
         let (wall_distance, _, _) = self.clearance.sample(self.eye_pos.x, self.eye_pos.y);
         RigSample {
             camera: Camera {
@@ -347,14 +360,17 @@ pub fn sample_rig(
 
 fn response_omega(preset: AircraftPreset) -> f64 {
     let response_s = match preset {
-        AircraftPreset::DroneFpv => 0.22,
-        AircraftPreset::Bird => 0.55,
-        AircraftPreset::Helicopter => 1.1,
-        AircraftPreset::Airship => 2.6,
-        AircraftPreset::FighterJet => 0.12,
+        AircraftPreset::DroneFpv => 1.2,
+        AircraftPreset::Bird => 1.6,
+        AircraftPreset::Helicopter => 3.2,
+        AircraftPreset::Airship => 7.0,
+        AircraftPreset::FighterJet => 1.0,
         AircraftPreset::Manual => 0.02,
     };
-    std::f64::consts::TAU / response_s
+    // `1 / response_s`, not `TAU / response_s`: the latter makes the spring
+    // six times stiffer than the advertised response and the acceleration
+    // clamp turns it into a bang-bang controller that limit-cycles.
+    1.0 / response_s
 }
 
 fn initial_target(rig: &CameraRig, eye: DVec3) -> DVec3 {
@@ -415,8 +431,18 @@ pub fn sample_path(path: &Path3D, t: f32) -> DVec3 {
     let p0 = DVec3::from_array(a.position);
     let p1 = DVec3::from_array(b.position);
     let (h0, h1) = auto_handles(keys, index);
-    let c1 = p0 + DVec3::from_array(if a.out_handle == [0.0; 3] { h0 } else { a.out_handle });
-    let c2 = p1 + DVec3::from_array(if b.in_handle == [0.0; 3] { h1 } else { b.in_handle });
+    let c1 = p0
+        + DVec3::from_array(if a.out_handle == [0.0; 3] {
+            h0
+        } else {
+            a.out_handle
+        });
+    let c2 = p1
+        + DVec3::from_array(if b.in_handle == [0.0; 3] {
+            h1
+        } else {
+            b.in_handle
+        });
     let u = u as f64;
     let v = 1.0 - u;
     p0 * (v * v * v) + c1 * (3.0 * v * v * u) + c2 * (3.0 * v * u * u) + p1 * (u * u * u)
@@ -438,6 +464,82 @@ fn auto_handles(keys: &[vf_core::PathKey], index: usize) -> ([f64; 3], [f64; 3])
     let m0 = (p1 - prev) * 0.5;
     let m1 = (next - p0) * 0.5;
     ((m0 / 3.0).to_array(), (-m1 / 3.0).to_array())
+}
+
+/// Approximate authored path length, metres.
+///
+/// The curve is sampled uniformly in time; for the smooth, non-looping paths
+/// authored in the editor this is accurate enough to guide the duration (the
+/// error is far below the difference between a drone and an airship).
+pub fn path_length(path: &Path3D) -> f64 {
+    let duration = path.duration_s();
+    if !duration.is_finite() || duration <= 0.0 {
+        return 0.0;
+    }
+    let samples = 256;
+    let mut previous = sample_path(path, 0.0);
+    let mut length = 0.0;
+    for index in 1..=samples {
+        let t = duration * index as f32 / samples as f32;
+        let point = sample_path(path, t);
+        length += (point - previous).length();
+        previous = point;
+    }
+    length
+}
+
+/// Axis-aligned centre of the authored path, used to frame the design camera
+/// on a short demonstration loop.
+pub fn path_center(path: &Path3D) -> DVec3 {
+    if path.keys.is_empty() {
+        return DVec3::ZERO;
+    }
+    let mut min = DVec3::splat(f64::INFINITY);
+    let mut max = DVec3::splat(f64::NEG_INFINITY);
+    for key in &path.keys {
+        let p = DVec3::from_array(key.position);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    (min + max) * 0.5
+}
+
+/// Cruise speed used to translate a path length into a duration. It leaves
+/// headroom for acceleration and banking instead of asking the body to fly at
+/// its absolute maximum for the whole clip.
+pub fn cruise_speed_mps(profile: &MotionProfile) -> f32 {
+    (profile.max_speed_mps * 0.75).max(0.5)
+}
+
+/// Duration at which the current body can follow the authored path at cruise
+/// speed. Clamped to the rig's legal range.
+pub fn recommended_duration_s(rig: &CameraRig) -> f32 {
+    let length = path_length(&rig.eye);
+    let cruise = f64::from(cruise_speed_mps(&rig.body));
+    (length / cruise).clamp(2.0, 600.0) as f32
+}
+
+/// Average speed the body would have to sustain to follow the path in the
+/// current duration, m/s.
+pub fn required_speed_mps(rig: &CameraRig) -> f32 {
+    let length = path_length(&rig.eye);
+    if rig.duration_s <= 1e-4 {
+        return 0.0;
+    }
+    (length / f64::from(rig.duration_s)) as f32
+}
+
+/// How far the current duration is from a comfortable one, as a factor.
+/// 1.0 means the path is already at cruise speed; 4.0 means it is four times
+/// too fast (the body will saturate and lag behind the curve).
+pub fn duration_pressure(rig: &CameraRig) -> f32 {
+    let required = required_speed_mps(rig);
+    let cruise = cruise_speed_mps(&rig.body);
+    if cruise <= 0.0 {
+        1.0
+    } else {
+        required / cruise
+    }
 }
 
 /// Finite-difference derivative of the path, metres per second.
@@ -474,9 +576,15 @@ pub fn preset_path(rig: &mut CameraRig, hf: &HeightField, pattern: &str) -> Resu
         }
         "ridge" => {
             let keys = vec![
-                vf_core::PathKey::new(0.0, [center.x - radius, center.y - radius * 0.5, base_z + 150.0]),
+                vf_core::PathKey::new(
+                    0.0,
+                    [center.x - radius, center.y - radius * 0.5, base_z + 150.0],
+                ),
                 vf_core::PathKey::new(4.0, [center.x, center.y, base_z + 250.0]),
-                vf_core::PathKey::new(8.0, [center.x + radius, center.y + radius * 0.5, base_z + 150.0]),
+                vf_core::PathKey::new(
+                    8.0,
+                    [center.x + radius, center.y + radius * 0.5, base_z + 150.0],
+                ),
             ];
             (keys, center + DVec3::new(radius * 2.0, 0.0, -100.0))
         }
@@ -488,15 +596,98 @@ pub fn preset_path(rig: &mut CameraRig, hf: &HeightField, pattern: &str) -> Resu
             ];
             (keys, center)
         }
+        "demo" => {
+            // A short S-curve over the centre of the terrain. Its length is
+            // matched to the current body at cruise speed, so the comparison
+            // is about inertia and cornering rather than about saturation.
+            let extent = extent.max(1.0);
+            let max_speed = f64::from(rig.body.max_speed_mps.max(0.5));
+            // A slow airship gets a smaller S, a fighter a longer one, so
+            // every demo lasts roughly the same handful of seconds at 90 % of
+            // the body's top speed. Slow bodies then visibly lag behind.
+            let span = (max_speed * 6.0).clamp(60.0, (extent * 0.05).clamp(60.0, 500.0));
+            let sample_ground = |x: f64, y: f64| {
+                let (ox, oy) = hf.origin();
+                let (sx, sy) = hf.spacing();
+                let gx = ((x - ox) / sx).clamp(0.0, (hf.width() - 1) as f64);
+                let gy = ((y - oy) / sy).clamp(0.0, (hf.height() - 1) as f64);
+                f64::from(hf.sample_bilinear(gx, gy))
+            };
+            let mut points = [
+                (center.x - span, center.y - span * 1.05),
+                (center.x - span * 0.3, center.y + span * 1.05),
+                (center.x + span * 0.3, center.y - span * 1.05),
+                (center.x + span, center.y + span * 1.05),
+            ];
+            let mut keys = Vec::with_capacity(4);
+            for (index, (x, y)) in points.iter_mut().enumerate() {
+                let ground = sample_ground(*x, *y);
+                let altitude = 150.0 + index as f64 * 20.0;
+                keys.push(vf_core::PathKey::new(
+                    index as f32 / 3.0,
+                    [*x, *y, ground + altitude],
+                ));
+            }
+            let probe = Path3D {
+                keys: keys.clone(),
+                closed: false,
+            };
+            // Equal key spacing in time would make the S-curve accelerate and
+            // brake at every control point. Allocate time by arc length so the
+            // demo is a steady cruise and the profile comparison is readable.
+            let mut segment_lengths = Vec::with_capacity(keys.len().saturating_sub(1));
+            let mut total_length = 0.0;
+            for index in 1..keys.len() {
+                let t0 = probe.keys[index - 1].time_s;
+                let t1 = probe.keys[index].time_s;
+                let mut previous = sample_path(&probe, t0);
+                let mut length = 0.0;
+                for step in 1..=32 {
+                    let t = t0 + (t1 - t0) * step as f32 / 32.0;
+                    let point = sample_path(&probe, t);
+                    length += (point - previous).length();
+                    previous = point;
+                }
+                total_length += length;
+                segment_lengths.push(length);
+            }
+            let duration = (total_length / (max_speed * 0.9)).clamp(6.0, 60.0) as f32;
+            let mut elapsed = 0.0;
+            keys[0].time_s = 0.0;
+            for (index, length) in segment_lengths.iter().enumerate() {
+                elapsed += length;
+                let share = if total_length > 0.0 {
+                    elapsed / total_length
+                } else {
+                    (index + 1) as f64 / segment_lengths.len() as f64
+                };
+                keys[index + 1].time_s = duration * share as f32;
+            }
+            for key in &mut keys {
+                key.ease = 0.0;
+            }
+            rig.duration_s = duration;
+            let ground = sample_ground(center.x, center.y);
+            (keys, DVec3::new(center.x, center.y, ground + 70.0))
+        }
         other => return Err(format!("unknown rig path '{other}'")),
     };
     rig.eye.keys = keys;
-    rig.duration_s = 8.0;
-    rig.target.mode = TargetMode::Path;
-    rig.target.path.keys = vec![
-        vf_core::PathKey::new(0.0, target.to_array()),
-        vf_core::PathKey::new(8.0, target.to_array()),
-    ];
+    if pattern.eq_ignore_ascii_case("demo") {
+        rig.target.mode = TargetMode::Fixed;
+        rig.target.fixed = target.to_array();
+        rig.target.path.keys = vec![
+            vf_core::PathKey::new(0.0, target.to_array()),
+            vf_core::PathKey::new(rig.duration_s, target.to_array()),
+        ];
+    } else {
+        rig.duration_s = 8.0;
+        rig.target.mode = TargetMode::Path;
+        rig.target.path.keys = vec![
+            vf_core::PathKey::new(0.0, target.to_array()),
+            vf_core::PathKey::new(8.0, target.to_array()),
+        ];
+    }
     rig.validate()
 }
 
@@ -553,5 +744,38 @@ mod tests {
         assert!(a.body.accel_forward_mps2 > b.body.accel_forward_mps2);
         assert!(a.body.max_bank_deg > b.body.max_bank_deg);
         assert_eq!(a.body.preset, AircraftPreset::FighterJet);
+    }
+
+    #[test]
+    fn path_length_and_recommended_duration_are_consistent() {
+        let path = Path3D::default();
+        let length = path_length(&path);
+        assert!(length > 1000.0);
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye = path;
+        rig.duration_s = 8.0;
+        let recommended = recommended_duration_s(&rig);
+        assert!(recommended > 8.0, "{recommended}");
+        rig.duration_s = recommended;
+        assert!((required_speed_mps(&rig) - cruise_speed_mps(&rig.body)).abs() < 1.0);
+        assert!((duration_pressure(&rig) - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn demo_path_is_short_and_fitted_to_the_body() {
+        let hf = field();
+        for preset in [
+            AircraftPreset::DroneFpv,
+            AircraftPreset::Helicopter,
+            AircraftPreset::Airship,
+        ] {
+            let mut rig = CameraRig::preset(preset.name()).unwrap();
+            preset_path(&mut rig, &hf, "demo").unwrap();
+            assert!((6.0..=60.0).contains(&rig.duration_s));
+            assert!(path_length(&rig.eye) < 2600.0);
+            let pressure = duration_pressure(&rig);
+            assert!((0.9..=1.5).contains(&pressure), "{preset:?}: {pressure}");
+            assert_eq!(rig.target.mode, TargetMode::Fixed);
+        }
     }
 }

@@ -633,10 +633,6 @@ mod tests {
             let t = 20.0 * index as f32 / 100.0;
             let sample = sim.sample_at(t);
             if sample.eye.x > 580.0 && sample.eye.x < 820.0 {
-                eprintln!(
-                    "x={:.0} z={:.1} flags={:?}",
-                    sample.eye.x, sample.eye.z, sample.safety
-                );
                 climbed |= sample.eye.z >= 105.0;
             }
         }

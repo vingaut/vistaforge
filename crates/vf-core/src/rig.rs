@@ -47,7 +47,11 @@ impl PathKey {
             position,
             in_handle: [0.0; 3],
             out_handle: [0.0; 3],
-            ease: 0.5,
+            // 0 = constant parameter speed. A per-key smoothstep makes the
+            // camera stop and surge at every key, which the body can only
+            // follow by lagging behind the curve. Users can still raise
+            // `Adoucissement` on a key when they want an ease in/out.
+            ease: 0.0,
         }
     }
 
@@ -550,6 +554,62 @@ impl CameraRig {
         Some(rig)
     }
 
+    /// Scale every authored key time by `factor`, keeping positions and
+    /// handles untouched. This is how a duration change slows down or speeds
+    /// up the whole flight instead of letting the camera reach the last key
+    /// early and wait there.
+    pub fn scale_path_times(&mut self, factor: f32) -> bool {
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        let mut changed = false;
+        for key in &mut self.eye.keys {
+            let time = key.time_s * factor;
+            if time.is_finite() && (time - key.time_s).abs() > 1e-6 {
+                key.time_s = time;
+                changed = true;
+            }
+        }
+        for key in &mut self.target.path.keys {
+            let time = key.time_s * factor;
+            if time.is_finite() && (time - key.time_s).abs() > 1e-6 {
+                key.time_s = time;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Set the clip duration and stretch the authored paths to fill it.
+    ///
+    /// The factor is computed from the **end of the authored path**, not from
+    /// the previous duration: this repairs projects whose duration was changed
+    /// without retiming the keys (the camera used to reach the end at the old
+    /// key time and then stand still). Positions are never modified.
+    pub fn stretch_duration(&mut self, new_duration: f32) -> bool {
+        if !new_duration.is_finite() {
+            return false;
+        }
+        let new_duration = new_duration.clamp(0.1, 600.0);
+        let path_end = self
+            .eye
+            .duration_s()
+            .max(if self.target.mode == TargetMode::Path {
+                self.target.path.duration_s()
+            } else {
+                0.0
+            });
+        let mut changed = false;
+        if path_end > 1e-6 && (new_duration - path_end).abs() > 1e-5 {
+            changed |= self.scale_path_times(new_duration / path_end);
+        }
+        if (self.duration_s - new_duration).abs() > 1e-6 {
+            self.duration_s = new_duration;
+            changed = true;
+        }
+        changed
+    }
+
     pub fn frame_count(&self) -> usize {
         ((self.duration_s * self.fps as f32).round() as usize).clamp(1, 200_000)
     }
@@ -583,6 +643,46 @@ impl CameraRig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stretching_duration_fills_the_clip_without_moving_positions() {
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.duration_s = 50.0;
+        rig.eye.keys = vec![
+            PathKey::new(0.0, [0.0, 0.0, 500.0]),
+            PathKey::new(25.0, [1000.0, 0.0, 500.0]),
+            PathKey::new(50.0, [2000.0, 0.0, 500.0]),
+        ];
+        let positions: Vec<[f64; 3]> = rig.eye.keys.iter().map(|key| key.position).collect();
+        assert!(rig.stretch_duration(20.0));
+        assert_eq!(rig.duration_s, 20.0);
+        assert!((rig.eye.keys[1].time_s - 10.0).abs() < 1e-4);
+        assert!((rig.eye.keys[2].time_s - 20.0).abs() < 1e-4);
+        assert_eq!(
+            positions,
+            rig.eye
+                .keys
+                .iter()
+                .map(|key| key.position)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extending_duration_after_a_pause_does_not_double_the_path() {
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.duration_s = 10.0;
+        rig.eye.keys = vec![
+            PathKey::new(0.0, [0.0, 0.0, 500.0]),
+            PathKey::new(25.0, [1000.0, 0.0, 500.0]),
+            PathKey::new(50.0, [2000.0, 0.0, 500.0]),
+        ];
+        // The clip is shorter than the path: extending to the last key should
+        // simply reveal it, not stretch it a second time.
+        assert!(rig.stretch_duration(50.0));
+        assert_eq!(rig.duration_s, 50.0);
+        assert!((rig.eye.keys[2].time_s - 50.0).abs() < 1e-4);
+    }
 
     #[test]
     fn presets_are_valid() {

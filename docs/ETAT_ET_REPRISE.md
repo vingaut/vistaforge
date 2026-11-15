@@ -12,7 +12,7 @@ Dernière mise à jour : **2026-11-15 17:52** (lot terminé, binaires Linux publ
 ## 0quindecies. Session du 15 novembre — sculpture fine, animation, fichiers et Blender (livré)
 
 > **État : lot terminé et poussé.** Le WIP « terrasses basaltiques » ci-dessous
-> a été repris, complété et intégré. Workspace compilé, **219 tests verts**,
+> a été repris, complété et intégré. Workspace compilé, **223 tests verts**,
 > `clippy -D warnings` propre, `cargo fmt` appliqué, captures UI et validation
 > Blender 5.3 effectuées.
 >
@@ -99,9 +99,36 @@ Dernière mise à jour : **2026-11-15 17:52** (lot terminé, binaires Linux publ
   normalisation de l'extension `.vfproj`.
 - Doc dédiée : [`FICHIERS.md`](FICHIERS.md).
 
+### Correctif « la caméra ne suit pas la courbe »
+
+Quatre causes distinctes ont été identifiées et corrigées :
+
+1. **La durée ne rééchelonnait pas les clés.** La simulation échantillonnait la
+   courbe à `t` avec les temps absolus des clés. Passer de 50 à 70 s laissait
+   donc le tracé se terminer à 50 s : la caméra arrivait à la fin puis
+   attendait. `CameraRig::stretch_duration` rééchelonne désormais les temps des
+   clés (positions 3D inchangées) pour remplir le clip ; la case **Étirer les
+   clés avec la durée** permet de revenir aux temps absolus.
+2. **La caméra démarrait à l'arrêt.** `RigSimulation` initialisait `eye_vel` à
+   zéro, d'où un retard inévitable de `v²/(2a)` au premier virage. Elle démarre
+   maintenant à la vitesse du tracé, plafonnée à la vitesse max du profil.
+3. **La traînée créait une erreur permanente.** La traînée était appliquée à la
+   vitesse absolue sans poussée compensatoire : le ressort devait conserver un
+   écart de plusieurs dizaines de mètres pour la vaincre. Une avance de poussée
+   `path_velocity * drag` compense la traînée.
+4. **L'ease par clé faisait sursauter la vitesse.** `PathKey::new` utilisait
+   `ease = 0.5` (vitesse nulle à chaque clé, pic à 1,5×). Les nouvelles clés
+   utilisent `ease = 0` (vitesse constante) ; le bouton **Vitesse constante
+   (ease 0)** remet un tracé existant à zéro.
+
+La durée conseillée inclut **15 % de marge** pour l'accélération, les virages et
+la stabilisation finale. Un **bandeau de diagnostic** mesure l'écart réel entre
+la trajectoire simulée et la courbe et propose : allonger la durée, ease 0, ou
+profil Manuel. Test de non-régression : `recommended_duration_keeps_the_demo_flyover_on_its_curve` (drone, 4 clés, écart < 15 m).
+
 ### Validation
 
-- `cargo test --workspace` : **219 tests verts** (dont GeoTIFF, heightmap
+- `cargo test --workspace` : **223 tests verts** (dont GeoTIFF, heightmap
   PNG/JPEG, import/export animation, timeline, glisser libre, durée, parois).
 - `cargo clippy --workspace --all-targets -- -D warnings` : propre.
 - `cargo fmt --all` : appliqué.

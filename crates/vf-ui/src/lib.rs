@@ -21,8 +21,9 @@ mod view_gizmo;
 use eframe::egui;
 use glam::DVec3;
 use vf_core::{
-    AircraftPreset, Camera, CameraLink, ClassicParams, ErosionParams, HeightField, LegacyMeta,
-    ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
+    AircraftPreset, Camera, CameraLink, CameraRig, ClassicParams, ErosionParams, HeightField,
+    LegacyMeta, ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode,
+    TerrainSource,
 };
 use vf_io::RgbaImage;
 use vf_render::{RenderOptions, RenderOutput, render_with_options};
@@ -403,10 +404,12 @@ struct VistaForgeApp {
     anim_play_speed: f32,
     anim_last_play_preview: Instant,
     anim_track: Option<(u64, vf_flight::rig::RigTrack)>,
+    anim_track_error: Option<f32>,
     anim_live_sample: Option<vf_flight::rig::RigSample>,
     anim_timeline: timeline::TimelineState,
     anim_curve_cache: Option<(u64, timeline::Curves)>,
     anim_io_path: String,
+    anim_stretch_keys: bool,
 
     files_status: String,
     files_import_path: String,
@@ -536,10 +539,12 @@ impl VistaForgeApp {
             anim_play_speed: 1.0,
             anim_last_play_preview: Instant::now(),
             anim_track: None,
+            anim_track_error: None,
             anim_live_sample: None,
             anim_timeline: timeline::TimelineState::default(),
             anim_curve_cache: None,
             anim_io_path: "anim-out/flyover.glb".into(),
+            anim_stretch_keys: true,
             files_status:
                 "Import/export GeoTIFF, ASCII, DEM, heightmap PNG/JPEG, Blender GLB et animations."
                     .into(),
@@ -912,6 +917,9 @@ impl VistaForgeApp {
         self.sculpt_texture_dirty = true;
         self.sculpt_undo.clear();
         self.sculpt_redo.clear();
+        self.anim_track = None;
+        self.anim_track_error = None;
+        self.anim_live_sample = None;
         self.sync_from_project();
         self.sync_orbit_from_camera();
         self.refresh_preview(ctx);
@@ -936,6 +944,9 @@ impl VistaForgeApp {
                 self.sculpt_texture_dirty = true;
                 self.sculpt_undo.clear();
                 self.sculpt_redo.clear();
+                self.anim_track = None;
+                self.anim_track_error = None;
+                self.anim_live_sample = None;
                 self.sync_from_project();
                 self.sync_orbit_from_camera();
                 self.refresh_preview(ctx);
@@ -2737,6 +2748,7 @@ impl VistaForgeApp {
         self.anim_compare_cache = None;
         self.anim_camera_dirty = true;
         self.anim_live_sample = None;
+        self.anim_track_error = None;
         self.project.mark_modified();
     }
 
@@ -2766,6 +2778,43 @@ impl VistaForgeApp {
 
     fn animation_sample_at(&mut self, time: f32) -> Option<vf_flight::rig::RigSample> {
         self.animation_track().map(|track| track.sample_at(time))
+    }
+
+    /// Recompute the worst distance between the simulated path and the
+    /// authored curve. The track is cached, so this is cheap after the first
+    /// call for a given revision.
+    fn refresh_tracking_error(&mut self) {
+        if self.anim_track_error.is_some() {
+            return;
+        }
+        let path = self.project.rig.eye.clone();
+        let error = self
+            .animation_track()
+            .map(|track| track.max_path_error(&path));
+        self.anim_track_error = error;
+    }
+
+    /// Make the selected path use constant-speed segments (ease 0). Per-key
+    /// smoothstep makes the camera slow down and surge at every key, which is
+    /// often read as "the camera does not follow the curve".
+    fn flatten_key_easing(&mut self) {
+        let mut changed = false;
+        for key in &mut self.project.rig.eye.keys {
+            if key.ease.abs() > 1e-6 {
+                key.ease = 0.0;
+                changed = true;
+            }
+        }
+        for key in &mut self.project.rig.target.path.keys {
+            if key.ease.abs() > 1e-6 {
+                key.ease = 0.0;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_animation_changed();
+            self.rig_status = "Adoucissement remis à 0 : vitesse constante entre les clés".into();
+        }
     }
 
     fn sample_animation_camera(&mut self, ctx: &egui::Context) -> bool {
@@ -3182,6 +3231,50 @@ impl VistaForgeApp {
             }
         });
         ui.separator();
+        if !self.anim_editor.is_dragging() && !self.anim_timeline.is_dragging() {
+            self.refresh_tracking_error();
+        }
+        if let Some(error) = self.anim_track_error {
+            let fit = animation_ui::TimingFit::measure(&self.project.rig);
+            let threshold = (fit.length_m as f32 * 0.01).max(5.0);
+            if error > threshold {
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgba_unmultiplied(58, 40, 18, 180))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Caméra jusqu'à {error:.0} m derrière le tracé : le profil coupe les virages ou sature (seuil {threshold:.0} m)."
+                            ))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(255, 196, 110)),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Allonger la durée").clicked() {
+                                let recommended = animation_ui::TimingFit::measure(&self.project.rig)
+                                    .recommended_duration_s
+                                    .max(self.project.rig.duration_s * 1.15);
+                                self.set_animation_duration(recommended);
+                            }
+                            if ui
+                                .button("Vitesse constante (ease 0)")
+                                .on_hover_text(
+                                    "Supprime le ralentissement/accélération à chaque clé ; c'est souvent le vrai correctif.",
+                                )
+                                .clicked()
+                            {
+                                self.flatten_key_easing();
+                            }
+                            if ui.button("Profil manuel").clicked() {
+                                animation_ui::apply_aircraft_preset(
+                                    &mut self.project.rig,
+                                    AircraftPreset::Manual,
+                                );
+                                self.mark_animation_changed();
+                            }
+                        });
+                    });
+            }
+        }
         match self.anim_tab {
             animation_ui::AnimTab::Path => self.anim_path_tab(ui, ctx),
             animation_ui::AnimTab::Timing => self.anim_timing_tab(ui, ctx),
@@ -3428,9 +3521,7 @@ impl VistaForgeApp {
                     .keys
                     .last()
                     .map_or(8.0, |key| key.time_s.max(0.1));
-                self.project.rig.duration_s = end.clamp(0.1, 600.0);
-                self.rig_time = self.rig_time.min(end);
-                self.mark_animation_changed();
+                self.set_animation_duration(end);
             }
             if ui
                 .button("Cadrer le tracé")
@@ -3438,6 +3529,15 @@ impl VistaForgeApp {
                 .clicked()
             {
                 self.frame_animation_loop();
+            }
+            if ui
+                .button("Vitesse constante (ease 0)")
+                .on_hover_text(
+                    "Supprime l'adoucissement par clé : la caméra ne ralentit plus à chaque point.",
+                )
+                .clicked()
+            {
+                self.flatten_key_easing();
             }
             let recommended = animation_ui::TimingFit::measure(&self.project.rig);
             if ui
@@ -3450,11 +3550,9 @@ impl VistaForgeApp {
                 )
                 .clicked()
             {
-                self.project.rig.duration_s = recommended.recommended_duration_s;
-                self.rig_time = self.rig_time.min(self.project.rig.duration_s);
-                self.mark_animation_changed();
+                self.set_animation_duration(recommended.recommended_duration_s);
                 self.rig_status = format!(
-                    "Durée ajustée à {:.1}s pour ce profil",
+                    "Durée ajustée à {:.1}s pour ce profil · clés étirées",
                     self.project.rig.duration_s
                 );
             }
@@ -3934,6 +4032,36 @@ impl VistaForgeApp {
         }
     }
 
+    /// Change the clip duration. When `stretch` is enabled (the default), the
+    /// authored key times are scaled to fill the new clip, so the camera keeps
+    /// following the whole curve instead of reaching the last key early and
+    /// waiting there.
+    fn set_animation_duration(&mut self, duration: f32) {
+        let old = self.project.rig.duration_s;
+        let changed = if self.anim_stretch_keys {
+            self.project.rig.stretch_duration(duration)
+        } else {
+            let new = duration.clamp(0.1, 600.0);
+            let changed = (new - old).abs() > 1e-6;
+            self.project.rig.duration_s = new;
+            changed
+        };
+        if changed {
+            self.rig_time = self.rig_time.min(self.project.rig.duration_s);
+            self.anim_live_sample = None;
+            self.mark_animation_changed();
+            self.rig_status = format!(
+                "Durée {:.2}s{}",
+                self.project.rig.duration_s,
+                if self.anim_stretch_keys {
+                    " · clés étirées en temps"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
     fn anim_timing_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.label(
             egui::RichText::new(
@@ -3942,21 +4070,55 @@ impl VistaForgeApp {
             .small(),
         );
         let mut changed = false;
-        changed |= duration_param(ui, &mut self.project.rig.duration_s);
+        changed |= duration_param(ui, &mut self.project.rig, self.anim_stretch_keys);
+        ui.checkbox(
+            &mut self.anim_stretch_keys,
+            "Étirer les clés avec la durée",
+        )
+        .on_hover_text(
+            "La durée étire le temps des clés (les positions 3D ne changent pas). Désactivé, les clés gardent leur temps absolu et la caméra peut atteindre la fin avant la durée.",
+        );
         let key_end = self.project.rig.eye.duration_s();
-        if key_end > self.project.rig.duration_s + 1e-3 {
+        let duration = self.project.rig.duration_s;
+        if (key_end - duration).abs() > 0.05 {
             ui.horizontal_wrapped(|ui| {
+                let text = if key_end > duration {
+                    format!(
+                        "Des clés dépassent la fin ({key_end:.2} s > {duration:.2} s) : elles restent conservées mais ne sont pas jouées."
+                    )
+                } else {
+                    format!(
+                        "Le tracé se termine à {key_end:.2} s, la durée est {duration:.2} s : la caméra atteindra la fin puis attendra. Étirez les clés pour remplir le clip."
+                    )
+                };
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Des clés dépassent la fin ({key_end:.2} s > {:.2} s) : elles restent conservées mais ne sont pas jouées.",
-                        self.project.rig.duration_s
-                    ))
-                    .size(10.0)
-                    .color(egui::Color32::from_rgb(255, 196, 110)),
+                    egui::RichText::new(text)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(255, 196, 110)),
                 );
-                if ui.button("Étendre à la dernière clé").clicked() {
-                    self.project.rig.duration_s = key_end.clamp(0.1, 600.0);
-                    changed = true;
+                if key_end > duration {
+                    if ui.button("Étendre à la dernière clé").clicked() {
+                        self.set_animation_duration(key_end);
+                        changed = true;
+                    }
+                } else {
+                    if ui
+                        .button("Étirer les clés sur la durée")
+                        .on_hover_text(
+                            "Rééchelonne les temps des clés pour que le tracé occupe toute la durée, sans changer les positions 3D.",
+                        )
+                        .clicked()
+                    {
+                        let duration = self.project.rig.duration_s;
+                        if self.project.rig.stretch_duration(duration) {
+                            self.mark_animation_changed();
+                            changed = true;
+                        }
+                    }
+                    if ui.button("Régler la durée sur le tracé").clicked() {
+                        self.set_animation_duration(key_end);
+                        changed = true;
+                    }
                 }
             });
         }
@@ -4002,9 +4164,7 @@ impl VistaForgeApp {
                         ))
                         .clicked()
                 {
-                    self.project.rig.duration_s = fit.recommended_duration_s;
-                    self.rig_time = self.rig_time.min(self.project.rig.duration_s);
-                    self.mark_animation_changed();
+                    self.set_animation_duration(fit.recommended_duration_s);
                 }
             });
         ui.horizontal(|ui| {
@@ -4267,9 +4427,7 @@ impl VistaForgeApp {
                     .button(format!("Ajuster à {:.0} s", fit.recommended_duration_s))
                     .clicked()
                 {
-                    self.project.rig.duration_s = fit.recommended_duration_s;
-                    self.rig_time = self.rig_time.min(self.project.rig.duration_s);
-                    self.mark_animation_changed();
+                    self.set_animation_duration(fit.recommended_duration_s);
                 }
             });
         }
@@ -7084,7 +7242,8 @@ fn symmetry_label(symmetry: Symmetry) -> &'static str {
 /// Duration widget with a logarithmic slider, a fine numeric field and a
 /// one-click reset. A linear 0.1–600 s slider made short clips impossible to
 /// fine-tune; the log scale gives the same precision at 2 s and at 200 s.
-fn duration_param(ui: &mut egui::Ui, value: &mut f32) -> bool {
+fn duration_param(ui: &mut egui::Ui, rig: &mut CameraRig, stretch: bool) -> bool {
+    let mut value = rig.duration_s;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.add_sized(
@@ -7095,14 +7254,14 @@ fn duration_param(ui: &mut egui::Ui, value: &mut f32) -> bool {
         changed |= ui
             .add_sized(
                 [width, 18.0],
-                egui::Slider::new(value, 0.1..=600.0)
+                egui::Slider::new(&mut value, 0.1..=600.0)
                     .logarithmic(true)
                     .show_value(false),
             )
             .changed();
         let response = ui.add_sized(
             [76.0, 18.0],
-            egui::DragValue::new(value)
+            egui::DragValue::new(&mut value)
                 .speed(0.05)
                 .range(0.1..=600.0)
                 .max_decimals(2)
@@ -7110,10 +7269,17 @@ fn duration_param(ui: &mut egui::Ui, value: &mut f32) -> bool {
         );
         changed |= response.changed();
         if response.double_clicked() {
-            *value = 8.0;
+            value = 8.0;
             changed = true;
         }
     });
+    if changed {
+        if stretch {
+            rig.stretch_duration(value);
+        } else {
+            rig.duration_s = value.clamp(0.1, 600.0);
+        }
+    }
     changed
 }
 

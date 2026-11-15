@@ -593,7 +593,7 @@ mod tests {
         rig.duration_s = fit.recommended_duration_s;
         let relaxed = TimingFit::measure(&rig);
         assert!(!relaxed.is_strained(), "{relaxed:?}");
-        assert!((relaxed.pressure - 1.0).abs() < 0.1);
+        assert!((relaxed.pressure - 1.0 / 1.15).abs() < 0.15, "{relaxed:?}");
     }
 
     #[test]

@@ -223,6 +223,7 @@ impl HelpTopic {
                 "Le curseur de temps place l'animation à l'instant choisi ; − et + avancent d'une image.",
                 "Design montre le tracé et le gizmo ; Caméra montre le cadre réel.",
                 "Timeline ouvre le dock de pistes et le graph editor ; ⟲ active la boucle.",
+                "Un bandeau signale quand le profil est loin derrière le tracé : allongez la durée, mettez l'ease à 0 ou passez en Manuel.",
             ],
             Self::Path => &[
                 "Tracer : cliquez sur le terrain ; chaque clic ajoute une clé et allonge la durée. L'altitude est réglable avant le clic.",
@@ -240,8 +241,8 @@ impl HelpTopic {
                 "Images = durée × images/s. À 24 fps, 8 s font 192 images.",
                 "Une durée trop courte demande une vitesse que le corps ne peut pas atteindre : il sature et rate les virages.",
                 "Le bouton « Durée conseillée » calcule une durée à partir de la longueur du tracé et de la vitesse de croisière du profil.",
-                "Changer la durée ne déplace aucune clé : c'est la vitesse de parcours qui change.",
-                "La durée est indépendante de la dernière clé ; les clés au-delà de la fin restent conservées mais ne sont pas jouées.",
+                "Par défaut, la durée étire les temps des clés (positions 3D inchangées) : le tracé occupe tout le clip. Décochez « Étirer les clés » pour garder des temps absolus.",
+                "La durée conseillée inclut 15 % de marge pour l'accélération et la stabilisation finale.",
             ],
             Self::Optics => &[
                 "Un FOV large (70–90°) accélère la sensation de vitesse ; un FOV serré (25–40°) comprime la scène.",

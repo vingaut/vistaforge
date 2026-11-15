@@ -182,8 +182,10 @@ L'espace **Animation** réunit ce que l'ancienne version séparait en **Vol** et
 La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
 `Lire`, curseur de temps, image précédente/suivante, boucle, bascule
 Design/Caméra et **Timeline**. `Espace` fait la même chose ; `F1` ouvre l'aide.
-La durée est indépendante de la dernière clé : on peut la raccourcir sous le
-dernier point sans perdre les clés.
+La durée étire les clés en temps par défaut (case **Étirer les clés avec la
+durée**) : le tracé occupe tout le clip. Décochez-la pour garder des temps
+absolus. Un bandeau signale quand le profil est trop loin derrière le tracé et
+propose d'allonger la durée, de mettre l'ease à 0 ou de passer en Manuel.
 
 Le CLI expose les deux modèles :
 

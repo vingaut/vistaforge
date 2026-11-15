@@ -44,6 +44,9 @@ n'est dessinée qu'en **vue design**, jamais dans le rendu.
   ou les champs numériques X/Y/Z de la clé sélectionnée.
 - Tirez la flèche **X** (rouge), **Y** (vert) ou **Z** (bleu) du gizmo. Le
   déplacement se fait dans le plan de l'écran le long de l'axe.
+- **Adoucissement** d'une clé : 0 = vitesse constante, 1 = ralentit à la clé.
+  Les nouvelles clés sont à 0 ; le bouton **Vitesse constante (ease 0)** remet
+  tout le tracé à zéro.
 - **Glisser libre** (coché par défaut) : cliquez-glissez directement sur une clé
   pour la déplacer dans le plan de l'écran, sans viser un axe. `Maj` la contraint
   à la verticale, `Alt` la pose sur le terrain sous le curseur.
@@ -109,11 +112,21 @@ sature et prend du retard ; le bouton **Ajuster la durée** applique la durée
 conseillée calculée depuis la longueur du tracé. Une durée plus longue ne
 déplace aucune clé : elle change seulement la vitesse de parcours.
 
-La **durée est indépendante de la dernière clé**. Après quelques essais, on peut
-la raccourcir sous le dernier point : les clés au-delà de la fin sont conservées
-mais ne sont plus jouées, et un bouton **Étendre à la dernière clé** rétablit la
-fin du tracé. Le curseur de durée est logarithmique, avec un champ numérique fin
-et un double-clic pour revenir à 8 s.
+La **durée pilote la vitesse de parcours**. Par défaut, la case **Étirer les
+clés avec la durée** est cochée : changer la durée rééchelonne les temps des
+clés (les positions 3D ne bougent pas) pour que le tracé occupe tout le clip.
+Une durée plus courte accélère donc réellement le survol, une durée plus longue
+le ralentit — sans que la caméra atteigne la fin puis attende.
+
+Décochez la case pour garder des temps de clés absolus : la durée peut alors
+être indépendante du dernier point, les clés au-delà de la fin restent
+conservées mais ne sont pas jouées. Un encadré signale l'écart et propose
+**Étendre à la dernière clé** ou **Étirer les clés sur la durée**. Le curseur de
+durée est logarithmique, avec un champ numérique fin et un double-clic pour
+revenir à 8 s.
+
+La durée conseillée inclut désormais une marge de confort de 15 % pour
+l'accélération, les virages et la stabilisation finale.
 
 ## 3. Profil de vol
 
@@ -185,6 +198,27 @@ l'addon `bridge/blender/vistaforge_io.py` qui sélectionne la caméra, remplace 
 caméra statique et règle `fps`/plage d'images. L'addon sait aussi réexporter la
 caméra et l'empty cible vers `.vfcam` pour revenir dans VistaForge. Détails :
 [`FICHIERS.md`](FICHIERS.md).
+
+### Suivi du tracé
+
+Un profil de vol n'est pas une interpolation : il a une vitesse maximale, des
+accélérations bornées et de la traînée. Si la durée est trop courte, la caméra
+coupe les virages et reste derrière la courbe. L'interface mesure cet écart et
+affiche un bandeau dans l'espace Animation :
+
+> Caméra jusqu'à 60 m derrière le tracé…
+
+Trois corrections en un clic :
+
+- **Allonger la durée** (durée conseillée, avec marge) ;
+- **Vitesse constante (ease 0)** : supprime le ralentissement/accélération à
+  chaque clé. Les nouvelles clés utilisent déjà `ease = 0` ; les anciennes
+  peuvent être remises à zéro ;
+- **Profil manuel** : suit exactement le tracé, sans inertie.
+
+Le simulateur démarre à la vitesse du tracé (et non à l'arrêt) et compense la
+traînée par une avance de poussée : sans cela, chaque survol commençait avec un
+retard de `v²/(2a)` et conservait un écart permanent pour vaincre la traînée.
 
 ### Lissage de visée et parois
 

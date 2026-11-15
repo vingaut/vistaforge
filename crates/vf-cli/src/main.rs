@@ -2407,13 +2407,10 @@ fn run_rig(command: RigCommand) -> Result<()> {
             let mut p = loaded.project;
             p.rig = vf_core::CameraRig::preset(&preset)
                 .ok_or_else(|| anyhow::anyhow!("unknown rig preset '{preset}'"))?;
-            if let Some(duration) = duration {
-                p.rig.duration_s = duration;
-            }
             vf_flight::rig::preset_path(&mut p.rig, &loaded.heightfield, &path)
                 .map_err(|e| anyhow::anyhow!("rig path: {e}"))?;
             if let Some(duration) = duration {
-                p.rig.duration_s = duration;
+                p.rig.stretch_duration(duration);
             }
             p.mark_modified();
             let target = out.unwrap_or(project);

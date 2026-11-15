@@ -188,6 +188,11 @@ par distance et appliquer une vitesse cible. Le panneau cible propose **Fixe**,
 La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
 `Lire`, curseur de temps, image précédente/suivante, boucle, bascule
 Design/Caméra et **Timeline**. `Espace` fait la même chose ; `F1` ouvre l'aide.
+Les options **Garde au sol amortie** et **Évitement des parois** s'appliquent
+aussi en suivi exact : la hauteur au sol est garantie, et une paroi trop haute
+est contournée latéralement puis quittée pour revenir sur le tracé. Voir les
+réglages dans **Réglages > Contraintes**.
+
 La durée étire les clés en temps par défaut (case **Étirer les clés avec la
 durée**) : le tracé occupe tout le clip. Décochez-la pour garder des temps
 absolus. Le suivi **exact** est actif par défaut (case **Suivre exactement le

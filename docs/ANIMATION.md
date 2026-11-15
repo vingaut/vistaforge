@@ -111,8 +111,10 @@ clés de l'œil sur celles de la cible.
 - **Durée** (0,1–600 s), **images/s** (1–120), **nombre d'images**.
 - **Optique** : FOV, profondeur de champ, ouverture, mise au point, roulis,
   liaison caméra rigide ou ressort.
-- **Contraintes** : hauteur au sol, sol de référence, distance aux parois,
-  évitement, douceur, application à l'œil / la caméra / la cible.
+- **Contraintes** : garde au sol amortie, hauteur, sol de référence, évitement
+  des parois, distance/marge/angle/anticipation/détour, douceur, application à
+  l'œil / la caméra / la cible. Ces corrections s'appliquent **aussi en suivi
+  exact**.
 
 Un encadré de calage compare **vitesse demandée** et **vitesse de croisière**
 du profil (75 % de sa vitesse maximale). Si la durée est trop courte, le corps
@@ -278,13 +280,18 @@ la caméra est sur la courbe et la vitesse est celle des clés.
 
 ### Lissage de visée et parois
 
-- Les modes **Avance** et **Manuel** appliquent un filtre du premier ordre sur
-  la cible (`lissage visée` + `look_lag` du corps + 60 ms). Le viseur ne saute
-  plus d'une image à l'autre.
-- L'évitement de parois utilise un champ de distance lissé, une accélération
-  bornée et filtrée, et **ignore les falaises survolées** (comparaison avec le
-  sommet du mur le plus proche). Le roulis est limité à 120°/s et son objectif
-  est filtré : plus de roulis frénétique le long d'une paroi détaillée.
+- Les modes **Avance**, **Décalage**, **Retard** et **Manuel** appliquent un
+  filtre du premier ordre sur la cible (`lissage visée` + `look_lag` du corps +
+  60 ms). En suivi exact, la visée est verrouillée et ce lissage est ignoré.
+- **Garde au sol** : plancher anticipé sur l'empreinte du terrain, correction
+  verticale amortie et plancher dur. Actif même en suivi exact ; ne jamais
+  s'écraser quand la case est cochée.
+- **Évitement de parois** : détection dans une fenêtre d'anticipation, montée
+  si l'accélération verticale du profil le permet, sinon **détour latéral**
+  (angle d'impact ±20°, côté choisi par sonde), puis retour vers le tracé. Un
+  garde-fou final empêche toute traversée et signale `paroi bloquée` si le
+  couloir est trop étroit. Le roulis est calculé depuis le mouvement réel filtré
+  et limité à 120°/s.
 
 ## CLI
 

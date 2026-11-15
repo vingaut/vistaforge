@@ -5,15 +5,52 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 22:45** (prochaine session : garde au sol et contournement de parois — spécification à valider).
+Dernière mise à jour : **2026-11-15 23:35** (garde au sol et contournement de parois — livré, tests verts).
 
 ---
 
-## 0septdecies. Prochaine session — garde au sol et contournement de parois (À FAIRE, non commencé)
+## 0septdecies. Session du 15 novembre — garde au sol et contournement de parois (LIVRÉ)
 
-> **État : spécification validée par l'utilisateur, implémentation non commencée.**
-> La session précédente (vitesse exacte, keyframing) est livrée. Cette section
-> sert de point de reprise pour la prochaine session.
+> **État : livré et testé.** La couche `vf-flight::safety` s'applique même en
+> suivi exact ; le garde au sol et l'évitement de parois sont actifs, avec
+> décision monter/contourner et retour au tracé. **233 tests verts.**
+
+### Implémentation livrée
+
+- Nouveau module `crates/vf-flight/src/safety.rs` :
+  - **garde au sol** : plancher anticipé sur une empreinte autour de la
+    trajectoire, correction verticale amortie, plancher dur à chaque pas ;
+  - **détection de paroi** sur une fenêtre d'anticipation, avec distance,
+    normale, sommet et angle d'impact ;
+  - **décision collante** monter/contourner : une fois la montée choisie, elle
+    ne bascule plus en détour parce que la caméra s'est rapprochée ;
+  - **détour latéral** par ressort borné (accélération/vitesse), côté choisi par
+    sonde, avec hystérésis et retour amorti au tracé ;
+  - **garde-fou final** : poussée normale si le couloir est encore dans la
+    paroi, puis montée de secours signalée `paroi bloquée` ; aucune traversée.
+- La sécurité est appliquée **avant** la branche `exact_path`/inertie, et un
+  `enforce` final protège l'œil, la caméra et la cible (selon `apply_eye`,
+  `apply_camera`, `apply_target`).
+- `SafetyReport` est exposé dans `RigSample` ; le statut UI affiche
+  `garde sol`, `montée paroi`, `détour paroi G/D` ou `paroi bloquée`.
+- La trajectoire simulée (jaune) montre le détour ; le bandeau de suivi ignore
+  les corrections de sécurité intentionnelles.
+- Contraintes UI : `Garde au sol amortie`, `Hauteur sol`, `Évitement des
+  parois`, `Marge caméra`, `Angle d'impact`, `Anticipation paroi`, `Détour max`,
+  `Marge verticale`, `Douceur`, application œil/caméra/cible.
+- CLI/docs : les champs sont dans le projet (`.vfproj`) et donc dans `.vfcam` ;
+  `ANIMATION.md`, `RIG.md` et `USAGE.md` sont mis à jour.
+
+### Tests de sécurité
+
+- `ground_guard_never_penetrates_flat_ground`
+- `wall_guard_does_not_cross_a_tall_cliff`
+- `lateral_detour_goes_around_a_finite_wall_and_returns` (détour > 40 m,
+  retour < 20 m, clearance > 5 m)
+- `low_wall_is_climbed_instead_of_detoured`
+- `safety_is_inactive_when_disabled`
+- `exact_path_matches_key_times_and_target_keys`
+- non-régression vitesse/longueur d'arc.
 
 ### Demande, telle que comprise
 
@@ -184,20 +221,20 @@ courbe de référence, et que la sécurité peut dévier localement.
 7. **Non-régression** : options désactivées → comportement actuel exact
    (vitesse par longueur d'arc) inchangé.
 
-### Fichiers à modifier
+### Fichiers modifiés
 
 | Fichier | Rôle |
 |---|---|
 | `crates/vf-core/src/rig.rs` | champs `Constraints` : garde au sol, angle, détour, marges ; validation ; valeurs par défaut. |
-| `crates/vf-flight/src/clearance.rs` | champ de parois plus riche (normale, sommet, largeur/entrée-sortie) ; requêtes pour une fenêtre de trajectoire. |
-| `crates/vf-flight/src/rig.rs` | couche `SafetyLayer`/`TerrainGuard`, décision monter/contourner, détour + retour, tests. |
-| `crates/vf-flight/src/rig.rs` | ordre : appliquer la sécurité **avant** l'échantillonnage final et **même en exact_path**. |
+| `crates/vf-flight/src/safety.rs` | **nouveau** : garde au sol, détection de paroi, montée/détour, retour, garde-fou. |
+| `crates/vf-flight/src/clearance.rs` | champ distance/sommet/normale réutilisé par la sécurité. |
+| `crates/vf-flight/src/rig.rs` | intégration avant exact/inertie, `enforce`, `SafetyReport` dans `RigSample`. |
 | `crates/vf-ui/src/lib.rs` | panneau Contraintes, indicateurs, overlay de la trajectoire corrigée. |
 | `crates/vf-ui/src/help.rs` | fiche Contraintes : nouveau comportement, limites. |
 | `docs/ANIMATION.md`, `docs/RIG.md` | documentation utilisateur. |
 | `docs/ETAT_ET_REPRISE.md` | cette section, mise à jour à la livraison. |
 
-### Ordre d'implémentation conseillé
+### Ordre d'implémentation appliqué
 
 1. **Garde au sol d'abord** (fallback garanti) : appliquer aussi en
    `exact_path`, avec tests sol et non-régression. C'est la demande minimale.
@@ -221,17 +258,15 @@ cargo run -p vf-app -- demo-out/geology/alpine.vfproj
 cargo run -p vf-cli -- terrain generate --mode modern --size 514   --seed 7 --preset canyon --name "Paroi test" --out /tmp/paroi.vfproj
 ```
 
-### Points à confirmer avant de commencer
+### Choix appliqués
 
-1. Politique de temps en cas de détour : **A (temps autoritaire + avertissement)**
-   ou **B (vitesse autoritaire + temps décalés)**.
-2. Priorité montée vs contournement : monter si l'accélération verticale le
-   permet, sinon contourner (proposé).
-3. Le garde au sol doit-il s'appliquer aussi à la **cible** et à la **caméra**
-   (pas seulement l'œil) ? Proposition : œil + caméra, cible seulement si
-   `apply_target`.
-4. Marge de sécurité caméra : utiliser `wall_distance_m` comme rayon, ou ajouter
-   un rayon explicite (par exemple 5 m) ?
+1. **Temps autoritaire** : la clé reste la référence ; un détour peut faire
+   arriver la caméra en retard. Le statut et l'écart le signalent.
+2. **Monter d'abord** si l'accélération verticale du profil le permet ; sinon
+   contourner. La décision est collante pour éviter les bascules.
+3. Garde au sol : œil + caméra, et cible si `apply_target`.
+4. Marge caméra explicite : `wall_margin_m` (5 m par défaut), ajoutée à
+   `wall_distance_m`.
 
 ---
 
@@ -307,9 +342,10 @@ vitesse instantanée variait fortement à l'intérieur du segment.
   profil pilote toujours roulis, secousses et visée.
 - Case **Suivre exactement le tracé (sans inertie)** dans Réglages. Décochée,
   on retrouve le ressort/traînée/évitement pour comparer les profils.
-- En mode exact, les contraintes de position de l'œil sont ignorées (sinon la
-  vitesse ne serait plus exacte) ; les comparaisons de profils forcent
-  `exact_path = false`.
+- En mode exact, les contraintes de position de l'œil étaient ignorées (sinon la
+  vitesse ne serait plus exacte) ; **corrigé dans la section 0septdecies** : la
+  couche sécurité s'applique désormais même en exact. Les comparaisons de
+  profils forcent `exact_path = false`.
 - Cible : le mode Path utilise le même échantillonnage par longueur d'arc ; les
   modes Avance / Décalage / Retard suivent l'œil exact. Le tableau de timing
   affiche aussi les segments de la cible (`T0→T1`). `stretch_duration` étire
@@ -322,9 +358,10 @@ de 100 m.
 
 ### Validation
 
-- `cargo test --workspace` : **228 tests verts**.
+- `cargo test --workspace` : **233 tests verts**.
 - `clippy -D warnings` propre, `cargo fmt` appliqué.
-- Capture UI avec le tableau de timing et les barres de segment.
+- Capture UI avec le tableau de timing, les barres de segment et les contrôles
+  de sécurité.
 - Tests ajoutés : répartition par distance, vitesse cible, cible Offset,
   cible Trail, suivi caméra à durée conseillée, longueur d'arc et clés exactes.
 

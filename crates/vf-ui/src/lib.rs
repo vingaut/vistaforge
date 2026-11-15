@@ -2732,12 +2732,13 @@ impl VistaForgeApp {
         // sample and rebuild once the drag ends.
         if !self.anim_editor.is_dragging()
             && !self.anim_timeline.is_dragging()
-            && (self.anim_view == animation_ui::AnimViewMode::Camera || self.anim_playing)
             && self.anim_camera_dirty
         {
             if self.anim_view == animation_ui::AnimViewMode::Camera {
                 self.sample_animation_camera(ctx);
             } else if let Some(sample) = self.animation_sample_at(self.rig_time) {
+                // In design mode this keeps the frustum and target overlays in
+                // sync with the safety layer without stealing the orbit camera.
                 self.anim_live_sample = Some(sample);
                 self.anim_camera_dirty = false;
             }
@@ -2826,8 +2827,12 @@ impl VistaForgeApp {
                 self.project.camera = sample.camera.clone();
                 self.sync_orbit_from_camera();
                 self.rig_status = format!(
-                    "t={:.2}s · {:.0} m sol · gîte {:.1}° · vitesse {:.1} m/s",
-                    self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
+                    "t={:.2}s · {:.0} m sol · gîte {:.1}° · vitesse {:.1} m/s{}",
+                    self.rig_time,
+                    sample.altitude_agl_m,
+                    sample.bank_deg,
+                    sample.speed_mps,
+                    safety_label(&sample.safety)
                 );
                 self.anim_live_sample = Some(sample);
                 self.anim_camera_dirty = false;
@@ -2908,13 +2913,22 @@ impl VistaForgeApp {
             if camera_view {
                 self.project.camera = sample.camera.clone();
                 self.rig_status = format!(
-                    "Lecture caméra t={:.2}s · {:.0} m sol · gîte {:.1}° · {:.1} m/s",
-                    self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
+                    "Lecture caméra t={:.2}s · {:.0} m sol · gîte {:.1}° · {:.1} m/s{}",
+                    self.rig_time,
+                    sample.altitude_agl_m,
+                    sample.bank_deg,
+                    sample.speed_mps,
+                    safety_label(&sample.safety)
                 );
             } else {
                 self.rig_status = format!(
-                    "Lecture design t={:.2}s · œil {:.0}, {:.0}, {:.0} · {:.1} m/s",
-                    self.rig_time, sample.eye.x, sample.eye.y, sample.eye.z, sample.speed_mps
+                    "Lecture design t={:.2}s · œil {:.0}, {:.0}, {:.0} · {:.1} m/s{}",
+                    self.rig_time,
+                    sample.eye.x,
+                    sample.eye.y,
+                    sample.eye.z,
+                    sample.speed_mps,
+                    safety_label(&sample.safety)
                 );
             }
             self.anim_live_sample = Some(sample);
@@ -4728,19 +4742,17 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Contraintes")
             .default_open(false)
             .show(ui, |ui| {
-                if self.project.rig.exact_path {
-                    ui.label(
-                        egui::RichText::new(
-                            "Suivi exact : les contraintes de position de l'œil (sol, parois) sont ignorées. Décochez le suivi exact pour les appliquer.",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                }
                 let constraints = &mut self.project.rig.constraints;
                 let mut changed = false;
                 changed |= ui
                     .checkbox(&mut constraints.enabled, "Contraintes actives")
+                    .changed();
+                ui.separator();
+                changed |= ui
+                    .checkbox(&mut constraints.ground_guard, "Garde au sol amortie")
+                    .on_hover_text(
+                        "Maintient l'œil et la caméra au-dessus du terrain, même en suivi exact. La correction est lissée et un plancher dur évite toute traversée.",
+                    )
                     .changed();
                 changed |= param_f32(
                     ui,
@@ -4765,6 +4777,13 @@ impl VistaForgeApp {
                         0.0,
                     );
                 }
+                ui.separator();
+                changed |= ui
+                    .checkbox(&mut constraints.wall_avoidance, "Évitement des parois")
+                    .on_hover_text(
+                        "Détecte les parois devant la caméra, monte si l'accélération verticale le permet, sinon contourne latéralement puis revient sur le tracé.",
+                    )
+                    .changed();
                 changed |= param_f32(
                     ui,
                     "Distance parois",
@@ -4774,9 +4793,56 @@ impl VistaForgeApp {
                     2000.0,
                     40.0,
                 );
-                changed |= ui
-                    .checkbox(&mut constraints.wall_avoidance, "Évitement des parois")
-                    .changed();
+                changed |= param_f32(
+                    ui,
+                    "Marge caméra",
+                    "m",
+                    &mut constraints.wall_margin_m,
+                    0.0,
+                    200.0,
+                    5.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Angle d'impact",
+                    "°",
+                    &mut constraints.wall_angle_deg,
+                    0.0,
+                    90.0,
+                    20.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Anticipation paroi",
+                    "s",
+                    &mut constraints.wall_look_ahead_s,
+                    0.2,
+                    10.0,
+                    3.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Détour max",
+                    "m",
+                    &mut constraints.wall_detour_m,
+                    0.0,
+                    2000.0,
+                    0.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Marge verticale",
+                    "m",
+                    &mut constraints.wall_vertical_margin_m,
+                    0.0,
+                    500.0,
+                    5.0,
+                );
+                ui.label(
+                    egui::RichText::new("Détour max 0 = automatique (distance + marge + 20 m).")
+                        .small()
+                        .weak(),
+                );
                 changed |= ui
                     .checkbox(&mut constraints.apply_eye, "Appliquer à l'œil")
                     .changed();
@@ -7744,6 +7810,31 @@ fn duration_param(ui: &mut egui::Ui, rig: &mut CameraRig, stretch: bool) -> bool
         }
     }
     changed
+}
+
+fn safety_label(report: &vf_flight::safety::SafetyReport) -> String {
+    let mut parts = Vec::new();
+    if report.ground_active {
+        parts.push("garde sol");
+    }
+    if report.wall_climb {
+        parts.push("montée paroi");
+    }
+    if report.wall_active {
+        parts.push(if report.wall_side < 0 {
+            "détour paroi G"
+        } else {
+            "détour paroi D"
+        });
+    }
+    if report.blocked {
+        parts.push("paroi bloquée : montée de secours");
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
 }
 
 fn param_f32(

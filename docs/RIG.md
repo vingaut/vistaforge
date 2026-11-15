@@ -96,11 +96,35 @@ cargo run --release -p vf-cli -- anim render ile.vfproj frames/ --seconds 8 --fp
 déterministe ; le flou de mouvement du module `flight` n'est pas encore branché
 sur le rig.
 
+## Sécurité sol et parois
+
+La couche `vf-flight::safety` s'applique aussi en suivi exact :
+
+- **Garde au sol** : hauteur réglable, anticipation sur la trajectoire,
+  correction verticale amortie et plancher dur. L'œil ne peut pas descendre
+  sous `terrain + hauteur`.
+- **Évitement de parois** : détection dans une fenêtre d'anticipation
+  (`wall_look_ahead_s`), décision de montée si l'accélération verticale du
+  profil suffit, sinon détour latéral (côté choisi par la sonde), puis retour
+  au tracé. `wall_angle_deg` (20° par défaut) distingue l'impact frontal de
+  l'impact oblique. Un plancher/plafond de secours empêche toute traversée si
+  le couloir est trop étroit.
+
+Le détour est prioritaire sur l'exactitude de la courbe : la caméra quitte
+temporairement le tracé cyan, le temps des clés reste la référence, et le
+bandeau/statut indique `détour paroi G/D`, `montée paroi`, `garde sol` ou
+`paroi bloquée`. Le mode `exact_path` concerne le temps et la courbe de
+référence, pas l'absence de sécurité.
+
 ## Limites
 
 - Pas de flou de mouvement sur le rig pour l'instant.
-- L'évitement de parois est actif mais son champ de distance est 2D (il ignore
-  l'altitude).
+- Le champ de parois est un champ de distance 2D au relief : les arches et les
+  surplombs vrais ne sont pas représentés. Le détour vise une paroi verticale
+  ou un escarpement, pas un tunnel.
+- Si le couloir est plus étroit que le détour maximal, la sécurité monte
+  au-dessus du sommet en dernier recours et le signale (`paroi bloquée`) ; elle
+  ne traverse jamais.
 - Le DOF est calculé et exporté dans `RigSample` ; le rasteriseur CPU ne
   l'applique pas encore, mais le bridge Blender importe la caméra et ses
   réglages.

@@ -16,6 +16,7 @@
 use glam::DVec3;
 pub mod clearance;
 pub mod rig;
+pub mod safety;
 
 use vf_core::{Camera, Error, FlightPattern, FlightSettings, HeightField, Result, Seed};
 use vf_procgen::Noise;

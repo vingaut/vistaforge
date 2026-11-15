@@ -254,10 +254,10 @@ impl HelpTopic {
                 "Le roulis explicite s'ajoute au roulis automatique calculé depuis l'accélération latérale.",
             ],
             Self::Constraints => &[
-                "Hauteur sol : distance minimale au-dessus du terrain ; la correction remonte l'œil sans le traverser.",
-                "Distance parois : le rig échantillonne un champ de distance aux pentes > 45° et pousse latéralement.",
-                "Sol de référence fixe : utile sans heightfield ou pour éviter une mer de nuages.",
-                "Douceur : 0 = correction dure, 1 = correction très molle. Appliquer à la cible évite de traverser un mur en visée.",
+                "Garde au sol : hauteur réglable, correction verticale amortie et plancher dur ; fonctionne aussi en suivi exact.",
+                "Évitement des parois : anticipe la paroi, monte si l'accélération verticale le permet, sinon contourne latéralement puis revient sur le tracé.",
+                "Angle d'impact : ±20° par défaut autour de la normale pour déclencher un contournement ; les impacts obliques glissent le long de la paroi.",
+                "Détour max 0 = automatique. Marge caméra = rayon de sécurité. Appliquer à la cible évite de traverser un mur en visée.",
             ],
             Self::Profile => &[
                 "Drone FPV : nerveux, accélérations franches, virages serrés, forte inclinaison.",

@@ -439,6 +439,18 @@ pub struct Constraints {
     /// Minimum distance to a steep wall, metres.
     pub wall_distance_m: f32,
     pub wall_avoidance: bool,
+    /// Keep the camera above the terrain even in exact-path mode.
+    pub ground_guard: bool,
+    /// Camera radius used for wall clearance, metres.
+    pub wall_margin_m: f32,
+    /// Maximum lateral detour; 0 = automatic.
+    pub wall_detour_m: f32,
+    /// Impact angle (degrees from the wall normal) that triggers a lateral detour.
+    pub wall_angle_deg: f32,
+    /// Vertical margin above a wall top when checking overflight.
+    pub wall_vertical_margin_m: f32,
+    /// Wall anticipation window, seconds.
+    pub wall_look_ahead_s: f32,
     pub apply_eye: bool,
     pub apply_camera: bool,
     pub apply_target: bool,
@@ -457,6 +469,12 @@ impl Default for Constraints {
             ground_clearance_m: 25.0,
             wall_distance_m: 40.0,
             wall_avoidance: true,
+            ground_guard: true,
+            wall_margin_m: 5.0,
+            wall_detour_m: 0.0,
+            wall_angle_deg: 20.0,
+            wall_vertical_margin_m: 5.0,
+            wall_look_ahead_s: 3.0,
             apply_eye: true,
             apply_camera: true,
             apply_target: false,
@@ -471,6 +489,16 @@ impl Constraints {
         for (name, value, lo, hi) in [
             ("ground_clearance_m", self.ground_clearance_m, 0.0, 5000.0),
             ("wall_distance_m", self.wall_distance_m, 0.0, 5000.0),
+            ("wall_margin_m", self.wall_margin_m, 0.0, 500.0),
+            ("wall_detour_m", self.wall_detour_m, 0.0, 5000.0),
+            ("wall_angle_deg", self.wall_angle_deg, 0.0, 90.0),
+            (
+                "wall_vertical_margin_m",
+                self.wall_vertical_margin_m,
+                0.0,
+                1000.0,
+            ),
+            ("wall_look_ahead_s", self.wall_look_ahead_s, 0.0, 10.0),
             ("softness", self.softness, 0.0, 1.0),
             ("look_ahead_s", self.look_ahead_s, 0.0, 5.0),
             ("reference_z_m", self.reference_z_m, -10_000.0, 20_000.0),

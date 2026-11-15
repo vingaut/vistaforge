@@ -21,3 +21,8 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+
+# Generated next to the prebuilt binaries
+/dist/**/blender-out/
+/dist/**/export/
+/dist/**/anim-out/

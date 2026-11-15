@@ -5,15 +5,17 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 23:35** (garde au sol et contournement de parois — livré, tests verts).
+Dernière mise à jour : **2026-11-15 23:50** (garde au sol et contournement de parois — livré, binaires publiés).
 
 ---
 
 ## 0septdecies. Session du 15 novembre — garde au sol et contournement de parois (LIVRÉ)
 
-> **État : livré et testé.** La couche `vf-flight::safety` s'applique même en
-> suivi exact ; le garde au sol et l'évitement de parois sont actifs, avec
-> décision monter/contourner et retour au tracé. **233 tests verts.**
+> **État : livré, testé et publié.** La couche `vf-flight::safety` s'applique
+> même en suivi exact ; le garde au sol et l'évitement de parois sont actifs,
+> avec décision monter/contourner et retour au tracé. **233 tests verts.**
+> Commits : `2e021b2` (code/sécurité), `eed65d4` (binaires). `origin/master` à
+> jour.
 
 ### Implémentation livrée
 

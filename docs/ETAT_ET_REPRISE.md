@@ -5,15 +5,15 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 21:20** (keyframing, timing par segment et liens caméra/cible).
+Dernière mise à jour : **2026-11-15 21:40** (keyframing, timing par segment et liens caméra/cible — livré, binaires publiés).
 
 ---
 
 ## 0sexdecies. Session du 15 novembre — keyframing, vitesse et liens caméra/cible (livré)
 
-> **État : lot terminé, à compiler/publier après validation.** Le suivi caméra
-> du lot précédent est conservé ; cette session ajoute le contrôle du timing et
-> des liens caméra/cible.
+> **État : lot terminé, compilé et publié.** Le suivi caméra du lot précédent
+> est conservé ; cette session ajoute le contrôle du timing et des liens
+> caméra/cible. Commits : `218771e` (code/docs), `82ee595` (binaires).
 
 ### Demande
 

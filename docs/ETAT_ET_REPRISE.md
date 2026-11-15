@@ -5,7 +5,233 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 22:20** (vitesse exacte par longueur d'arc, keyframing et liens caméra/cible — binaires publiés).
+Dernière mise à jour : **2026-11-15 22:45** (prochaine session : garde au sol et contournement de parois — spécification à valider).
+
+---
+
+## 0septdecies. Prochaine session — garde au sol et contournement de parois (À FAIRE, non commencé)
+
+> **État : spécification validée par l'utilisateur, implémentation non commencée.**
+> La session précédente (vitesse exacte, keyframing) est livrée. Cette section
+> sert de point de reprise pour la prochaine session.
+
+### Demande, telle que comprise
+
+1. **Hauteur au sol réglable** : la trajectoire doit garder une hauteur
+   réglable au-dessus du terrain, ne jamais le traverser, et la correction
+   verticale doit être **amortie** (image stable, pas de pompage ni de suivi
+   des facettes du maillage).
+2. **Évitement des parois** : quand l'option est cochée, la caméra ne doit plus
+   traverser une falaise. Aujourd'hui, elle passe à travers **que l'option soit
+   active ou non**.
+3. Cas prioritaire : trajectoire **quasi perpendiculaire à la paroi** (angle
+   d'impact ±20° par rapport à la normale), avec une **différence de hauteur
+   qui interdit de passer au-dessus** parce que l'accélération verticale
+   disponible serait trop brutale/insuffisante. Dans ce cas, l'algorithme doit
+   **dévier latéralement**, **contourner l'obstacle**, puis **revenir sur la
+   trajectoire théorique**.
+4. Si le contournement est trop complexe pour cette version : livrer au minimum
+   la **garde au sol amortie** (ne jamais s'écraser) quand l'option est cochée.
+   Le contournement de paroi peut rester expérimental, mais ne doit pas être
+   annoncé comme fonctionnel.
+
+### Cause technique déjà identifiée
+
+- Depuis le passage au **suivi exact** (`exact_path = true`, activé par défaut
+  pour garantir la vitesse), `RigSimulation::step` saute complètement le bloc
+  d'évitement de parois **et** la correction de sol :
+  - l'évitement n'est calculé que dans la branche « ressort/inertie » ;
+  - `apply_eye_floor` n'est appelé que si `!exact_path`.
+  C'est la raison principale pour laquelle la case « Évitement » ne change rien
+  en mode exact.
+- Même en mode inertie, l'évitement actuel est insuffisant :
+  - `ClearanceField` est un champ 2D de distance aux cellules raides ; il ne
+    décrit ni l'étendue de la paroi, ni son entrée/sortie, ni une trajectoire
+    de contournement ;
+  - `wall_avoidance_acceleration` ne pousse latéralement que si la distance
+    devant est sous le seuil ; il ne prédit pas l'intersection de la trajectoire
+    avec la paroi, ne mesure pas l'angle d'impact, ne décide pas « passer
+    au-dessus ou contourner » et ne ramène pas la caméra sur le tracé ;
+  - la poussée latérale est bornée (12 m/s²) et appliquée à la vitesse : elle
+    peut être trop faible ou trop tardive face à une paroi perpendiculaire ;
+  - le champ de distance est 2D : une arche ou un surplomb n'est pas modélisé.
+- Le garde au sol actuel (`apply_eye_floor`) est un lissage vertical avec un
+  garde-fou, mais il n'est pas appliqué en suivi exact et ne garantit pas une
+  altitude minimale dure à chaque pas.
+
+### Comportement cible proposé
+
+#### Couche « sécurité » indépendante du profil
+
+Garder la courbe et les temps authored comme **référence**, puis appliquer une
+couche de sécurité avant l'échantillonnage final :
+
+```text
+P(t) authored (clés, temps, longueur d'arc)
+   ↓
+SafetyLayer(P, terrain, options)
+   ↓
+P_safe(t) = correction sol + éventuel détour latéral
+   ↓
+caméra / cible
+```
+
+La couche doit fonctionner **aussi en suivi exact** : elle peut dévier la
+caméra de la courbe cyan, mais elle ne doit jamais la laisser entrer dans le
+terrain ou dans une paroi. Afficher la trajectoire corrigée (couleur dédiée)
+et l'écart à la courbe théorique.
+
+#### Garde au sol
+
+- Paramètres : hauteur (`ground_clearance_m`), temps/distance d'anticipation,
+  temps de réponse, softness ; option on/off.
+- Calculer `plancher(t) = max(terrain autour + clearance)` avec un petit
+  voisinage/anticipation (par exemple 0,5–1 s devant), pas la hauteur brute de
+  la cellule sous l'œil.
+- Corriger la hauteur avec un ressort vertical critique ou un filtre
+  asymétrique :
+  - montée rapide mais bornée en accélération/jerk ;
+  - descente lente pour ne pas plonger ;
+  - lissage temporel pour supprimer le bruit de facettes.
+- Garde-fou **dur** après le lissage : `z >= terrain(x,y) + clearance_min`
+  (marge de sécurité), sinon on retombe dans le problème initial.
+- Le déplacement horizontal et le temps ne changent pas : seule la hauteur est
+  corrigée. La vitesse horizontale reste celle des clés.
+
+#### Évitement de paroi
+
+1. **Détection de collision** : échantillonner la trajectoire sur une fenêtre
+   d'anticipation (distance/temps) ; pour chaque échantillon, lire le champ de
+   parois et la hauteur du sommet. Une collision est probable si
+   `distance_horizontale < marge` **et** `z < sommet + marge_verticale`.
+2. **Décision passer au-dessus / contourner** :
+   - estimer la montée verticale nécessaire et le temps disponible avant la
+     paroi ;
+   - si l'accélération/jerk verticaux du profil permettent de passer au-dessus
+     avec une marge, corriger la hauteur (comme le garde au sol) ;
+   - sinon, déclencher un **contournement latéral**.
+3. **Angle d'impact** : angle entre la tangente horizontale du tracé et la
+   normale horizontale de la paroi.
+   - impact dans ±20° de la normale (face à face) → contournement latéral ;
+   - impact plus oblique → glissement le long de la paroi avec offset normal,
+     puis retour.
+4. **Génération du détour** :
+   - choisir un côté (gauche/droite) de façon stable : côté le plus dégagé,
+     avec hystérésis pour éviter le va-et-vient ;
+   - offset cible : normale × (`wall_distance_m` + marge caméra) ;
+   - entrée progressive avant la paroi, maintien tant que la paroi est dans la
+     fenêtre, sortie/retour progressif après le sommet ;
+   - interpoler une correction latérale lisse (spline ou ressort dédié), avec
+     limitation de vitesse/accélération latérale et de jerk ;
+   - revenir vers `P(t)` par un guidage PD avec zone morte et sans oscillation.
+5. **Anti-roulis** : le roulis doit être calculé depuis l'accélération réelle
+   filtrée (pas depuis la normale de paroi brute), avec plafond de vitesse de
+   roulis ; ne jamais réinjecter le gradient de distance brut.
+6. **Cas impossibles** : si aucun côté ne passe (couloir trop étroit), ne pas
+   traverser : ralentir/s’arrêter avant la paroi, ou signaler clairement
+   l’impossibilité. Ne pas prétendre avoir contourné.
+
+#### Temps et vitesse lors d'un détour
+
+Un détour latéral allonge la trajectoire. Deux politiques possibles, à
+trancher avant implémentation :
+
+- **A. Temps autoritaire** (recommandé pour les clés) : la caméra quitte la
+  courbe, contourne, revient ; elle peut arriver en retard sur la clé suivante.
+  Afficher l'écart et un avertissement ; ne jamais traverser.
+- **B. Vitesse autoritaire** : allonger localement le temps de la section pour
+  conserver la vitesse ; les temps des clés suivantes sont décalés. Plus proche
+  de « distance / vitesse constante », mais les temps authored ne sont plus
+  respectés.
+
+Le garde au sol ne pose pas ce problème (correction verticale seule). Pour les
+parois, je propose **A** par défaut, avec un bouton « recaler la durée sur la
+trajectoire protégée » pour ceux qui veulent la politique B. À valider.
+
+### Paramètres / UI envisagés
+
+Dans **Animation > Réglages > Contraintes** :
+
+- `Garde au sol` (on/off), `Hauteur`, `Anticipation`, `Amortissement` ;
+- `Évitement des parois` (on/off), `Distance`, `Anticipation`, `Angle
+  d'impact` (20° par défaut), `Détour max`, `Marge verticale` ;
+- indicateur d'état : `trajectoire protégée`, `détour à gauche/droite`,
+  `montée au-dessus`, `impossible` ;
+- affichage de la trajectoire corrigée et de l'écart max.
+
+Le suivi exact reste le mode par défaut ; la couche sécurité est appliquée
+par-dessus. Un texte doit expliquer que « exact » concerne les temps et la
+courbe de référence, et que la sécurité peut dévier localement.
+
+### Tests d'acceptation
+
+1. **Sol** : terrain synthétique avec colline ; trajectoire à z négatif ;
+   option active ; aucun échantillon sous `terrain + clearance` ; accélération
+   verticale et jerk bornés ; image stable (pas d'oscillation) ; option
+   inactive : trajectoire exacte inchangée.
+2. **Paroi frontale** : falaise verticale de 200 m, trajectoire à 50 m ; impact
+   à ±0–20° de la normale ; option active ; la caméra ne traverse jamais ;
+   détour latéral > marge ; retour à moins de X m de la courbe après la paroi ;
+   pas de roulis frénétique ; déterminisme.
+3. **Paroi basse** : sommet franchissable avec l'accélération verticale
+   disponible → montée au-dessus, pas de détour inutile.
+4. **Paroi oblique** : impact à 45° → glissement le long de la paroi puis
+   retour.
+5. **Couloir impossible** : la caméra s'arrête/ralentit avant la paroi et
+   l'UI signale l'impossibilité ; aucune traversée.
+6. **Exact + sécurité** : les clés atteignables sont atteintes à leur temps ;
+   en cas de détour, l'écart/temps est signalé.
+7. **Non-régression** : options désactivées → comportement actuel exact
+   (vitesse par longueur d'arc) inchangé.
+
+### Fichiers à modifier
+
+| Fichier | Rôle |
+|---|---|
+| `crates/vf-core/src/rig.rs` | champs `Constraints` : garde au sol, angle, détour, marges ; validation ; valeurs par défaut. |
+| `crates/vf-flight/src/clearance.rs` | champ de parois plus riche (normale, sommet, largeur/entrée-sortie) ; requêtes pour une fenêtre de trajectoire. |
+| `crates/vf-flight/src/rig.rs` | couche `SafetyLayer`/`TerrainGuard`, décision monter/contourner, détour + retour, tests. |
+| `crates/vf-flight/src/rig.rs` | ordre : appliquer la sécurité **avant** l'échantillonnage final et **même en exact_path**. |
+| `crates/vf-ui/src/lib.rs` | panneau Contraintes, indicateurs, overlay de la trajectoire corrigée. |
+| `crates/vf-ui/src/help.rs` | fiche Contraintes : nouveau comportement, limites. |
+| `docs/ANIMATION.md`, `docs/RIG.md` | documentation utilisateur. |
+| `docs/ETAT_ET_REPRISE.md` | cette section, mise à jour à la livraison. |
+
+### Ordre d'implémentation conseillé
+
+1. **Garde au sol d'abord** (fallback garanti) : appliquer aussi en
+   `exact_path`, avec tests sol et non-régression. C'est la demande minimale.
+2. **Diagnostic de collision** : détecter et visualiser les intersections de
+   la trajectoire avec les parois, sans encore dévier ; tests sur falaise
+   synthétique.
+3. **Décision monter/contourner** : utiliser l'accélération/jerk verticaux et
+   l'angle d'impact ; tests paroi basse / frontale / oblique.
+4. **Détour latéral + retour** : génération lissée, hystérésis, anti-roulis ;
+   tests de non-traversée et de retour.
+5. **UI/CLI/docs** et captures ; mise à jour de ce fichier et des binaires.
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+
+# projet de test falaise
+cargo run -p vf-cli -- terrain generate --mode modern --size 514   --seed 7 --preset canyon --name "Paroi test" --out /tmp/paroi.vfproj
+```
+
+### Points à confirmer avant de commencer
+
+1. Politique de temps en cas de détour : **A (temps autoritaire + avertissement)**
+   ou **B (vitesse autoritaire + temps décalés)**.
+2. Priorité montée vs contournement : monter si l'accélération verticale le
+   permet, sinon contourner (proposé).
+3. Le garde au sol doit-il s'appliquer aussi à la **cible** et à la **caméra**
+   (pas seulement l'œil) ? Proposition : œil + caméra, cible seulement si
+   `apply_target`.
+4. Marge de sécurité caméra : utiliser `wall_distance_m` comme rayon, ou ajouter
+   un rayon explicite (par exemple 5 m) ?
 
 ---
 

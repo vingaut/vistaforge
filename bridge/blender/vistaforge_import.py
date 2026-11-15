@@ -336,6 +336,13 @@ def setup_camera(sidecar: dict) -> None:
                 break
     if camera is None:
         return
+    # Prefer the camera exported by VistaForge if the default Blender camera
+    # was already in the scene.
+    for obj in scene.objects:
+        if obj.type == "CAMERA" and "vistaforge" in obj.name.lower():
+            camera = obj
+            scene.camera = obj
+            break
     data = camera.data
     camera_info = sidecar.get("camera", {})
     fov = float(camera_info.get("fov_y_deg", 50.0))
@@ -346,6 +353,38 @@ def setup_camera(sidecar: dict) -> None:
         data.dof.use_dof = True
         data.dof.focus_distance = float(dof.get("focus_m", 100.0))
         data.dof.aperture_fstop = float(dof.get("fstop", 8.0))
+
+
+def configure_animation() -> None:
+    """Select the VistaForge camera and expose its action frame range.
+
+    Scene exports are static, but a GLB that also contains a camera animation
+    (or an animation-only GLB imported into this scene) should play from the
+    first to the last keyed frame.
+    """
+    scene = bpy.context.scene
+    camera = scene.camera
+    for obj in scene.objects:
+        if obj.type == "CAMERA" and "vistaforge" in obj.name.lower():
+            camera = obj
+            scene.camera = obj
+            break
+    starts = []
+    ends = []
+    for obj in scene.objects:
+        if not obj.animation_data or not obj.animation_data.action:
+            continue
+        frame_start, frame_end = obj.animation_data.action.frame_range
+        starts.append(frame_start)
+        ends.append(frame_end)
+    if starts and ends:
+        scene.frame_start = max(0, int(round(min(starts))))
+        scene.frame_end = max(scene.frame_start + 1, int(round(max(ends))))
+        scene.frame_set(scene.frame_start)
+        print(
+            f"VistaForge animation: frames {scene.frame_start}..{scene.frame_end} "
+            f"at {scene.render.fps} fps, camera={camera.name if camera else None}"
+        )
 
 
 def setup_cycles(opts: dict, sidecar: dict) -> None:
@@ -409,6 +448,7 @@ def main() -> None:
     setup_world(sidecar)
     setup_sun(sidecar)
     setup_camera(sidecar)
+    configure_animation()
     if opts["smart_uv"]:
         maybe_smart_uv()
     if opts["remesh"]:

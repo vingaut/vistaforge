@@ -162,8 +162,11 @@ L'espace **Animation** réunit ce que l'ancienne version séparait en **Vol** et
 **Animation**. Un seul parcours, en quatre étapes :
 
 1. **Tracé** — dessinez le point de vue au clic sur le terrain (mode Tracer,
-   altitude réglable), sélectionnez une clé puis tirez les flèches X/Y/Z.
-   La cible est matérialisée dans le viewport de conception uniquement.
+   altitude réglable), puis déplacez une clé au gizmo X/Y/Z, par **glisser
+   libre** directement dans le viewport, ou par valeurs numériques. La cible est
+   matérialisée dans le viewport de conception uniquement. Le dock **Timeline**
+   permet de retimer les clés et le **Graphe** de tracer les canaux X/Y/Z,
+   vitesse et roulis.
 2. **Réglages** — durée, images/s, nombre d'images, FOV, profondeur de champ,
    roulis, liaison caméra et contraintes sol/parois. Un encadré indique la
    vitesse demandée par rapport à la croisière du profil et propose une durée
@@ -172,12 +175,15 @@ L'espace **Animation** réunit ce que l'ancienne version séparait en **Vol** et
    manuel, caractère du corps, courbes vitesse et roulis comparées, trajectoires
    superposées et bouton **Tracé de démonstration (S)** pour comparer en
    quelques secondes. Le profil change la dynamique, pas le tracé.
-4. **Lecture** — timeline, lecture/pause, boucle, vitesse, vue design ou vue
-   caméra, rendu d'une image et export de la séquence PNG.
+4. **Lecture** — lecture/pause, boucle, vitesse, vue design (le frustum s'anime
+   sans quitter l'orbite) ou vue caméra, rendu d'une image et export de la
+   séquence PNG.
 
 La **barre de lecture** reste ancrée en bas du viewport dans tous les onglets :
-`Lire`, curseur de temps, image précédente/suivante, boucle et bascule
-Design/Caméra. `Espace` fait la même chose ; `F1` ouvre l'aide.
+`Lire`, curseur de temps, image précédente/suivante, boucle, bascule
+Design/Caméra et **Timeline**. `Espace` fait la même chose ; `F1` ouvre l'aide.
+La durée est indépendante de la dernière clé : on peut la raccourcir sous le
+dernier point sans perdre les clés.
 
 Le CLI expose les deux modèles :
 
@@ -186,6 +192,11 @@ Le CLI expose les deux modèles :
 vistaforge rig info scene.vfproj
 vistaforge anim still scene.vfproj frame.png --time 2 --width 1920 --height 1080
 vistaforge anim render scene.vfproj frames/ --fps 24 --width 1280 --height 720
+
+# Trajectoire seule, sans géométrie (Blender, autre projet, tableur)
+vistaforge rig export scene.vfproj survol.glb
+vistaforge rig export scene.vfproj survol.vfcam
+vistaforge rig import autre_terrain.vfproj survol.vfcam --out rejoue.vfproj
 
 # Ancien modèle de vol par trajectoires générées (toujours disponible en CLI)
 vistaforge anim render scene.vfproj frames/ --preset cinematic --seconds 4 \
@@ -226,6 +237,37 @@ vistaforge scene preset scene.vfproj desert --out desert.vfproj
 Le format préserve les réglages de caméra, soleil, palette, eau, nuages,
 brume, rendu et **pile de modificateurs**. Le schéma courant est **v6** ; la
 migration accepte v1→v6 (les champs absents prennent leur valeur par défaut).
+
+## Heightmaps, GeoTIFF et DEM
+
+L'espace **Fichiers** (et le CLI) importe un terrain depuis un GeoTIFF, un
+ESRI ASCII Grid, un DEM v1 ou une heightmap PNG/JPEG.
+
+```bash
+# Heightmap 8 bits : plage d'altitude explicite
+vistaforge terrain import relief.png --out relief.vfproj \
+  --min-height 120 --max-height 900 --spacing 25
+
+# Heightmap 16 bits avec sidecar JSON : plage automatique
+vistaforge terrain import heightmap_16.png --out relief.vfproj
+
+# GeoTIFF : géoréférencement lu dans le fichier
+vistaforge terrain import dem.tif --out dem.vfproj
+
+# Export terrain (l'extension choisit le format)
+vistaforge terrain export scene.vfproj dem.tif       # GeoTIFF float géoréférencé
+vistaforge terrain export scene.vfproj dem.asc       # ESRI ASCII Grid
+vistaforge terrain export scene.vfproj heightmap.png # PNG 16 bits + JSON + PGW
+vistaforge terrain export scene.vfproj apercu.jpg    # JPEG (lossy)
+vistaforge terrain export scene.vfproj ancien.dem    # DEM v1
+vistaforge terrain export scene.vfproj brut.r32      # f32 + sidecar JSON
+```
+
+Règles : `--min-height/--max-height` à `0/0` signifie automatique (sidecar
+JSON). Les images sont nord en haut ; l'import les retourne pour la convention
+VistaForge (ligne 0 au sud). Le GeoTIFF écrit est un float32 simple bande avec
+`ModelPixelScale`, `ModelTiepoint`, CRS projeté utilisateur en mètres et
+`GDAL_NODATA`. Détails et schéma du sidecar : [`FICHIERS.md`](FICHIERS.md).
 
 ## DEM legacy
 
@@ -276,7 +318,16 @@ Détails et presets : [`RIG.md`](RIG.md).
 ```bash
 cargo run --release -p vf-cli -- blender export ile.vfproj demo-out/blender/ile --subdivision 2
 cargo run --release -p vf-cli -- blender render ile.vfproj demo-out/blender/ile.png --samples 64
+
+# Trajectoire caméra/cible seule, pour l'addon Blender
+cargo run --release -p vf-cli -- rig export ile.vfproj demo-out/blender/ile/camera_animation.glb
 ```
+
+L'espace Fichiers > Blender écrit `scene.glb`, les textures, `scene.json` et
+optionnellement `camera_animation.glb`. L'addon
+`bridge/blender/vistaforge_io.py` importe la trajectoire, sélectionne la caméra,
+règle fps/plage d'images et réexporte un `.vfcam` vers VistaForge. Voir
+[`BLENDER.md`](BLENDER.md) et [`FICHIERS.md`](FICHIERS.md).
 
 Détails, contenu du dossier et limites : [`BLENDER.md`](BLENDER.md).
 
@@ -324,7 +375,7 @@ Deux chemins d'affichage coexistent, sans changer le rendu final :
 
 1. **Viewport GPU (wgpu)** — quand un adaptateur est disponible, le viewport
    est dessiné en temps réel par le GPU (Vulkan sous Linux/Windows, Metal sur
-   macOS). Un maillage du heightfield (jusqu'à 1024 segments par côté) est
+   macOS). Un maillage du heightfield (jusqu'à 2 049 segments par côté) est
    construit avec la pile de modificateurs et le pass falaises, puis éclairé
    par le soleil, l'eau et le brouillard. C'est le mode par défaut.
 2. **Aperçu CPU adaptatif** — si le GPU est indisponible, désactivé dans le

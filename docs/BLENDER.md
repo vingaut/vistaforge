@@ -26,6 +26,9 @@ cargo run --release -p vf-cli -- blender render ile.vfproj demo-out/blender/ile_
 
 # Import dans une session Blender interactive :
 # Scripting > Open > bridge/blender/vistaforge_import.py, puis renseigner glb et json.
+
+# Trajectoire seule (caméra + cible, sans géométrie)
+cargo run --release -p vf-cli -- rig export ile.vfproj demo-out/blender/ile/camera_animation.glb
 ```
 
 Options utiles : `--no-water`, `--no-camera`, `--no-sun` à l'export ;
@@ -46,6 +49,7 @@ Options utiles : `--no-water`, `--no-camera`, `--no-sun` à l'export ;
 | `masks.png` | R = neige, G = végétation, B = éboulis, pour mélanger des textures. |
 | `heightmap_16.png` | heightfield de la surface exportée, 16 bits, ligne 0 = sud. |
 | `README.txt` | rappel de la commande d'import. |
+| `camera_animation.glb` | optionnel : trajectoire caméra/cible exportée par l'espace Fichiers ou `rig export`. |
 
 ### Coordonnées
 
@@ -119,9 +123,62 @@ de périphérique OptiX configuré ; `--gpu` tente OptiX et retombe sur CPU.
 
 ---
 
-## 5. Limites de la version 1
+## 5. Trajectoires caméra / cible (aller-retour)
 
-- Export **aller seulement** : pas de round-trip Blender → VistaForge.
+Le bridge ne se limite plus au maillage : une trajectoire peut être échangée
+sans terrain.
+
+```bash
+# VistaForge -> Blender
+vistaforge rig export scene.vfproj survol.glb
+vistaforge rig export scene.vfproj survol.vfcam
+
+# Blender -> VistaForge (depuis l'addon, ou un .vfcam écrit à la main)
+vistaforge rig import autre_terrain.vfproj survol.vfcam --out rejoue.vfproj
+```
+
+### Addon Blender
+
+`bridge/blender/vistaforge_io.py` s'installe comme add-on
+(`Edit > Preferences > Add-ons > Install`) et ajoute :
+
+- `File > Import > VistaForge Camera Animation (.glb)` : importe la caméra
+  `VistaForge Camera`, l'empty `VistaForge Target`, remplace une caméra
+  statique du même nom, règle `fps`, `frame_start/frame_end` depuis le rig et
+  sélectionne la caméra.
+- `File > Export > VistaForge Camera Animation (.vfcam)` : échantillonne la
+  caméra active et l'empty cible (ou le -Z de la caméra à 500 m) et écrit un
+  `.vfcam` relisible par VistaForge.
+
+Le GLB contient aussi le rig complet dans `scenes[0].extras.vistaforge_rig` :
+le retour VistaForge est donc **sans perte**. Sans ces extras, l'import
+reconstruit le chemin de l'œil depuis les translations et la visée depuis les
+rotations de la caméra (ou depuis l'empty cible s'il est animé).
+
+Validation Blender 5.3 :
+
+```text
+GLB 8 s / 24 fps -> action 0..192, caméra et cible mobiles
+addon export .vfcam -> 193 clés
+vistaforge rig import -> 193 clés, target Path, durée 8 s
+```
+
+### Scène + trajectoire
+
+1. `vistaforge blender export scene.vfproj blender-out --subdivision 2`.
+2. `vistaforge rig export scene.vfproj blender-out/camera_animation.glb`.
+3. Dans Blender : importer `scene.glb`, puis
+   `File > Import > VistaForge Camera Animation (.glb)`.
+4. L'addon remplace la caméra statique, conserve le terrain, les matériaux et
+   le soleil, et règle la plage d'images.
+
+Le bouton **Exporter pour Blender (GLB)** de l'espace Fichiers écrit les deux
+fichiers dans le même dossier.
+
+## 6. Limites de la version 1
+
+- Le round-trip **géométrie** reste aller seulement ; le round-trip
+  **trajectoire** est assuré par `.vfcam`/GLB et l'addon.
 - Pas d'arbres/rochers instanciés ni de végétation géométrique.
 - `albedo.png` et `normal.png` sont des textures de départ, pas des baking
   PBR multi-UDIM ; le script Smart UV/remesh est là pour les cas difficiles.

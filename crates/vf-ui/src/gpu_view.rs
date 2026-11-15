@@ -20,7 +20,7 @@ use glam::{DVec3, Mat4, Vec3};
 use vf_core::{Camera, HeightField, Project};
 use wgpu::util::DeviceExt as _;
 
-const MAX_MESH_SEGMENTS: usize = 1024;
+const MAX_MESH_SEGMENTS: usize = 2049;
 const SCENE_SHADER: &str = include_str!("shaders/scene.wgsl");
 const BLIT_SHADER: &str = include_str!("shaders/blit.wgsl");
 

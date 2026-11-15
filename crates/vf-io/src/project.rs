@@ -98,6 +98,10 @@ pub fn save_project(
         zip.finish()?;
     }
 
+    // `rename` replaces atomically on Unix. Windows refuses to replace an
+    // existing file, so only there do we remove the target first; the fully
+    // written temporary file still protects against a crash mid-write.
+    #[cfg(windows)]
     if path.exists() {
         std::fs::remove_file(path)?;
     }
@@ -110,6 +114,20 @@ pub fn save_project(
 fn migrate(project: &mut Project) {
     if project.schema_version < SCHEMA_VERSION {
         project.schema_version = SCHEMA_VERSION;
+    }
+    // Repair animation fields that older builds could write as zero. The rig
+    // is validated on load, so a stale duration must not make a whole project
+    // unreadable.
+    if !project.rig.duration_s.is_finite() || project.rig.duration_s < 0.1 {
+        project.rig.duration_s = 8.0;
+    }
+    if !(1..=120).contains(&project.rig.fps) {
+        project.rig.fps = 24;
+    }
+    if !project.rig.optics.fov_y_deg.is_finite()
+        || !(1.0..=170.0).contains(&project.rig.optics.fov_y_deg)
+    {
+        project.rig.optics.fov_y_deg = 50.0;
     }
 }
 
@@ -252,6 +270,42 @@ mod tests {
         assert_eq!(loaded.project.meta.name, "Round trip");
         assert_eq!(loaded.heightfield.heights(), hf.heights());
         assert_eq!(loaded.project.terrain.width, 33);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn migrate_repairs_zero_duration_and_fps() {
+        let mut project = Project::new("Old", Seed::new(1), 33);
+        project.rig.duration_s = 0.0;
+        project.rig.fps = 0;
+        project.rig.optics.fov_y_deg = 0.0;
+        migrate(&mut project);
+        assert!(project.rig.duration_s >= 0.1);
+        assert!((1..=120).contains(&project.rig.fps));
+        assert!(project.rig.validate().is_ok());
+    }
+
+    #[test]
+    fn failed_save_preserves_the_previous_file() {
+        let (project, hf) = sample_project();
+        let dir = std::env::temp_dir().join(format!("vfproj-atomic-{}", std::process::id()));
+        let path = dir.join("scene.vfproj");
+        save_project(&project, &hf, &path, None).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut broken = project.clone();
+        broken.rig.duration_s = 0.0; // invalid
+        assert!(save_project(&broken, &hf, &path, None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn corrupted_project_returns_an_error_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("vfproj-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.vfproj");
+        std::fs::write(&path, b"not a zip").unwrap();
+        assert!(load_project(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

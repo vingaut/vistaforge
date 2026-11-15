@@ -9,10 +9,10 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use glam::DVec3;
 use vf_core::{Camera, CameraRig, HeightField, PathKey, TargetMode};
-use vf_flight::rig::{path_derivative, sample_path};
+use vf_flight::rig::{RigSample, path_derivative, sample_path};
 
 use crate::animation_ui::{
-    AnimSelection, ComparisonTrail, pick_terrain, preset_color, world_to_screen,
+    AnimSelection, ComparisonTrail, pick_terrain, preset_color, screen_ray, world_to_screen,
 };
 
 const EYE_COLOR: Color32 = Color32::from_rgb(92, 202, 255);
@@ -52,6 +52,17 @@ struct AxisDrag {
     screen_length: f32,
 }
 
+/// Free mouse drag: the key follows the pointer in the plane of the screen,
+/// without requiring the user to grab a gizmo axis.
+struct MarkerDrag {
+    selection: AnimSelection,
+    start_pointer: Pos2,
+    start_position: DVec3,
+    plane_normal: DVec3,
+    world_per_pixel: f64,
+    moved: bool,
+}
+
 #[derive(Default)]
 pub struct EditorState {
     pub selection: Option<AnimSelection>,
@@ -64,7 +75,10 @@ pub struct EditorState {
     pub snap_m: f64,
     pub show_paths: bool,
     pub show_trail: bool,
+    /// Click and drag directly on a key to move it in the screen plane.
+    pub free_drag: bool,
     drag: Option<AxisDrag>,
+    marker_drag: Option<MarkerDrag>,
     hover_axis: Option<Axis>,
     hover_marker: Option<AnimSelection>,
 }
@@ -87,14 +101,16 @@ impl EditorState {
             snap_m: 0.0,
             show_paths: true,
             show_trail: true,
+            free_drag: true,
             drag: None,
+            marker_drag: None,
             hover_axis: None,
             hover_marker: None,
         }
     }
 
     pub fn is_dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.marker_drag.is_some()
     }
 
     pub fn clear_invalid_selection(&mut self, rig: &CameraRig) {
@@ -124,6 +140,7 @@ pub fn show(
     state: &mut EditorState,
     simulated_trail: Option<&[[f64; 3]]>,
     comparison: Option<&[ComparisonTrail]>,
+    live_sample: Option<&RigSample>,
     blocked_rect: Rect,
 ) -> EditorOutput {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -166,8 +183,8 @@ pub fn show(
         {
             draw_trail(&painter, rect, camera, trail);
         }
-        draw_camera_frustum(&painter, rect, camera, rig, time);
-        draw_time_markers(&painter, rect, camera, rig, time);
+        draw_camera_frustum(&painter, rect, camera, rig, time, live_sample);
+        draw_time_markers(&painter, rect, camera, rig, time, live_sample);
     }
 
     // Selected key gizmo geometry. Drawn after paths and markers so it stays
@@ -230,10 +247,12 @@ pub fn show(
         }
     }
 
-    // Marker picking on click.
+    // Marker picking on press. A press also starts a free drag: the key
+    // follows the pointer in the screen plane, so the gizmo is optional.
     if pressed
         && !state.trace
         && state.drag.is_none()
+        && state.marker_drag.is_none()
         && !over_blocked
         && let Some(pointer) = pointer
     {
@@ -248,6 +267,67 @@ pub fn show(
                 AnimSelection::TargetKey(index) => format!("Clé cible {index} sélectionnée"),
                 AnimSelection::FixedTarget => "Cible fixe sélectionnée".into(),
             });
+            if state.free_drag
+                && let Some(position) = selected_world_position(rig, Some(marker))
+            {
+                let forward = (camera.target - camera.position).normalize_or_zero();
+                let distance = (position - camera.position).length().max(1.0);
+                let world_per_pixel =
+                    distance * (f64::from(camera.fov_y_deg) * 0.5).to_radians().tan() * 2.0
+                        / f64::from(rect.height().max(1.0));
+                state.marker_drag = Some(MarkerDrag {
+                    selection: marker,
+                    start_pointer: pointer,
+                    start_position: position,
+                    plane_normal: forward,
+                    world_per_pixel,
+                    moved: false,
+                });
+            }
+        }
+    }
+
+    // Free marker drag in the screen plane. Shift locks Z, Alt snaps the key
+    // to the terrain under the pointer.
+    if let Some(drag) = state.marker_drag.as_mut() {
+        output.consumed = true;
+        if let Some(pointer) = pointer {
+            let delta = pointer - drag.start_pointer;
+            if delta.length() > 1.5 {
+                drag.moved = true;
+            }
+            if drag.moved {
+                let shift = ui.input(|input| input.modifiers.shift);
+                let alt = ui.input(|input| input.modifiers.alt);
+                let mut position = drag.start_position;
+                if alt {
+                    if let Some(hit) = pick_terrain(camera, rect, pointer, heightfield) {
+                        position = hit;
+                    }
+                } else if shift {
+                    position.z = drag.start_position.z - f64::from(delta.y) * drag.world_per_pixel;
+                } else if let Some((origin, direction)) = screen_ray(camera, rect, pointer)
+                    && let Some(hit) =
+                        ray_plane(origin, direction, drag.start_position, drag.plane_normal)
+                {
+                    position = hit;
+                }
+                if state.snap_m > 0.0 {
+                    position.x = (position.x / state.snap_m).round() * state.snap_m;
+                    position.y = (position.y / state.snap_m).round() * state.snap_m;
+                    position.z = (position.z / state.snap_m).round() * state.snap_m;
+                }
+                if set_position(rig, Some(drag.selection), position) {
+                    output.changed = true;
+                    output.status = Some(format!(
+                        "Clé déplacée librement · ({:.1}, {:.1}, {:.1})",
+                        position.x, position.y, position.z
+                    ));
+                }
+            }
+        }
+        if !down {
+            state.marker_drag = None;
         }
     }
 
@@ -455,21 +535,40 @@ fn draw_camera_frustum(
     camera: &Camera,
     rig: &CameraRig,
     time: f32,
+    live: Option<&RigSample>,
 ) {
-    let eye = sample_path(&rig.eye, time);
-    let Some(target) = current_target(rig, eye, time) else {
-        return;
+    let (eye, target, up) = if let Some(sample) = live {
+        if (sample.target - sample.camera.position).length_squared() < 1e-6 {
+            return;
+        }
+        let mut up = sample.camera.up.normalize_or_zero();
+        if up.length_squared() < 0.5 {
+            up = DVec3::Z;
+        }
+        (sample.camera.position, sample.target, up)
+    } else {
+        let eye = sample_path(&rig.eye, time);
+        let Some(target) = current_target(rig, eye, time) else {
+            return;
+        };
+        let forward = (target - eye).normalize_or_zero();
+        if forward.length_squared() < 0.5 {
+            return;
+        }
+        let mut right = forward.cross(DVec3::Z).normalize_or_zero();
+        if right.length_squared() < 0.5 {
+            right = forward.cross(DVec3::X).normalize_or_zero();
+        }
+        if right.length_squared() < 0.5 {
+            return;
+        }
+        let up = right.cross(forward).normalize_or_zero();
+        (eye, target, up)
     };
     let forward = (target - eye).normalize_or_zero();
-    if forward.length_squared() < 0.5 {
-        return;
-    }
-    let mut right = forward.cross(DVec3::Z).normalize_or_zero();
+    let mut right = forward.cross(up).normalize_or_zero();
     if right.length_squared() < 0.5 {
         right = forward.cross(DVec3::X).normalize_or_zero();
-    }
-    if right.length_squared() < 0.5 {
-        return;
     }
     let up = right.cross(forward).normalize_or_zero();
     let distance = ((target - eye).length() * 0.32).clamp(80.0, 2500.0);
@@ -517,14 +616,19 @@ fn draw_time_markers(
     camera: &Camera,
     rig: &CameraRig,
     time: f32,
+    live: Option<&RigSample>,
 ) {
-    let eye = sample_path(&rig.eye, time);
+    let (eye, target) = if let Some(sample) = live {
+        (sample.eye, Some(sample.target))
+    } else {
+        let eye = sample_path(&rig.eye, time);
+        (eye, current_target(rig, eye, time))
+    };
     let Some(eye_screen) = world_to_screen(camera, rect, eye) else {
         return;
     };
     painter.circle_filled(eye_screen, 5.0, EYE_COLOR);
     painter.circle_stroke(eye_screen, 7.5, Stroke::new(1.0, Color32::WHITE));
-    let target = current_target(rig, eye, time);
     if let Some(target) = target
         && let Some(target_screen) = world_to_screen(camera, rect, target)
     {
@@ -733,6 +837,46 @@ fn set_component(
     }
     target[index] = value;
     true
+}
+
+fn set_position(rig: &mut CameraRig, selection: Option<AnimSelection>, position: DVec3) -> bool {
+    if position.to_array().iter().any(|value| !value.is_finite()) {
+        return false;
+    }
+    let target = match selection {
+        Some(AnimSelection::EyeKey(index)) => {
+            rig.eye.keys.get_mut(index).map(|key| &mut key.position)
+        }
+        Some(AnimSelection::TargetKey(index)) if rig.target.mode == TargetMode::Path => rig
+            .target
+            .path
+            .keys
+            .get_mut(index)
+            .map(|key| &mut key.position),
+        Some(AnimSelection::FixedTarget) => Some(&mut rig.target.fixed),
+        _ => None,
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    let next = position.to_array();
+    if target.iter().zip(next).all(|(a, b)| (a - b).abs() < 1e-9) {
+        return false;
+    }
+    *target = next;
+    true
+}
+
+fn ray_plane(origin: DVec3, direction: DVec3, point: DVec3, normal: DVec3) -> Option<DVec3> {
+    let denominator = direction.dot(normal);
+    if denominator.abs() < 1e-6 {
+        return None;
+    }
+    let t = (point - origin).dot(normal) / denominator;
+    if t < 0.0 || !t.is_finite() {
+        return None;
+    }
+    Some(origin + direction * t)
 }
 
 fn hit_marker(
@@ -944,6 +1088,107 @@ mod tests {
     }
 
     #[test]
+    fn ray_plane_returns_the_intersection_in_front() {
+        let hit = ray_plane(
+            DVec3::new(0.0, 0.0, 100.0),
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::new(10.0, 20.0, 50.0),
+            DVec3::Z,
+        )
+        .unwrap();
+        assert!((hit.x - 0.0).abs() < 1e-9);
+        assert!((hit.z - 50.0).abs() < 1e-9);
+        assert!(
+            ray_plane(
+                DVec3::new(0.0, 0.0, 100.0),
+                DVec3::Z,
+                DVec3::new(10.0, 20.0, 50.0),
+                DVec3::Z,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn free_drag_moves_a_key_in_the_screen_plane() {
+        let hf = HeightField::filled(65, 65, 10.0, 0.0).unwrap();
+        let mut rig = rig();
+        rig.enabled = true;
+        rig.duration_s = 8.0;
+        rig.eye.keys = vec![
+            PathKey::new(0.0, [320.0, 320.0, 100.0]),
+            PathKey::new(8.0, [320.0, 320.0, 140.0]),
+        ];
+        let camera = Camera {
+            position: DVec3::new(320.0, 320.0, 800.0),
+            target: DVec3::new(320.0, 320.0, 0.0),
+            up: DVec3::Y,
+            fov_y_deg: 50.0,
+            ..Camera::default()
+        };
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let center = rect.center();
+        let ctx = egui::Context::default();
+        let mut state = EditorState::new();
+        let mut run = |events: Vec<egui::Event>, state: &mut EditorState| {
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                time: Some(1.0),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                show(
+                    ui,
+                    rect,
+                    &camera,
+                    &mut rig,
+                    &hf,
+                    0.0,
+                    state,
+                    None,
+                    None,
+                    None,
+                    Rect::NOTHING,
+                );
+            });
+            output.textures_delta.clear();
+            output
+        };
+        run(
+            vec![
+                egui::Event::PointerMoved(center),
+                egui::Event::PointerButton {
+                    pos: center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            &mut state,
+        );
+        assert_eq!(state.selection, Some(AnimSelection::EyeKey(0)));
+        run(
+            vec![egui::Event::PointerMoved(center + Vec2::new(90.0, -40.0))],
+            &mut state,
+        );
+        run(
+            vec![egui::Event::PointerButton {
+                pos: center + Vec2::new(90.0, -40.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            &mut state,
+        );
+        let moved = rig.eye.keys[0].position;
+        assert!(
+            (moved[0] - 320.0).abs() > 1.0 || (moved[1] - 320.0).abs() > 1.0,
+            "screen-plane drag did not move the key: {moved:?}"
+        );
+    }
+
+    #[test]
     fn trace_click_appends_a_key() {
         let hf = HeightField::filled(65, 65, 10.0, 0.0).unwrap();
         let mut rig = rig();
@@ -987,6 +1232,7 @@ mod tests {
                         &hf,
                         2.0,
                         state,
+                        None,
                         None,
                         None,
                         Rect::NOTHING,

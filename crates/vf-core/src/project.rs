@@ -361,6 +361,7 @@ impl Project {
         self.water.validate()?;
         self.clouds.validate()?;
         self.render.validate()?;
+        self.rig.validate()?;
         Ok(())
     }
 

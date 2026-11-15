@@ -169,6 +169,22 @@ pub struct Brush {
     pub symmetry: Symmetry,
     /// Terrace step, metres.
     pub step_m: f32,
+    /// Stratum dip, degrees (0 = horizontal benches).
+    pub dip_deg: f32,
+    /// Down-dip azimuth, degrees (0 = +X, 90 = +Y).
+    pub dip_azimuth_deg: f32,
+    /// Fraction of a stratum occupied by the flat bench (0.3..0.99).
+    pub bench_ratio: f32,
+    /// Relative thickness variation between benches, 0..1.
+    pub bench_variation: f32,
+    /// Riser sharpness, 0 = wide slope, 1 = near-vertical step.
+    pub riser_sharpness: f32,
+    /// Vertical column spacing, metres; 0 disables columnar joints.
+    pub column_spacing_m: f32,
+    /// Depth of the columnar grooves, metres.
+    pub column_depth_m: f32,
+    /// Irregularity of the column spacing, 0..1.
+    pub column_jitter: f32,
     /// Clone source offset, metres.
     pub clone_offset_m: [f32; 2],
     /// Number of sides for the polygon shape.
@@ -193,6 +209,14 @@ impl Default for Brush {
             aa_samples: 4,
             symmetry: Symmetry::None,
             step_m: 25.0,
+            dip_deg: 0.0,
+            dip_azimuth_deg: 0.0,
+            bench_ratio: 0.82,
+            bench_variation: 0.25,
+            riser_sharpness: 0.7,
+            column_spacing_m: 0.0,
+            column_depth_m: 2.0,
+            column_jitter: 0.35,
             clone_offset_m: [0.0, 0.0],
             sides: 6,
             invert: false,
@@ -216,6 +240,30 @@ impl Brush {
         }
         if !self.noise_scale_m.is_finite() || self.noise_scale_m <= 0.0 {
             return Err("brush noise scale must be positive".into());
+        }
+        if !(0.0..=60.0).contains(&self.dip_deg) {
+            return Err("brush dip must be in 0..=60 degrees".into());
+        }
+        if !(0.0..=360.0).contains(&self.dip_azimuth_deg) {
+            return Err("brush dip azimuth must be in 0..=360 degrees".into());
+        }
+        if !(0.3..=0.99).contains(&self.bench_ratio) {
+            return Err("brush bench ratio must be in 0.3..=0.99".into());
+        }
+        if !(0.0..=1.0).contains(&self.bench_variation) {
+            return Err("brush bench variation must be in 0..=1".into());
+        }
+        if !(0.0..=1.0).contains(&self.riser_sharpness) {
+            return Err("brush riser sharpness must be in 0..=1".into());
+        }
+        if !(0.0..=500.0).contains(&self.column_spacing_m) {
+            return Err("brush column spacing must be in 0..=500 metres".into());
+        }
+        if !(0.0..=100.0).contains(&self.column_depth_m) {
+            return Err("brush column depth must be in 0..=100 metres".into());
+        }
+        if !(0.0..=1.0).contains(&self.column_jitter) {
+            return Err("brush column jitter must be in 0..=1".into());
         }
         Ok(())
     }
@@ -436,7 +484,8 @@ fn apply_one(
             if normalised >= 1.0 {
                 continue;
             }
-            let aa = (cell as f64 / radius).clamp(0.002, 0.25) * (1.0 + (8 - brush.aa_samples) as f64 / 16.0);
+            let aa = (cell as f64 / radius).clamp(0.002, 0.25)
+                * (1.0 + (8 - brush.aa_samples) as f64 / 16.0);
             let edge = 1.0 - smoothstep((1.0 - aa) as f32, 1.0, normalised as f32);
             let radial = falloff(brush.falloff, normalised as f32, brush.hardness);
             let coverage = edge * radial;
@@ -456,9 +505,8 @@ fn apply_one(
                     old + (target - old) * brush.strength.clamp(0.0, 1.0) * coverage
                 }
                 BrushMode::Terrace => {
-                    let step = brush.step_m.max(0.01);
-                    let quantised = (old / step).round() * step;
-                    old + (quantised - old) * brush.strength.clamp(0.0, 1.0) * coverage
+                    let target = terrace_target(brush, wx, wy, old, cell, seed_value);
+                    old + (target - old) * brush.strength.clamp(0.0, 1.0) * coverage
                 }
                 BrushMode::Ridge => {
                     let n = value_noise(
@@ -470,13 +518,19 @@ fn apply_one(
                     old + signed(brush) * crest * coverage
                 }
                 BrushMode::Groove => {
-                    let n = value_noise(
-                        wx as f32 / brush.noise_scale_m.max(0.01),
-                        wy as f32 / brush.noise_scale_m.max(0.01),
-                        seed_value,
-                    );
-                    let channel = (1.0 - (n * 2.0 - 1.0).abs()).powf(0.7) * brush.strength;
-                    old - signed(brush) * channel * coverage
+                    if brush.column_spacing_m > 0.0 {
+                        let depth = groove_depth(hf, brush, wx, wy, seed_value);
+                        let direction = if brush.invert { -1.0 } else { 1.0 };
+                        old - brush.strength.abs() * direction * depth * coverage
+                    } else {
+                        let n = value_noise(
+                            wx as f32 / brush.noise_scale_m.max(0.01),
+                            wy as f32 / brush.noise_scale_m.max(0.01),
+                            seed_value,
+                        );
+                        let channel = (1.0 - (n * 2.0 - 1.0).abs()).powf(0.7) * brush.strength;
+                        old - signed(brush) * channel * coverage
+                    }
                 }
                 BrushMode::Crater => {
                     let t = normalised as f32;
@@ -497,12 +551,16 @@ fn apply_one(
                         wx as f32 / brush.noise_scale_m.max(0.01) + 17.0,
                         wy as f32 / brush.noise_scale_m.max(0.01),
                         seed_value,
-                    ) - 0.5) * 2.0 * brush.strength;
+                    ) - 0.5)
+                        * 2.0
+                        * brush.strength;
                     let dy = (value_noise(
                         wx as f32 / brush.noise_scale_m.max(0.01),
                         wy as f32 / brush.noise_scale_m.max(0.01) - 9.0,
                         seed_value,
-                    ) - 0.5) * 2.0 * brush.strength;
+                    ) - 0.5)
+                        * 2.0
+                        * brush.strength;
                     let px = wx + f64::from(dx * coverage);
                     let py = wy + f64::from(dy * coverage);
                     sample_bilinear(hf, px, py)
@@ -525,6 +583,119 @@ fn apply_one(
     } else {
         None
     }
+}
+
+/// Target height of the stratified terrace brush.
+///
+/// Strata are quantised in a dipping coordinate system. Each layer is mostly a
+/// flat bench (`bench_ratio`) followed by a short, steep riser. Low-frequency
+/// noise varies the layer thickness, and optional columnar joints cut vertical
+/// grooves into the risers. This is the shape of a basalt escarpment rather
+/// than a simple height quantisation.
+fn terrace_target(brush: &Brush, wx: f64, wy: f64, old: f32, cell_m: f32, seed: u64) -> f32 {
+    let step = f64::from(brush.step_m.max(0.01));
+    // A bench thinner than a third of a cell cannot be resolved: clamp it
+    // instead of producing aliased spikes.
+    let min_step = f64::from(cell_m) * 0.33;
+    let step = step.max(min_step);
+    let dip = f64::from(brush.dip_deg.clamp(0.0, 60.0)).to_radians().tan();
+    let azimuth = f64::from(brush.dip_azimuth_deg).to_radians();
+    let (sin_az, cos_az) = azimuth.sin_cos();
+    // Absolute coordinates keep strata aligned between overlapping strokes.
+    let plane = dip * (wx * cos_az + wy * sin_az);
+    let s = f64::from(old) + plane;
+    let variation = f64::from(brush.bench_variation.clamp(0.0, 1.0));
+    let thickness_noise = if variation > 0.0 {
+        f64::from(value_noise(
+            (wx / (step * 5.0)) as f32,
+            (wy / (step * 5.0)) as f32,
+            seed ^ 0x51ed_2701,
+        )) - 0.5
+    } else {
+        0.0
+    };
+    let local_step = (step * (1.0 + variation * 0.6 * thickness_noise)).max(min_step);
+    let unit = s / local_step;
+    let phase = unit.floor();
+    let t = (unit - phase).clamp(0.0, 1.0) as f32;
+    let bench_ratio = brush.bench_ratio.clamp(0.3, 0.99);
+    // Keep the riser narrow: a long smoothstep rounds the ledge into a dune.
+    // `riser_sharpness` narrows it further; at 1 the transition is as close to
+    // a vertical step as the heightfield can represent.
+    let sharpness = brush.riser_sharpness.clamp(0.0, 1.0);
+    let riser_span = ((1.0 - bench_ratio).clamp(0.02, 0.25) * (1.0 - 0.9 * sharpness)).max(0.008);
+    let riser_start = 1.0 - riser_span;
+    let riser = smoothstep(riser_start, 1.0_f32.min(riser_start + riser_span * 0.55), t);
+    let target_s = (phase + f64::from(riser)) * local_step;
+
+    let spacing = f64::from(brush.column_spacing_m.max(0.0));
+    let depth = f64::from(brush.column_depth_m.max(0.0));
+    let mut column_offset = 0.0;
+    if spacing > 0.0 && depth > 0.0 {
+        let strike = (-sin_az, cos_az);
+        let u = wx * strike.0 + wy * strike.1;
+        let jitter = f64::from(brush.column_jitter.clamp(0.0, 1.0));
+        let wobble = if jitter > 0.0 {
+            f64::from(value_noise(
+                (u / (spacing * 2.3)) as f32,
+                (s / (local_step * 3.0)) as f32,
+                seed ^ 0x2f7a_91c3,
+            )) - 0.5
+        } else {
+            0.0
+        };
+        let shifted = u + wobble * spacing * jitter * 1.8;
+        let f = (shifted / spacing).fract().abs();
+        let groove = (1.0 - (2.0 * f - 1.0).abs()).powf(6.0);
+        column_offset = depth * groove * f64::from(riser);
+    }
+
+    let target = target_s - plane - column_offset;
+    let rough = modulate(brush, wx as f32, wy as f32, seed, 1.0) - 1.0;
+    (target as f32 + rough * brush.step_m * 0.06).clamp(-100_000.0, 100_000.0)
+}
+
+/// Depth field (0..1) of the downhill-aligned columnar grooves.
+fn groove_depth(hf: &HeightField, brush: &Brush, wx: f64, wy: f64, seed: u64) -> f32 {
+    let (gx, gy) = gradient_world(hf, wx, wy);
+    let slope = (gx * gx + gy * gy).sqrt();
+    if slope < 0.015 {
+        return 0.0;
+    }
+    let dx = -gx / slope;
+    let dy = -gy / slope;
+    let strike = (-dy, dx);
+    let u = wx * strike.0 + wy * strike.1;
+    let v = wx * dx + wy * dy;
+    let spacing = f64::from(brush.column_spacing_m.max(0.01));
+    let jitter = f64::from(brush.column_jitter.clamp(0.0, 1.0));
+    let wobble = if jitter > 0.0 {
+        f64::from(value_noise(
+            (v / (spacing * 2.0)) as f32,
+            (u / (spacing * 4.0)) as f32,
+            seed ^ 0x7a31_0c09,
+        )) - 0.5
+    } else {
+        0.0
+    };
+    let f = ((u + wobble * spacing * jitter * 2.0) / spacing)
+        .fract()
+        .abs();
+    let groove = (1.0 - (2.0 * f - 1.0).abs()).powf(3.0);
+    let slope_weight = smoothstep(0.12, 0.7, slope as f32);
+    (groove * f64::from(slope_weight)) as f32
+}
+
+/// World-space uphill gradient, metres per metre.
+fn gradient_world(hf: &HeightField, x: f64, y: f64) -> (f64, f64) {
+    let (ox, oy) = hf.origin();
+    let (sx, sy) = hf.spacing();
+    let gx = (x - ox) / sx;
+    let gy = (y - oy) / sy;
+    let h = 0.5;
+    let dx = (hf.sample_bilinear(gx + h, gy) - hf.sample_bilinear(gx - h, gy)) / sx as f32;
+    let dy = (hf.sample_bilinear(gx, gy + h) - hf.sample_bilinear(gx, gy - h)) / sy as f32;
+    (f64::from(dx), f64::from(dy))
 }
 
 fn target_height(hf: &HeightField, cx: f64, cy: f64) -> f32 {
@@ -579,7 +750,10 @@ fn shape_distance(brush: &Brush, u: f64, v: f64, radius: f64, aspect: f64) -> f6
             let sides = brush.sides.clamp(3, 24) as f64;
             let sector = (theta * sides / std::f64::consts::TAU).fract().abs();
             let boundary = radius * (std::f64::consts::PI / sides).cos()
-                / ((sector * std::f64::consts::TAU / sides).cos().abs().max(0.2));
+                / ((sector * std::f64::consts::TAU / sides)
+                    .cos()
+                    .abs()
+                    .max(0.2));
             (u * u + v * v).sqrt() / boundary.max(1e-6)
         }
     }
@@ -637,7 +811,11 @@ fn neighbourhood_average(hf: &HeightField, x: usize, y: usize) -> f32 {
             }
         }
     }
-    if count > 0.0 { sum / count } else { hf.get(x, y) }
+    if count > 0.0 {
+        sum / count
+    } else {
+        hf.get(x, y)
+    }
 }
 
 fn sample_bilinear(hf: &HeightField, x: f64, y: f64) -> f32 {
@@ -651,7 +829,6 @@ fn sample_bilinear(hf: &HeightField, x: f64, y: f64) -> f32 {
 fn rotate(x: f64, y: f64, cos: f64, sin: f64) -> (f64, f64) {
     (cos * x + sin * y, -sin * x + cos * y)
 }
-
 
 fn write_region(hf: &mut HeightField, region: BrushRegion, values: &[f32]) {
     for (row, y) in (region.y0..region.y1).enumerate() {
@@ -805,6 +982,86 @@ mod tests {
         // Midpoint must have been stamped by the interpolated path.
         assert!(hf.get(30, 30) > 101.0);
         assert!(stroke.finish(&hf).is_some());
+    }
+
+    fn sloped() -> HeightField {
+        let mut heights = Vec::with_capacity(129 * 129);
+        for _y in 0..129 {
+            for x in 0..129 {
+                heights.push(100.0 + x as f32 * 1.2);
+            }
+        }
+        HeightField::new(129, 129, 2.0, 2.0, heights).unwrap()
+    }
+
+    #[test]
+    fn terrace_creates_flat_benches_and_steep_risers() {
+        let mut hf = sloped();
+        let brush = Brush {
+            mode: BrushMode::Terrace,
+            radius_m: 100.0,
+            strength: 1.0,
+            hardness: 1.0,
+            roughness: 0.0,
+            aa_samples: 1,
+            falloff: Falloff::Constant,
+            step_m: 6.0,
+            bench_ratio: 0.85,
+            bench_variation: 0.0,
+            ..Brush::default()
+        };
+        apply_stamp(&mut hf, &brush, 128.0, 128.0, Seed::new(2), 0).unwrap();
+        let row = 64;
+        let heights: Vec<f32> = (40..100).map(|x| hf.get(x, row)).collect();
+        let mut flat = 0;
+        let mut steep = 0;
+        for pair in heights.windows(2) {
+            let delta = (pair[1] - pair[0]).abs();
+            if delta < 0.4 {
+                flat += 1;
+            } else if delta > 2.0 {
+                steep += 1;
+            }
+        }
+        assert!(flat >= 5, "expected flat benches, deltas={heights:?}");
+        assert!(steep >= 2, "expected risers, deltas={heights:?}");
+        // And the result is no longer a simple constant slope.
+        let before = 1.2;
+        let flat_count = heights
+            .windows(2)
+            .filter(|pair| (pair[1] - pair[0] - before).abs() < 0.2)
+            .count();
+        assert!(flat_count < heights.len() - 2);
+    }
+
+    #[test]
+    fn columnar_groove_cuts_periodic_channels_across_the_slope() {
+        let mut hf = sloped();
+        let brush = Brush {
+            mode: BrushMode::Groove,
+            radius_m: 100.0,
+            strength: 4.0,
+            hardness: 1.0,
+            roughness: 0.0,
+            aa_samples: 1,
+            falloff: Falloff::Constant,
+            column_spacing_m: 10.0,
+            column_jitter: 0.0,
+            ..Brush::default()
+        };
+        apply_stamp(&mut hf, &brush, 128.0, 128.0, Seed::new(3), 0).unwrap();
+        // Across the slope (constant base height in y), only the columns
+        // create relief.
+        let column: Vec<f32> = (45..95).map(|y| hf.get(64, y)).collect();
+        let min = column.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = column.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min > 1.0, "grooves too shallow: {min}..{max}");
+        // The channels are periodic: at least three local minima along 100 m.
+        let minima = column
+            .windows(3)
+            .filter(|w| w[1] < w[0] && w[1] < w[2])
+            .count();
+        assert!(minima >= 3, "expected periodic channels, got {minima}");
     }
 
     #[test]

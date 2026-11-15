@@ -18,8 +18,10 @@ barre de lecture restent visibles dans tous les onglets.
 
 Le bouton de lecture n'est plus caché dans un panneau : une **barre de
 transport** est ancrée en bas du viewport. `Lire`, `Pause`, `Début`, curseur de
-temps, image précédente/suivante, boucle et bascule **Design / Caméra** y sont
-toujours accessibles. `Espace` produit le même effet que `Lire`.
+temps, image précédente/suivante, boucle, bascule **Design / Caméra** et
+**Timeline** y sont toujours accessibles. `Espace` produit le même effet que
+`Lire`. La lecture se fait dans la vue courante : en design, le frustum et les
+marqueurs s'animent sans quitter l'orbite ; en caméra, le cadre rendu défile.
 
 ## 1. Tracé
 
@@ -38,10 +40,14 @@ n'est dessinée qu'en **vue design**, jamais dans le rendu.
 
 ### Éditer
 
-- Cliquez une clé dans le viewport ou dans la liste pour la sélectionner.
+- Trois méthodes équivalentes : le gizmo, le **glisser libre** dans le viewport,
+  ou les champs numériques X/Y/Z de la clé sélectionnée.
 - Tirez la flèche **X** (rouge), **Y** (vert) ou **Z** (bleu) du gizmo. Le
-  déplacement se fait dans le plan de l'écran le long de l'axe ; l'aimant
-  arrondit la coordonnée en mètres (`0` = libre).
+  déplacement se fait dans le plan de l'écran le long de l'axe.
+- **Glisser libre** (coché par défaut) : cliquez-glissez directement sur une clé
+  pour la déplacer dans le plan de l'écran, sans viser un axe. `Maj` la contraint
+  à la verticale, `Alt` la pose sur le terrain sous le curseur.
+- L'aimant arrondit les coordonnées en mètres (`0` = libre).
 - **Insérer au temps courant** ajoute une clé sur la courbe sans déplacer les
   voisines ; **Suppr** ou **Retour arrière** supprime la clé sélectionnée.
 - **Poignées automatiques** remet les poignées de la clé à zéro ; la courbe est
@@ -49,6 +55,30 @@ n'est dessinée qu'en **vue design**, jamais dans le rendu.
 - **Cadrer le tracé** replace la caméra de conception sur le chemin ; le pivot d'orbite devient le centre du tracé, pas celui du terrain.
 - Faire tourner la caméra de conception, zoomer ou recadrer n'altère jamais le
   tracé ; on revient à la vue caméra avec `Caméra`.
+
+### Timeline et graph editor
+
+![Timeline, pistes œil/cible et barre de transport](screenshots/animation_timeline.png)
+
+![Graph editor : roulis du profil actif](screenshots/animation_graph.png)
+
+Le dock **Timeline** (bouton dans la barre de transport) reste visible dans les
+quatre onglets.
+
+- **Pistes** : deux lignes, Œil et Cible, avec un losange par clé. Cliquer-glisser
+  un losange change son **temps** ; double-cliquer sur une piste insère une clé à
+  cet instant ; clic droit supprime la clé.
+- **Graphe** : choisissez un canal (`Œil X/Y/Z`, `Cible X/Y/Z`, `Vitesse`,
+  `Roulis`). Les positions se lisent sur la courbe Bézier réelle ; vitesse et
+  roulis viennent de la simulation du profil actif. Sur un canal de position,
+  glisser un point change à la fois son temps et sa valeur.
+- Molette = zoom temporel, **Tout voir** recadre, `Aimant` arrondit les temps
+  (et les valeurs en mode graphe).
+- Les clés situées au-delà de la fin restent affichées après le repère `fin` :
+  elles ne sont simplement pas jouées.
+
+Le graph editor est le lien direct entre les réglages de profil et l'animation :
+changez de profil, la courbe de roulis se met à jour sans retoucher le tracé.
 
 ### Point de vue
 
@@ -79,6 +109,12 @@ sature et prend du retard ; le bouton **Ajuster la durée** applique la durée
 conseillée calculée depuis la longueur du tracé. Une durée plus longue ne
 déplace aucune clé : elle change seulement la vitesse de parcours.
 
+La **durée est indépendante de la dernière clé**. Après quelques essais, on peut
+la raccourcir sous le dernier point : les clés au-delà de la fin sont conservées
+mais ne sont plus jouées, et un bouton **Étendre à la dernière clé** rétablit la
+fin du tracé. Le curseur de durée est logarithmique, avec un champ numérique fin
+et un double-clic pour revenir à 8 s.
+
 ## 3. Profil de vol
 
 Le profil ne change pas le tracé ; il change la façon dont le corps le suit.
@@ -103,7 +139,7 @@ clearance), ce qui aide à ressentir le véhicule.
   adaptées au profil (90 % de sa vitesse max) et cadre la caméra dessus. C'est
   le moyen le plus rapide de voir la différence entre un drone et un
   hélicoptère en quelques secondes.
-- **Tester ce profil** passe en vue caméra et lance la lecture depuis le début.
+- **Tester ce profil** lance la lecture dans la vue courante (design ou caméra).
 
 Le rig utilise un ressort critique avec **avance de vitesse** : l'accélération
 demandée est bornée par axe, puis le jerk est limité. Sans cette avance, le
@@ -113,8 +149,10 @@ lieu de la suivre.
 
 ## 4. Lecture et export
 
-- Curseur de temps : place la caméra à l'instant choisi.
-- `Lire` / `Pause`, boucle, vitesse de lecture (0,05–4×).
+- Curseur de temps : place l'animation à l'instant choisi.
+- `Lire` / `Pause`, boucle, vitesse de lecture (0,05–4×). La lecture est
+  **design** par défaut : l'orbite ne bouge pas, le frustum et les marqueurs
+  avancent. `Caméra` bascule sur le cadre rendu.
 - **Vue design** : tracé, cible, viseur et gizmo.
 - **Vue caméra** : le cadre réel ; orbiter ou zoomer depuis cette vue repasse
   automatiquement en design.
@@ -129,6 +167,34 @@ L'encodeur MP4 reste disponible en CLI :
 ```bash
 vistaforge anim render scene.vfproj frames/ --video clip.mp4
 ```
+
+### Trajectoire seule, sans géométrie
+
+Un survol se réutilise dans un autre projet ou dans Blender sans exporter le
+terrain :
+
+```bash
+vistaforge rig export scene.vfproj survol.glb     # caméra + cible animées
+vistaforge rig export scene.vfproj survol.vfcam   # rig complet, JSON
+vistaforge rig export scene.vfproj survol.csv     # une ligne par image
+vistaforge rig import autre_terrain.vfproj survol.vfcam --out rejoue.vfproj
+```
+
+Le GLB s'importe dans Blender avec `File > Import > glTF 2.0` ou, mieux, avec
+l'addon `bridge/blender/vistaforge_io.py` qui sélectionne la caméra, remplace la
+caméra statique et règle `fps`/plage d'images. L'addon sait aussi réexporter la
+caméra et l'empty cible vers `.vfcam` pour revenir dans VistaForge. Détails :
+[`FICHIERS.md`](FICHIERS.md).
+
+### Lissage de visée et parois
+
+- Les modes **Avance** et **Manuel** appliquent un filtre du premier ordre sur
+  la cible (`lissage visée` + `look_lag` du corps + 60 ms). Le viseur ne saute
+  plus d'une image à l'autre.
+- L'évitement de parois utilise un champ de distance lissé, une accélération
+  bornée et filtrée, et **ignore les falaises survolées** (comparaison avec le
+  sommet du mur le plus proche). Le roulis est limité à 120°/s et son objectif
+  est filtré : plus de roulis frénétique le long d'une paroi détaillée.
 
 ## CLI
 
@@ -152,10 +218,11 @@ vistaforge anim render scene.vfproj frames/ --fps 24
 - Les poignées Bézier manuelles ne sont pas encore éditables dans le viewport ;
   le bouton **Poignées automatiques** remet la clé sélectionnée à zéro et laisse
   la courbe lissée par ses voisines.
-- L'évitement de parois est un champ de distance 2D : il ignore l'altitude. Sur
-  un tracé qui survole une falaise, il peut pousser latéralement alors qu'il n'y
-  a pas de collision. Les comparaisons de profils désactivent cet évitement pour
-  isoler la dynamique.
+- L'évitement de parois teste la hauteur du sommet du mur le plus proche : un
+  survol au-dessus du plateau n'est plus poussé latéralement. Il reste un champ
+  2D, donc une arche ou un surplomb n'est pas modélisé.
+- Les poignées Bézier restent éditables numériquement (ease et handles) mais pas
+  par un graphe de poignées dédié ; la timeline édite les temps et les valeurs.
 - Le DOF est calculé par le rig et appliqué par Blender/Cycles ; le rasteriseur
   CPU ne le rasterise pas.
 

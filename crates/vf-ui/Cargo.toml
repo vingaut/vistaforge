@@ -12,6 +12,7 @@ eframe.workspace = true
 glam.workspace = true
 image.workspace = true
 vf-core = { path = "../vf-core" }
+vf-export = { path = "../vf-export" }
 vf-geology = { path = "../vf-geology" }
 vf-flight = { path = "../vf-flight" }
 vf-io = { path = "../vf-io" }

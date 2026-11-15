@@ -25,8 +25,9 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   orthogonaux et colonnes basaltiques, dissolution karstique, détail de surface. Presets
   `granite`, `basalt`, `limestone`, `sandstone`, `schist`, `chalk`, `volcanic`, appliqués avant
   l'érosion et relus par le shader pour colorer les bancs.
-- **DEM** : lecture/écriture du format DEM legacy v1, import, export, round-trip sémantique,
-  palette préservée, session opaque.
+- **DEM et heightmaps** : GeoTIFF 32 bits géoréférencé (lecture/écriture), ESRI ASCII
+  Grid, DEM legacy v1, import PNG/TIFF/JPEG avec plage d'altitude ou sidecar JSON,
+  export PNG 16 bits + world file, masque nodata.
 - **Scène** : caméra look-at/orbite, ciel crépusculaire avec étoiles, canyon creusé,
   soleil (azimut boussole 0 = sud, 90 = ouest), palettes
   alpine/désert/volcanique/côtier/canyon/lunaire/île, brume, exposition, contraste, saturation.
@@ -51,23 +52,30 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Falaises** : pass `cliffs` (ladder de hauteurs à poids lissé) et modificateur `recast_cliff`
   (Poisson/SOR) pour des parois verticales continues.
 - **Animation de caméra (Vol et Animation fusionnés)** : un seul espace, quatre étapes —
-  tracé Bézier éditable au clic et au gizmo X/Y/Z, point de vue matérialisé dans le viewport
-  de conception, durée/fps/optique, profils de vol drone/oiseau/hélicoptère/dirigeable/
-  chasseur/manuel avec comparaison des trajectoires, barre de lecture toujours accessible
-  et export PNG. Séquences au flou de mouvement 180° via le CLI. Voir
-  [`docs/ANIMATION.md`](docs/ANIMATION.md) et [`docs/RIG.md`](docs/RIG.md).
+  tracé Bézier éditable au clic, au gizmo X/Y/Z, par **glisser libre** ou au numérique,
+  point de vue matérialisé dans le viewport de conception, **timeline + graph editor**
+  (canaux X/Y/Z, vitesse, roulis), keyframing, durée indépendante des clés, lecture
+  **en vue design** ou caméra, profils de vol drone/oiseau/hélicoptère/dirigeable/chasseur/
+  manuel avec comparaison des trajectoires, export PNG/MP4 et **trajectoire seule**
+  (`.vfcam`, GLB caméra, CSV) réimportable dans Blender et VistaForge. Voir
+  [`docs/ANIMATION.md`](docs/ANIMATION.md), [`docs/RIG.md`](docs/RIG.md) et
+  [`docs/FICHIERS.md`](docs/FICHIERS.md).
 - **Aide contextuelle** : une fiche tutorielle s'ouvre dans le viewport au survol d'un
   espace, d'un panneau ou d'un réglage, avec une capture annotée et l'effet attendu sur la
   scène d'exemple. 25 fiches, sommaire, épinglage, `F1`. Voir [`docs/AIDE.md`](docs/AIDE.md).
-- **Formats** : `.vfproj` (ZIP + RON + heightmap f32, schéma **v6**), PNG, ESRI ASCII Grid, DEM.
+- **Formats** : `.vfproj` (ZIP + RON + heightmap f32, schéma **v6**), GeoTIFF, ESRI ASCII
+  Grid, PNG/JPEG, DEM legacy, GLB, `.vfcam`, CSV.
 - **Bridge Blender** : export GLB (maillage détaillé, UV0 planaire + UV1 atlas de boîte,
   couleurs de sommets, 7 matériaux, caméra, soleil), sidecar JSON, textures cuites
   (albédo, normale, masques, heightfield 16 bits), script d'import, Smart UV/remesh optionnels
-  et rendu Cycles/OptiX headless. Voir [`docs/BLENDER.md`](docs/BLENDER.md).
+  et rendu Cycles/OptiX headless. **Trajectoires caméra/cible** exportées en GLB/`.vfcam`
+  et réimportées dans Blender via l'addon `bridge/blender/vistaforge_io.py` (aller-retour
+  validé Blender 5.3). Voir [`docs/BLENDER.md`](docs/BLENDER.md) et
+  [`docs/FICHIERS.md`](docs/FICHIERS.md).
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 188 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 219 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|
@@ -147,7 +155,9 @@ le CLI et le MCP partagent le même noyau que l'interface.
 | [`docs/SPEC_REALISME.md`](docs/SPEC_REALISME.md) | contrat et faisabilité de la session réalisme |
 | [`docs/RIG.md`](docs/RIG.md) | rig caméra, presets de dynamique, contraintes, CLI |
 | [`docs/MONDE.md`](docs/MONDE.md) | tailles, tuilage, seamless, modes de rendu, évitement |
-| [`docs/BLENDER.md`](docs/BLENDER.md) | bridge Blender, GLB, textures cuites, rendu Cycles |
+| [`docs/BLENDER.md`](docs/BLENDER.md) | bridge Blender, GLB, textures cuites, rendu Cycles, addon trajectoires |
+| [`docs/FICHIERS.md`](docs/FICHIERS.md) | GeoTIFF, DEM, heightmaps, GLB, `.vfcam`, CSV, addon Blender |
+| [`docs/SCULPT.md`](docs/SCULPT.md) | sculpture fine, terrasses, orgues, densification, aperçu |
 | [`docs/GPU.md`](docs/GPU.md) | viewport wgpu/Vulkan, aperçu GPU, limites |
 | [`docs/BUILD.md`](docs/BUILD.md) | build Ubuntu/Windows, release, dépannage |
 | [`docs/PLAN_ADDITIONS.md`](docs/PLAN_ADDITIONS.md) | audit 2026, veille, modèle géologique, module de vol, UI en barres |
@@ -157,7 +167,8 @@ le CLI et le MCP partagent le même noyau que l'interface.
 Cette version 0.2 couvre les phases 0–1 du plan, l'essentiel de la phase 2 (matériaux par bandes,
 ciel, eau, nuages 2.5D), le cœur MCP de la phase 5 et une UI de travail. Restent notamment :
 les waypoints de vol libres, la végétation instanciée, le mode 8 bits, les nuages volumétriques,
-le path tracing et le packaging. Le bridge Blender est en place (export aller) ; le retour
+le path tracing et le packaging. Le bridge Blender est en place (géométrie aller,
+trajectoires aller-retour) ; le retour
 Blender → VistaForge n'est pas prévu.
 
 ## Légal

@@ -9,7 +9,10 @@ description = "Legacy and modern file formats for VistaForge"
 [dependencies]
 image.workspace = true
 ron.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tiff.workspace = true
 vf-core = { path = "../vf-core" }
 zip.workspace = true
 

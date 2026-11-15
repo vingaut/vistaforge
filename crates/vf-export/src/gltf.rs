@@ -63,7 +63,10 @@ impl GltfScene {
     }
 
     pub fn triangle_count(&self) -> usize {
-        self.primitives.iter().map(|(_, indices)| indices.len() / 3).sum()
+        self.primitives
+            .iter()
+            .map(|(_, indices)| indices.len() / 3)
+            .sum()
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -97,16 +100,8 @@ impl GltfScene {
         self.validate()?;
         let mut builder = Builder::default();
 
-        let positions: Vec<[f32; 3]> = self
-            .positions
-            .iter()
-            .map(|p| [p[0], p[2], -p[1]])
-            .collect();
-        let normals: Vec<[f32; 3]> = self
-            .normals
-            .iter()
-            .map(|n| [n[0], n[2], -n[1]])
-            .collect();
+        let positions: Vec<[f32; 3]> = self.positions.iter().map(|p| [p[0], p[2], -p[1]]).collect();
+        let normals: Vec<[f32; 3]> = self.normals.iter().map(|n| [n[0], n[2], -n[1]]).collect();
 
         let (pos_accessor, _) = builder.add_vec3(&positions, true)?;
         let (normal_accessor, _) = builder.add_vec3(&normals, false)?;

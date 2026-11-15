@@ -45,7 +45,20 @@ pub struct RigSimulation<'a> {
     cam_pos: DVec3,
     cam_vel: DVec3,
     roll: f32,
+    /// Smoothed aim point. The authored target is the goal; this state is what
+    /// the camera actually looks at, so the rig never snaps between frames.
     target_pos: DVec3,
+    /// Low-passed lateral acceleration used for banking.
+    bank_target: f32,
+    /// Low-passed wall-avoidance acceleration. Applying it as a bounded
+    /// acceleration instead of a per-step velocity kick is what keeps the
+    /// horizon stable along a jagged cliff.
+    avoid_acc: DVec3,
+    /// Low-passed ground-clearance floor.
+    floor_smooth: f64,
+    /// Velocity at the previous step, used to derive the real lateral
+    /// acceleration for banking.
+    prev_vel: DVec3,
     shake: Noise,
     clearance: ClearanceField,
 }
@@ -60,6 +73,9 @@ impl<'a> RigSimulation<'a> {
         let target_pos = initial_target(rig, eye_pos);
         let cam_pos = eye_pos + DVec3::from_array(rig.optics.offset);
         let dt = (1.0 / 120.0f32).min(1.0 / rig.fps.max(1) as f32);
+        let clearance = ClearanceField::new(hf);
+        let floor_smooth = Self::terrain_height_in(hf, eye_pos.x, eye_pos.y) as f64
+            + f64::from(rig.constraints.ground_clearance_m);
         Ok(Self {
             rig,
             hf,
@@ -72,8 +88,12 @@ impl<'a> RigSimulation<'a> {
             cam_vel: DVec3::ZERO,
             roll: 0.0,
             target_pos,
+            bank_target: 0.0,
+            avoid_acc: DVec3::ZERO,
+            floor_smooth,
+            prev_vel: DVec3::ZERO,
             shake: Noise::new(seed.derive("rig-shake")),
-            clearance: ClearanceField::new(hf),
+            clearance,
         })
     }
 
@@ -107,6 +127,11 @@ impl<'a> RigSimulation<'a> {
         self.cam_vel = DVec3::ZERO;
         self.roll = 0.0;
         self.target_pos = initial_target(self.rig, self.eye_pos);
+        self.bank_target = 0.0;
+        self.avoid_acc = DVec3::ZERO;
+        self.prev_vel = DVec3::ZERO;
+        self.floor_smooth = Self::terrain_height_in(self.hf, self.eye_pos.x, self.eye_pos.y) as f64
+            + f64::from(self.rig.constraints.ground_clearance_m);
     }
 
     fn step(&mut self, dt: f32) {
@@ -116,18 +141,20 @@ impl<'a> RigSimulation<'a> {
         let path_velocity = path_derivative(&self.rig.eye, t);
         let body = &self.rig.body;
         let omega = response_omega(body.preset);
-        // Position spring + velocity feed-forward. Without the feed-forward
-        // term the spring fights the path velocity, and once the acceleration
-        // clamp saturates the damping collapses: fast bodies then limit-cycle
-        // around the curve instead of following it.
-        let accel = (desired - self.eye_pos) * (omega * omega)
-            + (path_velocity - self.eye_vel) * (2.0 * omega);
-        // Manual mode ignores the spring and follows the authored path exactly.
+        self.prev_vel = self.eye_vel;
+
         if body.manual_orientation {
+            // Manual mode ignores the spring and follows the authored path
+            // exactly. Constraints still correct the result below.
             self.eye_vel = path_velocity;
             self.eye_pos = desired;
             self.eye_acc = DVec3::ZERO;
         } else {
+            // Position spring + velocity feed-forward. Without the feed-forward
+            // term the spring fights the path velocity, and once the
+            // acceleration clamp saturates the damping collapses.
+            let accel = (desired - self.eye_pos) * (omega * omega)
+                + (path_velocity - self.eye_vel) * (2.0 * omega);
             let forward = if self.eye_vel.length_squared() > 0.01 {
                 self.eye_vel.normalize()
             } else {
@@ -166,6 +193,25 @@ impl<'a> RigSimulation<'a> {
             self.eye_acc = next;
             self.eye_vel += next * dt64;
             self.eye_vel *= (-f64::from(body.drag) * dt64).exp();
+
+            // Wall avoidance is an acceleration, not an instantaneous velocity
+            // kick. It is low-passed so a cliff edge cannot make the camera
+            // flick left and right at the simulation rate.
+            if self.rig.constraints.enabled && self.rig.constraints.wall_avoidance {
+                let desired_avoid = self.wall_avoidance_acceleration();
+                let softness = f64::from(self.rig.constraints.softness.clamp(0.0, 1.0));
+                let tau = 0.18 + softness * 0.55;
+                let alpha = 1.0 - (-dt64 / tau).exp();
+                self.avoid_acc += (desired_avoid - self.avoid_acc) * alpha;
+                let max_avoid = 12.0;
+                if self.avoid_acc.length() > max_avoid {
+                    self.avoid_acc = self.avoid_acc.normalize() * max_avoid;
+                }
+                self.eye_vel += self.avoid_acc * dt64;
+            } else {
+                self.avoid_acc = DVec3::ZERO;
+            }
+
             let speed = self.eye_vel.length();
             if speed > f64::from(body.max_speed_mps) {
                 self.eye_vel *= f64::from(body.max_speed_mps) / speed;
@@ -173,48 +219,37 @@ impl<'a> RigSimulation<'a> {
             self.eye_pos += self.eye_vel * dt64;
         }
 
-        // Ground / reference-plane clearance. `apply_eye` and friends decide
-        // which objects are constrained.
+        // Terrain floor: sampled a little ahead, then low-passed. The old code
+        // clamped the eye to the exact bilinear height of the cell it was
+        // over, so the camera followed every facet of the mesh.
         if self.rig.constraints.enabled && self.rig.constraints.apply_eye {
-            let floor =
-                self.floor_at(self.eye_pos) + f64::from(self.rig.constraints.ground_clearance_m);
-            if self.eye_pos.z < floor {
-                let soft = f64::from(self.rig.constraints.softness);
-                self.eye_pos.z += (floor - self.eye_pos.z) * (1.0 - soft);
-                if self.eye_vel.z < 0.0 {
-                    self.eye_vel.z *= soft;
-                }
-            }
+            self.apply_eye_floor(dt64);
         }
 
-        if self.rig.constraints.enabled && self.rig.constraints.wall_avoidance {
-            let threshold = f64::from(self.rig.constraints.wall_distance_m);
-            if threshold > 0.0 {
-                let ahead =
-                    self.eye_pos + self.eye_vel * f64::from(self.rig.constraints.look_ahead_s);
-                let (distance, gx, gy) = self.clearance.sample(ahead.x, ahead.y);
-                let distance = f64::from(distance);
-                if distance.is_finite() && distance < threshold {
-                    let pressure = (1.0 - distance / threshold).clamp(0.0, 1.0);
-                    let push_dir =
-                        DVec3::new(f64::from(gx), f64::from(gy), 0.0).normalize_or_zero();
-                    // A lateral acceleration of up to ~18 m/s², applied to the
-                    // velocity: smooth enough for a drone, strong enough to
-                    // read as an evasive move.
-                    let push = push_dir * (18.0 * pressure * dt64);
-                    self.eye_vel += push;
-                    if self.rig.constraints.apply_camera {
-                        self.cam_pos += push * dt64;
-                    }
-                }
+        // Aim smoothing. Fixed and Path targets are authored exactly and must
+        // not lag; the velocity-based modes get a first-order filter whose time
+        // constant combines the user smoothing, the body look lag and a small
+        // floor. This is what stops the aim (and therefore the horizon) from
+        // snapping when the avoidance vector changes.
+        let desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
+        let target_tau = match self.rig.target.mode {
+            TargetMode::Fixed | TargetMode::Path => 0.0,
+            TargetMode::EyeAhead | TargetMode::Manual => {
+                0.06 + f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2
+                    + f64::from(self.rig.body.look_lag.clamp(0.0, 2.0)) * 0.5
             }
+        };
+        if target_tau > 0.0 {
+            let alpha = 1.0 - (-dt64 / target_tau).exp();
+            self.target_pos += (desired_target - self.target_pos) * alpha;
+        } else {
+            self.target_pos = desired_target;
         }
-
-        self.target_pos = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
         if self.rig.constraints.enabled && self.rig.constraints.apply_target {
-            let floor =
-                self.floor_at(self.target_pos) + f64::from(self.rig.constraints.ground_clearance_m);
-            self.target_pos.z = self.target_pos.z.max(floor);
+            let floor = self.floor_at(self.target_pos);
+            if self.target_pos.z < floor {
+                self.target_pos.z = floor;
+            }
         }
 
         // Camera spring.
@@ -230,30 +265,120 @@ impl<'a> RigSimulation<'a> {
             self.cam_vel = self.eye_vel;
         }
         if self.rig.constraints.enabled && self.rig.constraints.apply_camera {
-            let floor =
-                self.floor_at(self.cam_pos) + f64::from(self.rig.constraints.ground_clearance_m);
-            self.cam_pos.z = self.cam_pos.z.max(floor);
+            let floor = self.floor_smooth;
+            if self.cam_pos.z < floor {
+                self.cam_pos.z = floor;
+            }
         }
 
-        // Bank from lateral acceleration, then the explicit roll and shake.
+        let actual_acc = ((self.eye_vel - self.prev_vel) / dt64).clamp_length_max(120.0);
+
+        // Bank from the *real* lateral acceleration of the eye. The previous
+        // code used the spring command, which spikes when the avoidance vector
+        // changes direction; a second low-pass plus a roll-rate limit keeps the
+        // horizon calm on rugged cliffs.
         let forward = (self.target_pos - self.cam_pos).normalize_or_zero();
         let right = forward.cross(UP).normalize_or_zero();
-        let lateral = self.eye_acc.dot(right) as f32;
-        let bank_target = if self.rig.body.preset == AircraftPreset::Manual {
+        let lateral = actual_acc.dot(right) as f32;
+        let bank_goal = if self.rig.body.preset == AircraftPreset::Manual {
             0.0
         } else {
             (lateral.atan2(9.81) * self.rig.body.bank_gain)
                 .to_degrees()
                 .clamp(-self.rig.body.max_bank_deg, self.rig.body.max_bank_deg)
         };
-        let response = self.rig.body.roll_response.max(0.1) * dt;
-        self.roll += (bank_target - self.roll) * response.min(1.0);
+        let bank_alpha = 1.0 - (-dt / 0.16).exp();
+        self.bank_target += (bank_goal - self.bank_target) * bank_alpha.min(1.0);
+        let response = (self.rig.body.roll_response.max(0.1) * dt).min(1.0);
+        let mut delta = (self.bank_target - self.roll) * response;
+        let max_rate = 120.0 * dt;
+        delta = delta.clamp(-max_rate, max_rate);
+        self.roll += delta;
 
         self.time = t;
     }
 
+    /// Desired avoidance acceleration for the next step, in m/s².
+    fn wall_avoidance_acceleration(&self) -> DVec3 {
+        let threshold = f64::from(self.rig.constraints.wall_distance_m);
+        if threshold <= 0.0 {
+            return DVec3::ZERO;
+        }
+        let ahead = self.eye_pos + self.eye_vel * f64::from(self.rig.constraints.look_ahead_s);
+        let (distance, gx, gy, wall_top) = self.clearance.sample(ahead.x, ahead.y);
+        let distance = f64::from(distance);
+        if !distance.is_finite() || distance >= threshold {
+            return DVec3::ZERO;
+        }
+        // A cliff is only an obstacle while the eye is below its top. Flying
+        // above the plateau must not trigger a lateral push.
+        if f64::from(wall_top).is_finite()
+            && self.eye_pos.z > f64::from(wall_top) + threshold * 0.5 + 5.0
+        {
+            return DVec3::ZERO;
+        }
+        let pressure = ((threshold - distance) / threshold).clamp(0.0, 1.0);
+        // Deadband: tiny clearance variations near the threshold do nothing.
+        let pressure = ((pressure - 0.05) / 0.95).clamp(0.0, 1.0);
+        if pressure <= 0.0 {
+            return DVec3::ZERO;
+        }
+        let dir = DVec3::new(f64::from(gx), f64::from(gy), 0.0).normalize_or_zero();
+        if dir.length_squared() < 0.5 {
+            return DVec3::ZERO;
+        }
+        let max_lateral = f64::from(self.rig.body.accel_lateral_mps2).clamp(6.0, 18.0)
+            * (0.45 + 0.55 * f64::from(self.rig.constraints.softness.clamp(0.0, 1.0)));
+        dir * (max_lateral * pressure * pressure)
+    }
+
+    /// Smooth vertical floor correction for the eye.
+    fn apply_eye_floor(&mut self, dt: f64) {
+        let clearance = f64::from(self.rig.constraints.ground_clearance_m);
+        let current = Self::terrain_height_in(self.hf, self.eye_pos.x, self.eye_pos.y) as f64;
+        // Look a fraction of a second ahead so a rising slope is anticipated
+        // instead of hit at full speed.
+        let ahead = self.eye_pos + self.eye_vel * 0.55;
+        let ahead_ground = Self::terrain_height_in(self.hf, ahead.x, ahead.y) as f64;
+        let mut target = current.max(ahead_ground) + clearance;
+        if self.rig.constraints.reference_enabled {
+            target = target.max(f64::from(self.rig.constraints.reference_z_m) + clearance);
+        }
+        // Rise quickly, settle slowly: this removes the per-facet roller
+        // coaster without letting the camera tunnel into a wall.
+        let tau = if target > self.floor_smooth {
+            0.22
+        } else {
+            1.4
+        };
+        let alpha = 1.0 - (-dt / tau).exp();
+        self.floor_smooth += (target - self.floor_smooth) * alpha;
+        if self.eye_pos.z < self.floor_smooth {
+            let correction = (self.floor_smooth - self.eye_pos.z).min(40.0 * dt);
+            self.eye_pos.z += correction;
+            // Critically-damped vertical approach: no bounce, no hard snap.
+            let desired_vz = ((self.floor_smooth - self.eye_pos.z) * 7.0).clamp(0.0, 60.0);
+            let alpha_v = 1.0 - (-dt * 9.0).exp();
+            self.eye_vel.z += (desired_vz - self.eye_vel.z) * alpha_v;
+            // Last-resort guard against a one-step tunnel.
+            let hard = Self::terrain_height_in(self.hf, self.eye_pos.x, self.eye_pos.y) as f64
+                + clearance * 0.5;
+            if self.eye_pos.z < hard {
+                self.eye_pos.z = hard;
+            }
+        }
+    }
+
+    fn terrain_height_in(hf: &HeightField, x: f64, y: f64) -> f32 {
+        let (ox, oy) = hf.origin();
+        let (sx, sy) = hf.spacing();
+        let gx = (x - ox) / sx;
+        let gy = (y - oy) / sy;
+        hf.sample_bilinear(gx, gy)
+    }
+
     fn floor_at(&self, p: DVec3) -> f64 {
-        let mut floor = f64::from(self.terrain_height(p.x, p.y));
+        let mut floor = f64::from(Self::terrain_height_in(self.hf, p.x, p.y));
         if self.rig.constraints.reference_enabled {
             floor = floor.max(f64::from(self.rig.constraints.reference_z_m));
         }
@@ -321,7 +446,7 @@ impl<'a> RigSimulation<'a> {
         };
         let altitude =
             self.eye_pos.z - f64::from(self.terrain_height(self.eye_pos.x, self.eye_pos.y));
-        let (wall_distance, _, _) = self.clearance.sample(self.eye_pos.x, self.eye_pos.y);
+        let (wall_distance, _, _, _) = self.clearance.sample(self.eye_pos.x, self.eye_pos.y);
         RigSample {
             camera: Camera {
                 position: self.cam_pos,
@@ -344,6 +469,147 @@ impl<'a> RigSimulation<'a> {
             fstop: self.rig.optics.fstop,
             dof_enabled: self.rig.optics.dof_enabled,
         }
+    }
+}
+
+/// A precomputed, time-addressable rig animation.
+///
+/// [`RigSimulation`] is stateful: sampling `t` always advances from zero, so a
+/// UI that calls it once per displayed frame does O(t) work per frame. At
+/// 120 Hz a 50-second clip is 6,000 steps per frame — the playback stutters and
+/// scrubbing feels broken. A track simulates the clip once at 60 Hz and
+/// interpolates between stored samples, which keeps playback and timeline
+/// scrubbing O(1).
+#[derive(Debug, Clone)]
+pub struct RigTrack {
+    times: Vec<f32>,
+    samples: Vec<RigSample>,
+    duration_s: f32,
+}
+
+impl RigTrack {
+    pub fn new(rig: &CameraRig, hf: &HeightField, seed: Seed) -> Result<Self, String> {
+        let mut simulation = RigSimulation::new(rig, hf, seed)?;
+        Self::from_simulation(rig, &mut simulation)
+    }
+
+    fn from_simulation(
+        rig: &CameraRig,
+        simulation: &mut RigSimulation<'_>,
+    ) -> Result<Self, String> {
+        let duration = rig.duration_s.clamp(0.1, 600.0);
+        // 60 Hz is enough for smooth playback and remains cheap to rebuild
+        // while a key is dragged.
+        let hz = 60.0f32;
+        let count = (duration * hz).ceil().max(1.0) as usize;
+        let mut times: Vec<f32> = Vec::with_capacity(count + 1);
+        let mut samples: Vec<RigSample> = Vec::with_capacity(count + 1);
+        for index in 0..=count {
+            let t = (index as f32 / hz).min(duration);
+            if times.last().is_some_and(|last| (t - *last).abs() < 1e-6) {
+                continue;
+            }
+            times.push(t);
+            samples.push(simulation.sample_at(t));
+        }
+        Ok(Self {
+            times,
+            samples,
+            duration_s: duration,
+        })
+    }
+
+    pub fn duration_s(&self) -> f32 {
+        self.duration_s
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Sample the track at `time_s`, interpolating between the two stored
+    /// samples. The result is deterministic and exactly hits stored keys.
+    pub fn sample_at(&self, time_s: f32) -> RigSample {
+        if self.samples.is_empty() {
+            return RigSimulation::empty_sample();
+        }
+        let t = time_s.clamp(0.0, self.duration_s);
+        let index = match self.times.binary_search_by(|probe| probe.total_cmp(&t)) {
+            Ok(index) => return self.samples[index].clone(),
+            Err(index) => index.saturating_sub(1).min(self.samples.len() - 1),
+        };
+        let next = (index + 1).min(self.samples.len() - 1);
+        if next == index {
+            return self.samples[index].clone();
+        }
+        let span = (self.times[next] - self.times[index]).max(1e-6);
+        let fraction = ((t - self.times[index]) / span).clamp(0.0, 1.0);
+        lerp_sample(&self.samples[index], &self.samples[next], fraction)
+    }
+
+    /// Eye positions along the simulated path, for the design overlay.
+    pub fn trail(&self, points: usize) -> Vec<[f64; 3]> {
+        let points = points.max(2);
+        let mut trail = Vec::with_capacity(points);
+        for index in 0..points {
+            let t = self.duration_s * index as f32 / (points - 1) as f32;
+            trail.push(self.sample_at(t).eye.to_array());
+        }
+        trail
+    }
+}
+
+impl RigSimulation<'_> {
+    fn empty_sample() -> RigSample {
+        RigSample {
+            camera: Camera::default(),
+            eye: DVec3::ZERO,
+            target: DVec3::ZERO,
+            speed_mps: 0.0,
+            bank_deg: 0.0,
+            roll_deg: 0.0,
+            altitude_agl_m: 0.0,
+            wall_distance_m: f32::INFINITY,
+            focus_distance_m: 1.0,
+            fstop: 1.0,
+            dof_enabled: false,
+        }
+    }
+}
+
+fn lerp_sample(a: &RigSample, b: &RigSample, f: f32) -> RigSample {
+    let f64f = f64::from(f);
+    let lerp_dvec = |a: DVec3, b: DVec3| a + (b - a) * f64f;
+    let lerp_f32 = |a: f32, b: f32| a + (b - a) * f;
+    RigSample {
+        camera: Camera {
+            position: lerp_dvec(a.camera.position, b.camera.position),
+            target: lerp_dvec(a.camera.target, b.camera.target),
+            up: lerp_dvec(a.camera.up, b.camera.up).normalize_or_zero(),
+            fov_y_deg: lerp_f32(a.camera.fov_y_deg, b.camera.fov_y_deg),
+            near: lerp_f32(a.camera.near, b.camera.near),
+            far: lerp_f32(a.camera.far, b.camera.far),
+            focal_length_mm: a.camera.focal_length_mm,
+            sensor_mm: a.camera.sensor_mm,
+        },
+        eye: lerp_dvec(a.eye, b.eye),
+        target: lerp_dvec(a.target, b.target),
+        speed_mps: lerp_f32(a.speed_mps, b.speed_mps),
+        bank_deg: lerp_f32(a.bank_deg, b.bank_deg),
+        roll_deg: lerp_f32(a.roll_deg, b.roll_deg),
+        altitude_agl_m: lerp_f32(a.altitude_agl_m, b.altitude_agl_m),
+        wall_distance_m: if a.wall_distance_m.is_finite() && b.wall_distance_m.is_finite() {
+            lerp_f32(a.wall_distance_m, b.wall_distance_m)
+        } else {
+            a.wall_distance_m.max(b.wall_distance_m)
+        },
+        focus_distance_m: lerp_f32(a.focus_distance_m, b.focus_distance_m),
+        fstop: lerp_f32(a.fstop, b.fstop),
+        dof_enabled: a.dof_enabled,
     }
 }
 
@@ -374,11 +640,8 @@ fn response_omega(preset: AircraftPreset) -> f64 {
 }
 
 fn initial_target(rig: &CameraRig, eye: DVec3) -> DVec3 {
-    match rig.target.mode {
-        TargetMode::Fixed => DVec3::from_array(rig.target.fixed),
-        TargetMode::Path => sample_path(&rig.target.path, 0.0),
-        TargetMode::EyeAhead | TargetMode::Manual => eye + DVec3::new(0.0, 400.0, -120.0),
-    }
+    let velocity = path_derivative(&rig.eye, 0.0);
+    sample_target(rig, 0.0, eye, velocity)
 }
 
 fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DVec3 {
@@ -386,19 +649,31 @@ fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DVec3 
         TargetMode::Fixed => DVec3::from_array(rig.target.fixed),
         TargetMode::Path => sample_path(&rig.target.path, t),
         TargetMode::EyeAhead => {
-            let ahead = if velocity.length_squared() > 0.01 {
-                velocity * f64::from(rig.target.lead_s)
+            let speed = velocity.length();
+            let direction = if speed > 0.05 {
+                velocity / speed
             } else {
-                DVec3::new(0.0, 400.0, -100.0)
+                path_derivative(&rig.eye, t).normalize_or_zero()
             };
-            eye + ahead
+            let direction = if direction.length_squared() < 0.5 {
+                DVec3::Y
+            } else {
+                direction
+            };
+            // A pure velocity*time lead collapses to a few metres at low
+            // speed and makes the camera stare at its own nose. Keep a
+            // readable minimum look-ahead distance.
+            let distance = (speed * f64::from(rig.target.lead_s)).max(45.0);
+            eye + direction * distance
         }
         TargetMode::Manual => {
-            if velocity.length_squared() > 0.01 {
-                eye + velocity.normalize() * 500.0
+            let speed = velocity.length();
+            let direction = if speed > 0.05 {
+                velocity / speed
             } else {
-                eye + DVec3::new(0.0, 400.0, -100.0)
-            }
+                path_derivative(&rig.eye, t).normalize_or_zero()
+            };
+            eye + direction * 500.0
         }
     }
 }
@@ -759,6 +1034,116 @@ mod tests {
         rig.duration_s = recommended;
         assert!((required_speed_mps(&rig) - cruise_speed_mps(&rig.body)).abs() < 1.0);
         assert!((duration_pressure(&rig) - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn rig_track_is_time_addressable_and_deterministic() {
+        let hf = field();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        preset_path(&mut rig, &hf, "orbit").unwrap();
+        let track = RigTrack::new(&rig, &hf, Seed::new(3)).unwrap();
+        assert!(track.len() > 60);
+        let a = track.sample_at(2.4);
+        let b = track.sample_at(2.4);
+        assert_eq!(a.camera.position, b.camera.position);
+        assert!(a.camera.position.is_finite());
+        let start = track.sample_at(-4.0);
+        assert_eq!(start.eye, sample_path(&rig.eye, 0.0));
+        let direct = sample_rig(&rig, &hf, Seed::new(3), 2.4).unwrap();
+        assert!(
+            (a.camera.position - direct.camera.position).length() < 2.0,
+            "track interpolation drifted: {} vs {}",
+            a.camera.position,
+            direct.camera.position
+        );
+    }
+
+    #[test]
+    fn target_look_ahead_keeps_a_readable_distance_at_low_speed() {
+        let hf = field();
+        let mut rig = CameraRig::preset("airship").unwrap();
+        preset_path(&mut rig, &hf, "orbit").unwrap();
+        rig.target.mode = TargetMode::EyeAhead;
+        rig.target.lead_s = 0.0;
+        let sample = sample_rig(&rig, &hf, Seed::new(1), 1.0).unwrap();
+        assert!((sample.target - sample.eye).length() >= 40.0);
+    }
+
+    #[test]
+    fn flying_above_a_cliff_does_not_trigger_wall_avoidance() {
+        let mut heights = vec![0.0f32; 129 * 129];
+        for y in 0..129 {
+            for x in 64..129 {
+                heights[y * 129 + x] = 160.0;
+            }
+        }
+        let hf = HeightField::new(129, 129, 10.0, 10.0, heights).unwrap();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [560.0, 640.0, 100.0]),
+            vf_core::PathKey::new(16.0, [720.0, 640.0, 100.0]),
+        ];
+        rig.duration_s = 16.0;
+        rig.target.mode = TargetMode::EyeAhead;
+        rig.constraints.enabled = true;
+        rig.constraints.apply_eye = true;
+        rig.constraints.wall_avoidance = true;
+        rig.constraints.wall_distance_m = 80.0;
+        rig.constraints.ground_clearance_m = 20.0;
+        let low = sample_rig(&rig, &hf, Seed::new(1), 8.0).unwrap();
+        rig.eye.keys[0].position[2] = 400.0;
+        rig.eye.keys[1].position[2] = 400.0;
+        let high = sample_rig(&rig, &hf, Seed::new(1), 8.0).unwrap();
+        // The straight line reaches x=640 at t=8. The low path must be held
+        // back before the cliff; the high path flies over it untouched.
+        assert!(
+            low.eye.x < high.eye.x - 1.0,
+            "low path should be pushed away from the cliff: low x={} (d={}), high x={}",
+            low.eye.x,
+            low.wall_distance_m,
+            high.eye.x
+        );
+        assert!(
+            (high.eye.x - 640.0).abs() < 4.0,
+            "high eye x={}",
+            high.eye.x
+        );
+    }
+
+    #[test]
+    fn roll_stays_continuous_on_a_jagged_cliff() {
+        let mut heights = vec![0.0f32; 129 * 129];
+        for y in 0..129 {
+            for x in 0..129 {
+                heights[y * 129 + x] = if x > 60 {
+                    120.0 + ((x as f32) * 3.7).sin() * 25.0 + y as f32 * 0.2
+                } else {
+                    y as f32 * 0.4
+                };
+            }
+        }
+        let hf = HeightField::new(129, 129, 10.0, 10.0, heights).unwrap();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [200.0, 640.0, 220.0]),
+            vf_core::PathKey::new(8.0, [1000.0, 660.0, 230.0]),
+        ];
+        rig.duration_s = 8.0;
+        rig.constraints.enabled = true;
+        rig.constraints.wall_avoidance = true;
+        rig.constraints.wall_distance_m = 100.0;
+        rig.constraints.ground_clearance_m = 20.0;
+        let track = RigTrack::new(&rig, &hf, Seed::new(5)).unwrap();
+        let mut max_step = 0.0f32;
+        let mut previous = track.sample_at(0.0).roll_deg;
+        for index in 1..track.len() {
+            let t = track.duration_s() * index as f32 / track.len() as f32;
+            let roll = track.sample_at(t).roll_deg;
+            max_step = max_step.max((roll - previous).abs());
+            previous = roll;
+        }
+        // 120°/s at 60 Hz is 2° per stored sample; never a frame-to-frame flip.
+        assert!(max_step < 6.0, "roll jump of {max_step}° between samples");
     }
 
     #[test]

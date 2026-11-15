@@ -12,20 +12,22 @@ use std::time::{Duration, Instant};
 
 mod animation_editor;
 mod animation_ui;
+mod file_picker;
 mod gpu_view;
 mod help;
+mod timeline;
 mod view_gizmo;
 
 use eframe::egui;
 use glam::DVec3;
 use vf_core::{
-    AircraftPreset, Camera, CameraLink, ClassicParams, ErosionParams, HeightField, ModifierKind,
-    Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
+    AircraftPreset, Camera, CameraLink, ClassicParams, ErosionParams, HeightField, LegacyMeta,
+    ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
 };
 use vf_io::RgbaImage;
 use vf_render::{RenderOptions, RenderOutput, render_with_options};
-use vf_terrain::HillshadeParams;
 use vf_terrain::brush::{Brush, BrushMode, BrushShape, BrushUndo, Falloff, Stroke, Symmetry};
+use vf_terrain::{HillshadeParams, ResampleFilter};
 
 const PREVIEW_SIZE: (u32, u32) = (960, 540);
 /// Target duration of the quick interactive pass. The scale is learned from
@@ -51,10 +53,11 @@ enum Workspace {
     Light,
     Camera,
     Render,
+    Files,
 }
 
 impl Workspace {
-    const ALL: [Workspace; 12] = [
+    const ALL: [Workspace; 13] = [
         Self::Terrain,
         Self::Modifiers,
         Self::Rock,
@@ -67,6 +70,7 @@ impl Workspace {
         Self::Light,
         Self::Camera,
         Self::Render,
+        Self::Files,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -90,6 +94,7 @@ impl Workspace {
             Self::Light => "Lumière",
             Self::Camera => "Caméra",
             Self::Render => "Rendu",
+            Self::Files => "Fichiers",
         }
     }
 }
@@ -108,6 +113,8 @@ impl TerrainMode {
         }
     }
 }
+
+type BlenderExportResult = std::result::Result<(vf_export::ExportReport, Option<String>), String>;
 
 struct RenderTask {
     receiver: Receiver<std::result::Result<RenderOutput, String>>,
@@ -256,6 +263,7 @@ impl CaptureState {
             ("workspace_light", Workspace::Light),
             ("workspace_camera", Workspace::Camera),
             ("workspace_render", Workspace::Render),
+            ("workspace_files", Workspace::Files),
         ] {
             steps.push(CaptureStep {
                 name,
@@ -366,6 +374,9 @@ struct VistaForgeApp {
     sculpt_redo: Vec<BrushUndo>,
     sculpt_texture: Option<egui::TextureHandle>,
     sculpt_texture_dirty: bool,
+    sculpt_detail: u32,
+    sculpt_exaggeration: f32,
+    sculpt_contours_m: f32,
     sculpt_zoom: f32,
     sculpt_pan: egui::Vec2,
     sculpt_cursor: Option<(f64, f64)>,
@@ -391,6 +402,25 @@ struct VistaForgeApp {
     anim_loop: bool,
     anim_play_speed: f32,
     anim_last_play_preview: Instant,
+    anim_track: Option<(u64, vf_flight::rig::RigTrack)>,
+    anim_live_sample: Option<vf_flight::rig::RigSample>,
+    anim_timeline: timeline::TimelineState,
+    anim_curve_cache: Option<(u64, timeline::Curves)>,
+    anim_io_path: String,
+
+    files_status: String,
+    files_import_path: String,
+    files_export_path: String,
+    files_min_height: f32,
+    files_max_height: f32,
+    files_spacing: f32,
+    files_flip_y: bool,
+    files_nodata: f32,
+    blender_export_dir: String,
+    blender_subdivision: u32,
+    blender_export_animation: bool,
+    blender_export_task: Option<Receiver<BlenderExportResult>>,
+    file_picker: file_picker::FilePicker,
     anim_export_dir: String,
     anim_export_task: Option<AnimationExportTask>,
 
@@ -479,6 +509,9 @@ impl VistaForgeApp {
             sculpt_redo: Vec::new(),
             sculpt_texture: None,
             sculpt_texture_dirty: true,
+            sculpt_detail: 2,
+            sculpt_exaggeration: 1.8,
+            sculpt_contours_m: 5.0,
             sculpt_zoom: 1.0,
             sculpt_pan: egui::Vec2::ZERO,
             sculpt_cursor: None,
@@ -502,6 +535,26 @@ impl VistaForgeApp {
             anim_loop: true,
             anim_play_speed: 1.0,
             anim_last_play_preview: Instant::now(),
+            anim_track: None,
+            anim_live_sample: None,
+            anim_timeline: timeline::TimelineState::default(),
+            anim_curve_cache: None,
+            anim_io_path: "anim-out/flyover.glb".into(),
+            files_status:
+                "Import/export GeoTIFF, ASCII, DEM, heightmap PNG/JPEG, Blender GLB et animations."
+                    .into(),
+            files_import_path: "import/dem.tif".into(),
+            files_export_path: "export/dem.tif".into(),
+            files_min_height: 0.0,
+            files_max_height: 0.0,
+            files_spacing: 0.0,
+            files_flip_y: true,
+            files_nodata: -9999.0,
+            blender_export_dir: "blender-out".into(),
+            blender_subdivision: 2,
+            blender_export_animation: true,
+            blender_export_task: None,
+            file_picker: file_picker::FilePicker::default(),
             anim_export_dir: "anim-out".into(),
             anim_export_task: None,
             help: help::HelpState::new(),
@@ -537,6 +590,10 @@ impl VistaForgeApp {
             .and_then(|value| animation_ui::AnimTab::parse(&value))
         {
             app.anim_tab = tab;
+        }
+        if std::env::var("VISTAFORGE_TIMELINE_GRAPH").is_ok() {
+            app.anim_timeline.mode = timeline::Mode::Graph;
+            app.anim_timeline.channel = timeline::Channel::Bank;
         }
         if app.workspace == Workspace::Animation {
             app.ensure_animation_workspace(&cc.egui_ctx);
@@ -671,6 +728,16 @@ impl VistaForgeApp {
     /// CAD keyboard shortcuts: 1 face, 2 dessus, 3 droite, 0/Home défaut.
     fn view_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.text_edit_focused() {
+            return;
+        }
+        let save = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
+        if save {
+            self.save_project();
+            return;
+        }
+        let open = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::O));
+        if open {
+            self.open_project(ctx.clone());
             return;
         }
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
@@ -851,7 +918,11 @@ impl VistaForgeApp {
     }
 
     fn open_project(&mut self, ctx: egui::Context) {
-        let path = PathBuf::from(self.path_input.trim());
+        let path = normalized_project_path(&self.path_input);
+        if !path.exists() {
+            self.status = format!("Open failed: {} does not exist", path.display());
+            return;
+        }
         match vf_io::load_project(&path) {
             Ok(loaded) => {
                 self.project = loaded.project;
@@ -874,7 +945,7 @@ impl VistaForgeApp {
     }
 
     fn save_project(&mut self) {
-        let path = PathBuf::from(self.path_input.trim());
+        let path = normalized_project_path(&self.path_input);
         if path.as_os_str().is_empty() {
             self.status = "Save failed: empty path".into();
             return;
@@ -887,6 +958,7 @@ impl VistaForgeApp {
         ) {
             Ok(()) => {
                 self.project_path = Some(path.clone());
+                self.path_input = path.display().to_string();
                 self.status = format!("Saved {}", path.display());
             }
             Err(error) => self.status = format!("Save failed: {error}"),
@@ -2642,8 +2714,20 @@ impl VistaForgeApp {
         self.rig_time = self
             .rig_time
             .clamp(0.0, self.project.rig.duration_s.max(0.1));
-        if self.anim_view == animation_ui::AnimViewMode::Camera && self.anim_camera_dirty {
-            self.sample_animation_camera(ctx);
+        // While a key is being dragged, rebuilding the track on every mouse
+        // move would simulate the whole clip at 60 Hz. Keep the previous
+        // sample and rebuild once the drag ends.
+        if !self.anim_editor.is_dragging()
+            && !self.anim_timeline.is_dragging()
+            && (self.anim_view == animation_ui::AnimViewMode::Camera || self.anim_playing)
+            && self.anim_camera_dirty
+        {
+            if self.anim_view == animation_ui::AnimViewMode::Camera {
+                self.sample_animation_camera(ctx);
+            } else if let Some(sample) = self.animation_sample_at(self.rig_time) {
+                self.anim_live_sample = Some(sample);
+                self.anim_camera_dirty = false;
+            }
         }
     }
 
@@ -2652,31 +2736,54 @@ impl VistaForgeApp {
         self.anim_profile_cache = None;
         self.anim_compare_cache = None;
         self.anim_camera_dirty = true;
+        self.anim_live_sample = None;
         self.project.mark_modified();
     }
 
+    /// Return the precomputed animation track for the current rig revision.
+    /// Building it is O(duration) and is therefore cached; sampling is O(1).
+    fn animation_track(&mut self) -> Option<&vf_flight::rig::RigTrack> {
+        let stale = self
+            .anim_track
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != self.anim_revision);
+        if stale {
+            match vf_flight::rig::RigTrack::new(
+                &self.project.rig,
+                &self.heightfield,
+                self.project.seed,
+            ) {
+                Ok(track) => self.anim_track = Some((self.anim_revision, track)),
+                Err(error) => {
+                    self.rig_status = format!("Animation : {error}");
+                    self.anim_track = None;
+                    return None;
+                }
+            }
+        }
+        self.anim_track.as_ref().map(|(_, track)| track)
+    }
+
+    fn animation_sample_at(&mut self, time: f32) -> Option<vf_flight::rig::RigSample> {
+        self.animation_track().map(|track| track.sample_at(time))
+    }
+
     fn sample_animation_camera(&mut self, ctx: &egui::Context) -> bool {
-        match vf_flight::rig::sample_rig(
-            &self.project.rig,
-            &self.heightfield,
-            self.project.seed,
-            self.rig_time,
-        ) {
-            Ok(sample) => {
-                self.project.camera = sample.camera;
+        let sampled = self.animation_sample_at(self.rig_time);
+        match sampled {
+            Some(sample) => {
+                self.project.camera = sample.camera.clone();
                 self.sync_orbit_from_camera();
                 self.rig_status = format!(
                     "t={:.2}s · {:.0} m sol · gîte {:.1}° · vitesse {:.1} m/s",
                     self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
                 );
+                self.anim_live_sample = Some(sample);
                 self.anim_camera_dirty = false;
                 self.refresh_camera_preview(ctx);
                 true
             }
-            Err(error) => {
-                self.rig_status = format!("Animation : {error}");
-                false
-            }
+            None => false,
         }
     }
 
@@ -2685,7 +2792,6 @@ impl VistaForgeApp {
             self.anim_design_camera = Some(self.project.camera.clone());
         }
         self.anim_view = animation_ui::AnimViewMode::Camera;
-        self.anim_playing = false;
         self.sample_animation_camera(ctx);
     }
 
@@ -2704,15 +2810,28 @@ impl VistaForgeApp {
     fn toggle_animation_play(&mut self, ctx: &egui::Context) {
         if self.anim_playing {
             self.anim_playing = false;
-            self.refresh_camera_preview(ctx);
+            if self.anim_view == animation_ui::AnimViewMode::Camera {
+                self.refresh_camera_preview(ctx);
+            }
             return;
         }
         let duration = self.project.rig.duration_s.max(0.1);
         if self.rig_time >= duration - 1e-4 {
             self.rig_time = 0.0;
         }
-        self.enter_animation_camera(ctx);
-        self.anim_view = animation_ui::AnimViewMode::Camera;
+        // Playback follows the current view. Design playback animates the
+        // frustum/markers without stealing the orbit camera; camera playback
+        // shows the rendered shot. This is the behaviour the transport bar
+        // promises (Design / Caméra are view modes, not playback modes).
+        if self.anim_view == animation_ui::AnimViewMode::Camera {
+            if let Some(sample) = self.animation_sample_at(self.rig_time) {
+                self.project.camera = sample.camera.clone();
+                self.sync_orbit_from_camera();
+                self.anim_live_sample = Some(sample);
+            }
+        } else if let Some(sample) = self.animation_sample_at(self.rig_time) {
+            self.anim_live_sample = Some(sample);
+        }
         self.anim_playing = true;
         self.anim_last_play_preview = Instant::now() - Duration::from_secs(1);
         ctx.request_repaint();
@@ -2733,23 +2852,29 @@ impl VistaForgeApp {
                 self.anim_playing = false;
             }
         }
-        if let Ok(sample) = vf_flight::rig::sample_rig(
-            &self.project.rig,
-            &self.heightfield,
-            self.project.seed,
-            self.rig_time,
-        ) {
-            self.project.camera = sample.camera;
-            self.rig_status = format!(
-                "Lecture t={:.2}s · {:.0} m sol · gîte {:.1}° · {:.1} m/s",
-                self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
-            );
+        if let Some(sample) = self.animation_sample_at(self.rig_time) {
+            let camera_view = self.anim_view == animation_ui::AnimViewMode::Camera;
+            if camera_view {
+                self.project.camera = sample.camera.clone();
+                self.rig_status = format!(
+                    "Lecture caméra t={:.2}s · {:.0} m sol · gîte {:.1}° · {:.1} m/s",
+                    self.rig_time, sample.altitude_agl_m, sample.bank_deg, sample.speed_mps
+                );
+            } else {
+                self.rig_status = format!(
+                    "Lecture design t={:.2}s · œil {:.0}, {:.0}, {:.0} · {:.1} m/s",
+                    self.rig_time, sample.eye.x, sample.eye.y, sample.eye.z, sample.speed_mps
+                );
+            }
+            self.anim_live_sample = Some(sample);
         } else {
             self.anim_playing = false;
         }
+        let camera_view = self.anim_view == animation_ui::AnimViewMode::Camera;
         if self.gpu_enabled && self.gpu.is_some() {
             ctx.request_repaint();
-        } else if self.render_task.is_none()
+        } else if camera_view
+            && self.render_task.is_none()
             && self.anim_last_play_preview.elapsed() >= Duration::from_millis(90)
         {
             self.preview_scale = self.interactive_scale;
@@ -2759,7 +2884,7 @@ impl VistaForgeApp {
         }
         if self.anim_playing {
             ctx.request_repaint_after(Duration::from_millis(16));
-        } else {
+        } else if camera_view {
             self.refresh_camera_preview(ctx);
         }
     }
@@ -2798,6 +2923,7 @@ impl VistaForgeApp {
                                 self.anim_playing = false;
                                 self.rig_time = 0.0;
                                 self.anim_camera_dirty = true;
+                                self.anim_live_sample = None;
                                 if self.anim_view == animation_ui::AnimViewMode::Camera {
                                     self.sample_animation_camera(ctx);
                                 }
@@ -2835,6 +2961,7 @@ impl VistaForgeApp {
                                 self.anim_playing = false;
                                 self.rig_time = time;
                                 self.anim_camera_dirty = true;
+                                self.anim_live_sample = None;
                                 if self.anim_view == animation_ui::AnimViewMode::Camera {
                                     self.sample_animation_camera(ctx);
                                 }
@@ -2852,6 +2979,7 @@ impl VistaForgeApp {
                             {
                                 self.anim_playing = false;
                                 self.rig_time = (self.rig_time - 1.0 / fps).max(0.0);
+                                self.anim_live_sample = None;
                                 if self.anim_view == animation_ui::AnimViewMode::Camera {
                                     self.sample_animation_camera(ctx);
                                 }
@@ -2863,6 +2991,7 @@ impl VistaForgeApp {
                             {
                                 self.anim_playing = false;
                                 self.rig_time = (self.rig_time + 1.0 / fps).min(duration);
+                                self.anim_live_sample = None;
                                 if self.anim_view == animation_ui::AnimViewMode::Camera {
                                     self.sample_animation_camera(ctx);
                                 }
@@ -2895,15 +3024,31 @@ impl VistaForgeApp {
                             {
                                 self.enter_animation_camera(ctx);
                             }
+                            if ui
+                                .selectable_label(self.anim_timeline.open, "Timeline")
+                                .on_hover_text("Afficher/masquer la timeline et le graph editor")
+                                .clicked()
+                            {
+                                self.anim_timeline.open = !self.anim_timeline.open;
+                            }
                         });
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "{} images · {:.2}s · {} fps · profil {}",
+                                    "{} images · {:.2}s · {} fps · profil {}{}",
                                     self.project.rig.frame_count(),
                                     duration,
                                     self.project.rig.fps,
-                                    self.project.rig.body.preset.label()
+                                    self.project.rig.body.preset.label(),
+                                    if self.anim_playing {
+                                        if self.anim_view == animation_ui::AnimViewMode::Design {
+                                            " · lecture design"
+                                        } else {
+                                            " · lecture caméra"
+                                        }
+                                    } else {
+                                        ""
+                                    }
                                 ))
                                 .size(9.5)
                                 .color(egui::Color32::from_rgb(150, 168, 186)),
@@ -3125,7 +3270,7 @@ impl VistaForgeApp {
                 .weak(),
             );
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Aimant");
             ui.add(
                 egui::DragValue::new(&mut self.anim_editor.snap_m)
@@ -3134,7 +3279,18 @@ impl VistaForgeApp {
                     .suffix(" m"),
             );
             ui.label(egui::RichText::new("0 = libre").small().weak());
+            ui.checkbox(&mut self.anim_editor.free_drag, "Glisser libre")
+                .on_hover_text(
+                    "Cliquer-glisser directement une clé la déplace dans le plan de l'écran. Maj = vertical, Alt = poser sur le terrain.",
+                );
         });
+        ui.label(
+            egui::RichText::new(
+                "Trois méthodes équivalentes : gizmo X/Y/Z, glisser libre dans le viewport, ou valeurs numériques ci-dessous.",
+            )
+            .small()
+            .weak(),
+        );
         ui.separator();
 
         // Target mode.
@@ -3408,7 +3564,6 @@ impl VistaForgeApp {
             Some(animation_ui::AnimSelection::EyeKey(index))
                 if !editing_target && index < self.project.rig.eye.keys.len() =>
             {
-                let duration = self.project.rig.duration_s.max(0.1);
                 if let Some(key) = self.project.rig.eye.keys.get_mut(index) {
                     ui.horizontal(|ui| {
                         ui.label("Temps");
@@ -3416,7 +3571,7 @@ impl VistaForgeApp {
                             .add(
                                 egui::DragValue::new(&mut key.time_s)
                                     .speed(0.02)
-                                    .range(0.0..=duration),
+                                    .range(0.0..=600.0),
                             )
                             .changed();
                     });
@@ -3450,7 +3605,6 @@ impl VistaForgeApp {
             Some(animation_ui::AnimSelection::TargetKey(index))
                 if editing_target && index < self.project.rig.target.path.keys.len() =>
             {
-                let duration = self.project.rig.duration_s.max(0.1);
                 if let Some(key) = self.project.rig.target.path.keys.get_mut(index) {
                     ui.horizontal(|ui| {
                         ui.label("Temps");
@@ -3458,7 +3612,7 @@ impl VistaForgeApp {
                             .add(
                                 egui::DragValue::new(&mut key.time_s)
                                     .speed(0.02)
-                                    .range(0.0..=duration),
+                                    .range(0.0..=600.0),
                             )
                             .changed();
                     });
@@ -3627,6 +3781,11 @@ impl VistaForgeApp {
         let time = self
             .rig_time
             .clamp(0.0, self.project.rig.duration_s.max(0.1));
+        self.insert_animation_key_at(target, time);
+    }
+
+    fn insert_animation_key_at(&mut self, target: bool, time: f32) {
+        let time = time.clamp(0.0, 600.0);
         let path = if target {
             &self.project.rig.target.path
         } else {
@@ -3696,6 +3855,85 @@ impl VistaForgeApp {
         }
     }
 
+    /// Build the speed/bank curves used by the graph editor. They come from
+    /// the same precomputed track as playback, so the graph reflects the
+    /// selected motion profile rather than an idealised curve.
+    fn ensure_timeline_curves(&mut self) {
+        let stale = self
+            .anim_curve_cache
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != self.anim_revision);
+        if !stale {
+            return;
+        }
+        let Some(track) = self.animation_track() else {
+            return;
+        };
+        let samples = 160;
+        let mut curves = timeline::Curves::default();
+        for index in 0..=samples {
+            let t = track.duration_s() * index as f32 / samples as f32;
+            let sample = track.sample_at(t);
+            curves.speed.push((t, sample.speed_mps));
+            curves.bank.push((t, sample.roll_deg));
+        }
+        self.anim_curve_cache = Some((self.anim_revision, curves));
+    }
+
+    fn animation_timeline_ui(&mut self, ui: &mut egui::Ui) {
+        let needs_curves = self.anim_timeline.mode == timeline::Mode::Graph
+            && matches!(
+                self.anim_timeline.channel,
+                timeline::Channel::Speed | timeline::Channel::Bank
+            );
+        if needs_curves && !self.anim_timeline.is_dragging() {
+            self.ensure_timeline_curves();
+        }
+        let blocked = self.help.last_rect().union(self.anim_transport_rect);
+        let duration = self.project.rig.duration_s;
+        let curves = if needs_curves {
+            self.anim_curve_cache.as_ref().map(|(_, curves)| curves)
+        } else {
+            None
+        };
+        let output = timeline::show(
+            ui,
+            &mut self.anim_timeline,
+            timeline::TimelineInput {
+                rig: &mut self.project.rig,
+                selection: &mut self.anim_editor.selection,
+                time: &mut self.rig_time,
+                edit_target: &mut self.anim_edit_target,
+                duration,
+                curves,
+                blocked,
+            },
+        );
+        if let Some(seek) = output.seek {
+            self.rig_time = seek.clamp(0.0, self.project.rig.duration_s.max(0.1));
+            self.anim_playing = false;
+            self.anim_live_sample = None;
+            if self.anim_view == animation_ui::AnimViewMode::Camera {
+                self.anim_camera_dirty = true;
+            }
+            ui.ctx().request_repaint();
+        }
+        if let Some((target, time)) = output.insert {
+            self.rig_time = time.clamp(0.0, 600.0);
+            self.insert_animation_key_at(target, self.rig_time);
+        }
+        if output.delete {
+            self.delete_animation_key();
+        }
+        if output.changed {
+            self.mark_animation_changed();
+            ui.ctx().request_repaint();
+        }
+        if let Some(status) = output.status {
+            self.rig_status = status;
+        }
+    }
+
     fn anim_timing_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.label(
             egui::RichText::new(
@@ -3704,15 +3942,24 @@ impl VistaForgeApp {
             .small(),
         );
         let mut changed = false;
-        changed |= param_f32(
-            ui,
-            "Durée",
-            "s",
-            &mut self.project.rig.duration_s,
-            0.1,
-            600.0,
-            8.0,
-        );
+        changed |= duration_param(ui, &mut self.project.rig.duration_s);
+        let key_end = self.project.rig.eye.duration_s();
+        if key_end > self.project.rig.duration_s + 1e-3 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Des clés dépassent la fin ({key_end:.2} s > {:.2} s) : elles restent conservées mais ne sont pas jouées.",
+                        self.project.rig.duration_s
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(255, 196, 110)),
+                );
+                if ui.button("Étendre à la dernière clé").clicked() {
+                    self.project.rig.duration_s = key_end.clamp(0.1, 600.0);
+                    changed = true;
+                }
+            });
+        }
         changed |= param_u32(ui, "Images/s", "", &mut self.project.rig.fps, 1, 120, 24);
         let frames = self.project.rig.frame_count();
         ui.label(
@@ -4060,7 +4307,7 @@ impl VistaForgeApp {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add(egui::Button::new(egui::RichText::new("Tester ce profil").strong()))
-                .on_hover_text("Passe en vue caméra et lance la lecture depuis le début")
+                .on_hover_text("Lance la lecture dans la vue courante (design ou caméra)")
                 .clicked()
             {
                 self.rig_time = 0.0;
@@ -4211,6 +4458,7 @@ impl VistaForgeApp {
         {
             self.anim_playing = false;
             self.rig_time = time;
+            self.anim_live_sample = None;
             self.enter_animation_camera(ctx);
         }
         ui.horizontal_wrapped(|ui| {
@@ -4319,6 +4567,21 @@ impl VistaForgeApp {
             )
             .small()
             .weak(),
+        );
+        ui.separator();
+        let animation_io = egui::CollapsingHeader::new("Trajectoire seule (sans géométrie)")
+            .default_open(false)
+            .show(ui, |ui| {
+                self.animation_io_ui(ui);
+            });
+        self.help.register(
+            animation_io.header_response.rect.union(
+                animation_io
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
         );
     }
 
@@ -4493,6 +4756,7 @@ impl VistaForgeApp {
                 Workspace::Light => self.light_ui(ui),
                 Workspace::Camera => self.camera_ui(ui),
                 Workspace::Render => self.render_ui(ui, ctx),
+                Workspace::Files => self.files_ui(ui, ctx),
             }
             ui.add_space(12.0);
             let stats = self.heightfield.stats();
@@ -4508,6 +4772,620 @@ impl VistaForgeApp {
                 .weak(),
             );
         });
+    }
+
+    fn apply_file_pick(&mut self, pick: file_picker::PickResult) {
+        let path = pick.path.display().to_string();
+        match pick.target {
+            file_picker::PickTarget::Project => self.path_input = path,
+            file_picker::PickTarget::ImportTerrain => self.files_import_path = path,
+            file_picker::PickTarget::ExportTerrain => self.files_export_path = path,
+            file_picker::PickTarget::Animation => self.anim_io_path = path,
+            file_picker::PickTarget::BlenderDir => self.blender_export_dir = path,
+        }
+    }
+
+    fn files_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Échange avec le reste de la chaîne : GeoTIFF/ASCII pour les DEM, PNG/JPEG pour les heightmaps, glTF/GLB pour Blender, .vfcam/GLB/CSV pour les trajectoires seules.",
+            )
+            .small(),
+        );
+
+        let project_header = egui::CollapsingHeader::new("Projet")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Fichier");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.path_input)
+                            .desired_width(ui.available_width() - 40.0)
+                            .hint_text("monde.vfproj"),
+                    );
+                    if ui.small_button("…").clicked() {
+                        let current = self.path_input.clone();
+                        self.file_picker.open(
+                            file_picker::PickTarget::Project,
+                            file_picker::PickMode::OpenFile,
+                            &current,
+                            &["vfproj"],
+                        );
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Nouveau").clicked() {
+                        self.new_project(ctx.clone());
+                    }
+                    if ui.button("Ouvrir").clicked() {
+                        self.open_project(ctx.clone());
+                    }
+                    if ui.button("Enregistrer").clicked() {
+                        self.save_project();
+                    }
+                    if let Some(path) = &self.project_path {
+                        ui.label(
+                            egui::RichText::new(format!("actuel : {}", path.display()))
+                                .small()
+                                .weak(),
+                        );
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Format de projet .vfproj : ZIP + manifeste RON + heightmap f32 (aucune perte). Ctrl+S / Ctrl+O.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        self.help.register(
+            project_header.header_response.rect.union(
+                project_header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
+        );
+
+        let import_header = egui::CollapsingHeader::new("Importer un terrain")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Fichier");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.files_import_path)
+                            .desired_width(ui.available_width() - 40.0)
+                            .hint_text("heightmap.png · dem.tif · terrain.asc · vieux.dem"),
+                    );
+                    if ui.small_button("…").clicked() {
+                        let current = self.files_import_path.clone();
+                        self.file_picker.open(
+                            file_picker::PickTarget::ImportTerrain,
+                            file_picker::PickMode::OpenFile,
+                            &current,
+                            &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "asc", "grd", "dem", "r32"],
+                        );
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Élévation");
+                    ui.add(
+                        egui::DragValue::new(&mut self.files_min_height)
+                            .speed(10.0)
+                            .prefix("min "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.files_max_height)
+                            .speed(10.0)
+                            .prefix("max "),
+                    );
+                    ui.label(egui::RichText::new("0/0 = auto").small().weak());
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Cellule");
+                    ui.add(
+                        egui::DragValue::new(&mut self.files_spacing)
+                            .speed(0.5)
+                            .range(0.0..=10_000.0)
+                            .suffix(" m"),
+                    );
+                    ui.label(egui::RichText::new("0 = géoréf. / 1 m").small().weak());
+                    ui.checkbox(&mut self.files_flip_y, "Lignes nord en haut");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "PNG/JPEG : image en niveaux de gris, la plage min/max ou le sidecar JSON fixe l'altitude. TIFF : GeoTIFF 32 bits lu avec son géoréférencement.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if ui
+                    .add_sized([ui.available_width(), 28.0], egui::Button::new("Importer le terrain"))
+                    .clicked()
+                {
+                    self.files_import_terrain(ctx);
+                }
+            });
+        self.help.register(
+            import_header.header_response.rect.union(
+                import_header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
+        );
+
+        let export_header = egui::CollapsingHeader::new("Exporter le terrain")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Fichier");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.files_export_path)
+                            .desired_width(ui.available_width() - 40.0)
+                            .hint_text("dem.tif · dem.asc · height.png · height.jpg · vieux.dem"),
+                    );
+                    if ui.small_button("…").clicked() {
+                        let current = self.files_export_path.clone();
+                        self.file_picker.open(
+                            file_picker::PickTarget::ExportTerrain,
+                            file_picker::PickMode::SaveFile,
+                            &current,
+                            &[
+                                "tif", "tiff", "asc", "grd", "png", "jpg", "jpeg", "dem", "r32",
+                            ],
+                        );
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Nodata");
+                    ui.add(egui::DragValue::new(&mut self.files_nodata).speed(1.0));
+                    ui.label(
+                        egui::RichText::new(
+                            ".tif = GeoTIFF float · .asc = ESRI · .png = 16 bits + JSON",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 28.0],
+                        egui::Button::new("Exporter le terrain"),
+                    )
+                    .clicked()
+                {
+                    self.files_export_terrain();
+                }
+            });
+        self.help.register(
+            export_header.header_response.rect.union(
+                export_header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
+        );
+
+        let blender_header = egui::CollapsingHeader::new("Blender")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Dossier");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.blender_export_dir)
+                            .desired_width(ui.available_width() - 40.0),
+                    );
+                    if ui.small_button("…").clicked() {
+                        let current = self.blender_export_dir.clone();
+                        self.file_picker.open(
+                            file_picker::PickTarget::BlenderDir,
+                            file_picker::PickMode::Directory,
+                            &current,
+                            &[],
+                        );
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Subdivision");
+                    ui.add(
+                        egui::DragValue::new(&mut self.blender_subdivision)
+                            .speed(1.0)
+                            .range(1..=4),
+                    );
+                    ui.checkbox(
+                        &mut self.blender_export_animation,
+                        "camera_animation.glb",
+                    )
+                    .on_hover_text(
+                        "Écrit aussi la trajectoire caméra/cible dans le dossier, pour l'addon Blender.",
+                    );
+                    ui.label(
+                        egui::RichText::new("scene.glb + textures + scene.json")
+                            .small()
+                            .weak(),
+                    );
+                });
+                if self.blender_export_task.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Export Blender en cours…");
+                    });
+                } else if ui
+                    .add_sized(
+                        [ui.available_width(), 28.0],
+                        egui::Button::new("Exporter pour Blender (GLB)"),
+                    )
+                    .clicked()
+                {
+                    self.files_export_blender();
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Importer dans Blender : File > Import > glTF 2.0, ou l'addon bridge/blender/vistaforge_io.py pour les trajectoires.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        self.help.register(
+            blender_header.header_response.rect.union(
+                blender_header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
+        );
+
+        let animation_header = egui::CollapsingHeader::new("Animation caméra / cible")
+            .default_open(true)
+            .show(ui, |ui| {
+                self.animation_io_ui(ui);
+            });
+        self.help.register(
+            animation_header.header_response.rect.union(
+                animation_header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Export,
+        );
+
+        ui.separator();
+        ui.label(
+            egui::RichText::new(&self.files_status)
+                .size(10.5)
+                .color(egui::Color32::from_rgb(180, 200, 220)),
+        );
+    }
+
+    fn files_import_terrain(&mut self, ctx: &egui::Context) {
+        let path = PathBuf::from(self.files_import_path.trim());
+        if path.as_os_str().is_empty() {
+            self.files_status = "Import : chemin vide".into();
+            return;
+        }
+        let options = vf_io::TerrainImportOptions {
+            heightmap: vf_io::HeightmapOptions {
+                min_height: self.files_min_height,
+                max_height: self.files_max_height,
+                spacing_m: f64::from(self.files_spacing),
+                origin: [0.0, 0.0],
+                flip_y: self.files_flip_y,
+            },
+            dem_spacing_m: if self.files_spacing > 0.0 {
+                self.files_spacing
+            } else {
+                30.0
+            },
+        };
+        match vf_io::import_terrain(&path, options) {
+            Ok(imported) => {
+                let (sx, sy) = imported.heightfield.spacing();
+                let stem = path
+                    .file_stem()
+                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                self.project.source = imported.source;
+                self.project.meta.name = if stem.is_empty() {
+                    "Terrain importé".into()
+                } else {
+                    stem.clone()
+                };
+                self.project.legacy = Some(LegacyMeta {
+                    dem_title: stem,
+                    dem_comment: imported.description.clone(),
+                    ..LegacyMeta::default()
+                });
+                self.heightfield = imported.heightfield;
+                self.project.sync_terrain(&self.heightfield);
+                self.project.camera = vf_scene::auto_frame(
+                    &self.heightfield,
+                    f64::from(self.project.render.width)
+                        / f64::from(self.project.render.height.max(1)),
+                );
+                self.project_path = None;
+                self.path_input = path.with_extension("vfproj").display().to_string();
+                self.anim_framed = false;
+                self.anim_editor.selection = None;
+                self.sculpt_undo.clear();
+                self.sculpt_redo.clear();
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.anim_track = None;
+                self.anim_live_sample = None;
+                self.anim_trail_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_profile_cache = None;
+                self.anim_curve_cache = None;
+                self.sync_from_project();
+                self.sync_orbit_from_camera();
+                self.mark_dirty();
+                self.start_render(ctx.clone(), false);
+                self.files_status = format!(
+                    "Importé {}×{} · {:.2} m/cellule · {}",
+                    self.heightfield.width(),
+                    self.heightfield.height(),
+                    (sx + sy) * 0.5,
+                    imported.description
+                );
+                self.status = self.files_status.clone();
+            }
+            Err(error) => {
+                self.files_status = format!("Import impossible : {error}");
+                self.status = self.files_status.clone();
+            }
+        }
+    }
+
+    fn files_export_terrain(&mut self) {
+        let path = PathBuf::from(self.files_export_path.trim());
+        if path.as_os_str().is_empty() {
+            self.files_status = "Export : chemin vide".into();
+            return;
+        }
+        match vf_io::export_terrain(
+            &path,
+            &self.heightfield,
+            &self.project.meta.name,
+            Some(self.files_nodata),
+        ) {
+            Ok(report) => {
+                self.files_status = format!(
+                    "Exporté {}×{} en {} ({}){}",
+                    report.width,
+                    report.height,
+                    report.path.display(),
+                    report.format,
+                    if report.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", report.warnings.join(" "))
+                    }
+                );
+            }
+            Err(error) => self.files_status = format!("Export impossible : {error}"),
+        }
+        self.status = self.files_status.clone();
+    }
+
+    fn files_export_blender(&mut self) {
+        let out_dir = PathBuf::from(self.blender_export_dir.trim());
+        if out_dir.as_os_str().is_empty() {
+            self.files_status = "Blender : dossier vide".into();
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let project = self.project.clone();
+        let heightfield = self.heightfield.clone();
+        let subdivision = self.blender_subdivision;
+        let include_animation = self.blender_export_animation;
+        let status_dir = out_dir.display().to_string();
+        std::thread::spawn(move || {
+            let options = vf_export::ExportOptions {
+                subdivision,
+                ..vf_export::ExportOptions::default()
+            };
+            let result = vf_export::export_project(&project, &heightfield, &out_dir, &options)
+                .map_err(|error| error.to_string())
+                .map(|report| {
+                    let mut note = None;
+                    if include_animation && project.rig.enabled {
+                        match vf_export::export_animation(
+                            &out_dir.join("camera_animation.glb"),
+                            &project.rig,
+                            &heightfield,
+                            project.seed,
+                        ) {
+                            Ok(animation) => {
+                                note = Some(format!(
+                                    "trajectoire {} images → camera_animation.glb",
+                                    animation.frames
+                                ));
+                            }
+                            Err(error) => {
+                                note = Some(format!("trajectoire non exportée : {error}"));
+                            }
+                        }
+                    }
+                    (report, note)
+                });
+            let _ = sender.send(result);
+        });
+        self.blender_export_task = Some(receiver);
+        self.files_status = format!("Export Blender vers {status_dir}…");
+    }
+
+    fn poll_blender_export(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.blender_export_task else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok((report, note))) => {
+                self.files_status = format!(
+                    "Blender : {} sommets, {} triangles, {} matériaux → {}{}",
+                    report.vertices,
+                    report.triangles,
+                    report.materials,
+                    report.glb.display(),
+                    note.map_or_else(String::new, |note| format!(" · {note}"))
+                );
+                self.blender_export_task = None;
+            }
+            Ok(Err(error)) => {
+                self.files_status = format!("Blender : échec — {error}");
+                self.blender_export_task = None;
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(120));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.files_status = "Blender : export interrompu".into();
+                self.blender_export_task = None;
+            }
+        }
+    }
+
+    fn animation_io_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Fichier");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.anim_io_path)
+                    .desired_width(ui.available_width() - 40.0)
+                    .hint_text("flyover.glb · flyover.vfcam · flyover.csv"),
+            );
+            if ui.small_button("…").clicked() {
+                let current = self.anim_io_path.clone();
+                self.file_picker.open(
+                    file_picker::PickTarget::Animation,
+                    file_picker::PickMode::OpenFile,
+                    &current,
+                    &["glb", "vfcam", "json", "csv"],
+                );
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Exporter GLB")
+                .on_hover_text("Caméra + cible animées, pour Blender ou tout outil glTF")
+                .clicked()
+            {
+                self.export_animation_with_extension("glb");
+            }
+            if ui
+                .button("Exporter .vfcam")
+                .on_hover_text("Rig complet VistaForge, sans géométrie")
+                .clicked()
+            {
+                self.export_animation_with_extension("vfcam");
+            }
+            if ui
+                .button("Exporter CSV")
+                .on_hover_text("Une ligne par image, lisible par tableur")
+                .clicked()
+            {
+                self.export_animation_with_extension("csv");
+            }
+            if ui
+                .button("Importer une trajectoire")
+                .on_hover_text("Remplace le rig courant, conserve le terrain")
+                .clicked()
+            {
+                self.import_animation_file();
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Le GLB contient aussi le rig complet dans ses extras : réimport dans VistaForge sans perte. Les fichiers .vfcam/CSV ne contiennent aucune géométrie.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn export_animation_with_extension(&mut self, extension: &str) {
+        let mut path = PathBuf::from(self.anim_io_path.trim());
+        if path.as_os_str().is_empty() {
+            self.files_status = "Animation : chemin vide".into();
+            return;
+        }
+        path.set_extension(extension);
+        match vf_export::export_animation(
+            &path,
+            &self.project.rig,
+            &self.heightfield,
+            self.project.seed,
+        ) {
+            Ok(report) => {
+                self.files_status = format!(
+                    "Animation exportée : {} images, {:.2}s, {} → {}",
+                    report.frames,
+                    report.duration_s,
+                    report.format,
+                    report.path.display()
+                );
+                self.anim_io_path = path.display().to_string();
+                self.rig_status = self.files_status.clone();
+            }
+            Err(error) => {
+                self.files_status = format!("Animation : export impossible — {error}");
+                self.rig_status = self.files_status.clone();
+            }
+        }
+        self.status = self.files_status.clone();
+    }
+
+    fn import_animation_file(&mut self) {
+        let path = PathBuf::from(self.anim_io_path.trim());
+        if path.as_os_str().is_empty() {
+            self.files_status = "Animation : chemin vide".into();
+            return;
+        }
+        match vf_export::import_animation(&path) {
+            Ok(imported) => {
+                let terrain_note = imported
+                    .terrain
+                    .as_ref()
+                    .map_or_else(String::new, |terrain| {
+                        format!(
+                            " · terrain d'origine {}×{} à {:.2} m/cellule",
+                            terrain.width, terrain.height, terrain.spacing_x
+                        )
+                    });
+                let keys = imported.rig.eye.keys.len();
+                let duration = imported.rig.duration_s;
+                self.project.rig = imported.rig;
+                self.project.rig.enabled = true;
+                self.rig_time = 0.0;
+                self.anim_editor.selection = None;
+                self.anim_editor.trace = false;
+                self.anim_edit_target = self.project.rig.target.mode == TargetMode::Path;
+                self.anim_track = None;
+                self.anim_live_sample = None;
+                self.anim_trail_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_profile_cache = None;
+                self.anim_curve_cache = None;
+                self.anim_camera_dirty = true;
+                self.mark_animation_changed();
+                self.files_status = format!(
+                    "Animation importée : {} clés, {:.2}s, {}{}",
+                    keys, duration, imported.format, terrain_note
+                );
+                self.rig_status = self.files_status.clone();
+                self.status = self.files_status.clone();
+            }
+            Err(error) => {
+                self.files_status = format!("Animation : import impossible — {error}");
+                self.rig_status = self.files_status.clone();
+                self.status = self.files_status.clone();
+            }
+        }
     }
 
     fn camera_ui(&mut self, ui: &mut egui::Ui) {
@@ -4823,11 +5701,118 @@ impl VistaForgeApp {
     }
 
     fn sculpt_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let (sx, sy) = self.heightfield.spacing();
+        let cell_m = sx.max(sy);
+        let header = egui::CollapsingHeader::new("Définition")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} · cellule {:.1} m · relief {:.0} m",
+                        self.heightfield.width(),
+                        self.heightfield.height(),
+                        cell_m,
+                        self.heightfield.stats().relief()
+                    ))
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Aperçu");
+                    let mut detail = self.sculpt_detail;
+                    egui::ComboBox::from_id_salt("sculpt-detail")
+                        .selected_text(format!("{}×", self.sculpt_preview_factor()))
+                        .show_ui(ui, |ui| {
+                            for value in 1..=3 {
+                                ui.selectable_value(&mut detail, value, format!("{value}×"));
+                            }
+                        });
+                    if detail != self.sculpt_detail {
+                        self.sculpt_detail = detail;
+                        self.sculpt_texture_dirty = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}×{} px",
+                            self.heightfield.width() * self.sculpt_preview_factor() as usize,
+                            self.heightfield.height() * self.sculpt_preview_factor() as usize
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
+                if param_f32(
+                    ui,
+                    "Exagération",
+                    "×",
+                    &mut self.sculpt_exaggeration,
+                    0.5,
+                    4.0,
+                    1.8,
+                ) {
+                    self.sculpt_texture_dirty = true;
+                }
+                if param_f32(
+                    ui,
+                    "Courbes de niveau",
+                    "m",
+                    &mut self.sculpt_contours_m,
+                    0.0,
+                    100.0,
+                    5.0,
+                ) {
+                    self.sculpt_texture_dirty = true;
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Les courbes révèlent les bancs fins ; 0 les désactive.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                let max_size = self.heightfield.width().max(self.heightfield.height());
+                if max_size < 4096 {
+                    if ui
+                        .button(format!(
+                            "Densifier ×2 (→ {:.1} m/cellule)",
+                            cell_m * 0.5
+                        ))
+                        .on_hover_text(
+                            "Rééchantillonne le terrain en bicubique. Indispensable pour des bancs de quelques mètres ; l'historique de sculpture est vidé.",
+                        )
+                        .clicked()
+                    {
+                        self.densify_sculpt_terrain(ctx);
+                    }
+                } else {
+                    ui.label(egui::RichText::new("Définition maximale (4096²).").small());
+                }
+                if cell_m > 8.0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Attention : cellule de {:.1} m. Les terrasses fines demandent ≤ 8 m/cellule ; densifiez avant de sculpter les bancs.",
+                            cell_m
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(255, 196, 110)),
+                    );
+                }
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Sculpt,
+        );
+
         let header = egui::CollapsingHeader::new("Pinceau")
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Mode");
+                    let previous_mode = self.sculpt_brush.mode;
                     egui::ComboBox::from_id_salt("sculpt-mode")
                         .selected_text(brush_mode_label(self.sculpt_brush.mode))
                         .show_ui(ui, |ui| {
@@ -4851,6 +5836,35 @@ impl VistaForgeApp {
                                 );
                             }
                         });
+                    if self.sculpt_brush.mode != previous_mode {
+                        match self.sculpt_brush.mode {
+                            BrushMode::Terrace => {
+                                self.sculpt_brush.strength = 1.0;
+                                self.sculpt_brush.hardness = 0.55;
+                                self.sculpt_brush.roughness = 0.12;
+                                self.sculpt_status =
+                                    "Terrasse : réglez l'épaisseur des bancs et densifiez si la cellule est trop grande."
+                                        .into();
+                            }
+                            BrushMode::Groove => {
+                                self.sculpt_brush.strength = 4.0;
+                                self.sculpt_brush.hardness = 0.5;
+                                self.sculpt_brush.roughness = 0.15;
+                                self.sculpt_status =
+                                    "Orgues : espacement/profondeur, puis trait le long de la pente."
+                                        .into();
+                            }
+                            BrushMode::Smooth | BrushMode::Flatten | BrushMode::Clone => {
+                                self.sculpt_brush.strength = 0.5;
+                            }
+                            BrushMode::Warp => self.sculpt_brush.strength = 20.0,
+                            _ => {
+                                if self.sculpt_brush.strength <= 1.0 {
+                                    self.sculpt_brush.strength = 8.0;
+                                }
+                            }
+                        }
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Forme");
@@ -4926,26 +5940,24 @@ impl VistaForgeApp {
                     180.0,
                     0.0,
                 );
+                let (strength_label, strength_unit, strength_max, strength_default) =
+                    match self.sculpt_brush.mode {
+                        BrushMode::Terrace
+                        | BrushMode::Smooth
+                        | BrushMode::Flatten
+                        | BrushMode::Clone => ("Mélange", "", 1.0, 1.0),
+                        BrushMode::Groove => ("Profondeur", "m", 100.0, 4.0),
+                        BrushMode::Warp => ("Amplitude", "m", 100.0, 20.0),
+                        _ => ("Intensité", "m", 100.0, 8.0),
+                    };
                 param_f32(
                     ui,
-                    "Intensité",
-                    if matches!(
-                        self.sculpt_brush.mode,
-                        BrushMode::Raise
-                            | BrushMode::Lower
-                            | BrushMode::Ridge
-                            | BrushMode::Groove
-                            | BrushMode::Crater
-                            | BrushMode::Noise
-                    ) {
-                        "m"
-                    } else {
-                        ""
-                    },
+                    strength_label,
+                    strength_unit,
                     &mut self.sculpt_brush.strength,
                     0.0,
-                    100.0,
-                    8.0,
+                    strength_max,
+                    strength_default,
                 );
                 param_f32(
                     ui,
@@ -4981,13 +5993,132 @@ impl VistaForgeApp {
                 if self.sculpt_brush.mode == BrushMode::Terrace {
                     param_f32(
                         ui,
-                        "Marche",
+                        "Épaisseur des bancs",
                         "m",
                         &mut self.sculpt_brush.step_m,
                         0.1,
                         500.0,
                         25.0,
                     );
+                    egui::CollapsingHeader::new("Strates et colonnes")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            param_f32(
+                                ui,
+                                "Inclinaison",
+                                "°",
+                                &mut self.sculpt_brush.dip_deg,
+                                0.0,
+                                45.0,
+                                0.0,
+                            );
+                            if self.sculpt_brush.dip_deg > 0.1 {
+                                param_f32(
+                                    ui,
+                                    "Azimut du pendage",
+                                    "°",
+                                    &mut self.sculpt_brush.dip_azimuth_deg,
+                                    0.0,
+                                    360.0,
+                                    0.0,
+                                );
+                            }
+                            param_f32(
+                                ui,
+                                "Banc / falaise",
+                                "",
+                                &mut self.sculpt_brush.bench_ratio,
+                                0.3,
+                                0.99,
+                                0.82,
+                            );
+                            param_f32(
+                                ui,
+                                "Variation des bancs",
+                                "",
+                                &mut self.sculpt_brush.bench_variation,
+                                0.0,
+                                1.0,
+                                0.25,
+                            );
+                            param_f32(
+                                ui,
+                                "Netteté des risers",
+                                "",
+                                &mut self.sculpt_brush.riser_sharpness,
+                                0.0,
+                                1.0,
+                                0.7,
+                            );
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new("Orgues verticales (0 = désactivées)")
+                                    .small()
+                                    .weak(),
+                            );
+                            param_f32(
+                                ui,
+                                "Espacement",
+                                "m",
+                                &mut self.sculpt_brush.column_spacing_m,
+                                0.0,
+                                200.0,
+                                0.0,
+                            );
+                            if self.sculpt_brush.column_spacing_m > 0.0 {
+                                param_f32(
+                                    ui,
+                                    "Profondeur",
+                                    "m",
+                                    &mut self.sculpt_brush.column_depth_m,
+                                    0.0,
+                                    50.0,
+                                    2.0,
+                                );
+                                param_f32(
+                                    ui,
+                                    "Irrégularité",
+                                    "",
+                                    &mut self.sculpt_brush.column_jitter,
+                                    0.0,
+                                    1.0,
+                                    0.35,
+                                );
+                            }
+                        });
+                }
+                if self.sculpt_brush.mode == BrushMode::Groove {
+                    egui::CollapsingHeader::new("Orgues de pente")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Des sillons alignés sur la descente, comme les joints d'une coulée basaltique. Intensité = profondeur.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            param_f32(
+                                ui,
+                                "Espacement",
+                                "m",
+                                &mut self.sculpt_brush.column_spacing_m,
+                                0.0,
+                                200.0,
+                                0.0,
+                            );
+                            if self.sculpt_brush.column_spacing_m > 0.0 {
+                                param_f32(
+                                    ui,
+                                    "Irrégularité",
+                                    "",
+                                    &mut self.sculpt_brush.column_jitter,
+                                    0.0,
+                                    1.0,
+                                    0.35,
+                                );
+                            }
+                        });
                 }
                 if self.sculpt_brush.mode == BrushMode::Clone {
                     ui.horizontal(|ui| {
@@ -5072,6 +6203,52 @@ impl VistaForgeApp {
                         self.sculpt_brush.radius_m = 80.0;
                         self.sculpt_brush.strength = 12.0;
                     }
+                    if ui
+                        .button("Terrasses basaltiques")
+                        .on_hover_text(
+                            "Bancs fins, risers raides et orgues verticales. Densifiez à ≤ 8 m/cellule pour les bancs serrés.",
+                        )
+                        .clicked()
+                    {
+                        self.sculpt_brush.mode = BrushMode::Terrace;
+                        self.sculpt_brush.radius_m = 180.0;
+                        self.sculpt_brush.strength = 1.0;
+                        self.sculpt_brush.hardness = 0.55;
+                        self.sculpt_brush.roughness = 0.12;
+                        self.sculpt_brush.aa_samples = 4;
+                        self.sculpt_brush.falloff = Falloff::Smooth;
+                        self.sculpt_brush.step_m = 8.0;
+                        self.sculpt_brush.dip_deg = 3.0;
+                        self.sculpt_brush.bench_ratio = 0.86;
+                        self.sculpt_brush.bench_variation = 0.40;
+                        self.sculpt_brush.riser_sharpness = 0.85;
+                        self.sculpt_brush.column_spacing_m = 18.0;
+                        self.sculpt_brush.column_depth_m = 2.5;
+                        self.sculpt_brush.column_jitter = 0.5;
+                        self.sculpt_status =
+                            "Preset terrasses basaltiques : densifiez à ≤ 8 m/cellule si nécessaire."
+                                .into();
+                    }
+                    if ui
+                        .button("Orgues de pente")
+                        .on_hover_text(
+                            "Sillons verticaux alignés sur la pente, pour une paroi basaltique.",
+                        )
+                        .clicked()
+                    {
+                        self.sculpt_brush.mode = BrushMode::Groove;
+                        self.sculpt_brush.radius_m = 90.0;
+                        self.sculpt_brush.strength = 3.5;
+                        self.sculpt_brush.hardness = 0.5;
+                        self.sculpt_brush.roughness = 0.15;
+                        self.sculpt_brush.aa_samples = 4;
+                        self.sculpt_brush.falloff = Falloff::Smooth;
+                        self.sculpt_brush.column_spacing_m = 12.0;
+                        self.sculpt_brush.column_jitter = 0.4;
+                        self.sculpt_status =
+                            "Preset orgues : appliquez sur une pente raide, puis recalculer le hillshade."
+                                .into();
+                    }
                 });
             });
         self.help.register(
@@ -5144,6 +6321,14 @@ impl VistaForgeApp {
         let _ = ctx;
     }
 
+    fn sculpt_preview_factor(&self) -> u32 {
+        // Allow a sharp 2x preview on a 2050² project (about 16.8 M pixels,
+        // 67 MB as RGBA) but stop before 4096² would allocate a gigabyte.
+        let base = (self.heightfield.width() * self.heightfield.height()).max(1);
+        let cap = (24_000_000 / base).clamp(1, 3) as u32;
+        self.sculpt_detail.clamp(1, cap)
+    }
+
     fn ensure_hillshade(&mut self, ctx: &egui::Context) {
         if self.sculpt_texture.is_some() && !self.sculpt_texture_dirty {
             return;
@@ -5151,14 +6336,63 @@ impl VistaForgeApp {
         let params = HillshadeParams {
             azimuth_deg_from_south: self.project.sun.azimuth_deg_from_south,
             declination_deg: self.project.sun.declination_deg,
-            vertical_exaggeration: 2.0,
-            ambient: 0.18,
+            vertical_exaggeration: self.sculpt_exaggeration,
+            ambient: 0.22,
         };
-        let shaded = vf_terrain::hillshade(&self.heightfield, params);
+        let factor = self.sculpt_preview_factor();
+        let shaded =
+            vf_terrain::hillshade_sculpt(&self.heightfield, params, factor, self.sculpt_contours_m);
         let image = egui::ColorImage::from_gray([shaded.width, shaded.height], &shaded.pixels);
         self.sculpt_texture =
             Some(ctx.load_texture("sculpt-hillshade", image, egui::TextureOptions::LINEAR));
         self.sculpt_texture_dirty = false;
+    }
+
+    /// Double the working resolution so finer terraces can be carved. The
+    /// heightfield is bicubically resampled, the undo history is cleared and
+    /// the preview / GPU mesh are refreshed.
+    fn densify_sculpt_terrain(&mut self, ctx: &egui::Context) {
+        let width = self.heightfield.width();
+        let height = self.heightfield.height();
+        let new_width = (width * 2).min(4096);
+        let new_height = (height * 2).min(4096);
+        if new_width <= width && new_height <= height {
+            self.sculpt_status = "Définition maximale atteinte (4096²).".into();
+            return;
+        }
+        match vf_terrain::resample(
+            &self.heightfield,
+            new_width,
+            new_height,
+            ResampleFilter::Bicubic,
+        ) {
+            Ok(hf) => {
+                let old_cell = self
+                    .heightfield
+                    .spacing()
+                    .0
+                    .max(self.heightfield.spacing().1);
+                self.heightfield = hf;
+                let new_cell = self
+                    .heightfield
+                    .spacing()
+                    .0
+                    .max(self.heightfield.spacing().1);
+                self.project.sync_terrain(&self.heightfield);
+                self.size = new_width as u32;
+                self.sculpt_undo.clear();
+                self.sculpt_redo.clear();
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.mark_dirty();
+                self.refresh_preview(ctx.clone());
+                self.sculpt_status = format!(
+                    "Terrain densifié : {}² → {}², cellule {:.1} m → {:.2} m.",
+                    width, new_width, old_cell, new_cell
+                );
+            }
+            Err(error) => self.sculpt_status = format!("Densification impossible : {error}"),
+        }
     }
 
     fn sculpt_canvas_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -5478,6 +6712,7 @@ impl VistaForgeApp {
                 &mut self.anim_editor,
                 trail.as_deref(),
                 comparison.as_deref(),
+                self.anim_live_sample.as_ref(),
                 blocked,
             );
             editor_consumed = editor.consumed;
@@ -5620,6 +6855,10 @@ impl eframe::App for VistaForgeApp {
         self.help.begin_frame();
         self.poll_render(&ctx);
         self.poll_animation_export(&ctx);
+        self.poll_blender_export(&ctx);
+        if let Some(pick) = self.file_picker.show(&ctx) {
+            self.apply_file_pick(pick);
+        }
         self.pump_gpu(&ctx);
         self.pump_animation(&ctx);
         self.view_shortcuts(&ctx);
@@ -5635,6 +6874,19 @@ impl eframe::App for VistaForgeApp {
                     self.new_project(ctx.clone());
                 }
                 ui.add(egui::TextEdit::singleline(&mut self.path_input).desired_width(280.0));
+                if ui
+                    .small_button("…")
+                    .on_hover_text("Parcourir les fichiers .vfproj")
+                    .clicked()
+                {
+                    let current = self.path_input.clone();
+                    self.file_picker.open(
+                        file_picker::PickTarget::Project,
+                        file_picker::PickMode::OpenFile,
+                        &current,
+                        &["vfproj"],
+                    );
+                }
                 if ui.button("Open").clicked() {
                     self.open_project(ctx.clone());
                 }
@@ -5702,6 +6954,20 @@ impl eframe::App for VistaForgeApp {
                 ui.separator();
                 self.workspace_panel(ui, &ctx);
             });
+
+        if self.workspace == Workspace::Animation && self.anim_timeline.open {
+            let dock_height = if self.anim_timeline.mode == timeline::Mode::Graph {
+                260.0
+            } else {
+                205.0
+            };
+            egui::Panel::bottom("anim-timeline")
+                .resizable(false)
+                .exact_size(dock_height)
+                .show(ui, |ui| {
+                    self.animation_timeline_ui(ui);
+                });
+        }
 
         // Register the overlays that are drawn inside the viewport. Their
         // rectangles are stored from the previous frame because the actual
@@ -5815,6 +7081,42 @@ fn symmetry_label(symmetry: Symmetry) -> &'static str {
     }
 }
 
+/// Duration widget with a logarithmic slider, a fine numeric field and a
+/// one-click reset. A linear 0.1–600 s slider made short clips impossible to
+/// fine-tune; the log scale gives the same precision at 2 s and at 200 s.
+fn duration_param(ui: &mut egui::Ui, value: &mut f32) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [128.0, 18.0],
+            egui::Label::new(egui::RichText::new("Durée").size(12.5)).truncate(),
+        );
+        let width = (ui.available_width() - 96.0).max(60.0);
+        changed |= ui
+            .add_sized(
+                [width, 18.0],
+                egui::Slider::new(value, 0.1..=600.0)
+                    .logarithmic(true)
+                    .show_value(false),
+            )
+            .changed();
+        let response = ui.add_sized(
+            [76.0, 18.0],
+            egui::DragValue::new(value)
+                .speed(0.05)
+                .range(0.1..=600.0)
+                .max_decimals(2)
+                .suffix(" s"),
+        );
+        changed |= response.changed();
+        if response.double_clicked() {
+            *value = 8.0;
+            changed = true;
+        }
+    });
+    changed
+}
+
 fn param_f32(
     ui: &mut egui::Ui,
     label: &str,
@@ -5889,6 +7191,14 @@ fn param_u32(
         }
     });
     changed
+}
+
+fn normalized_project_path(raw: &str) -> PathBuf {
+    let mut path = PathBuf::from(raw.trim());
+    if !path.as_os_str().is_empty() && path.extension().is_none() {
+        path.set_extension("vfproj");
+    }
+    path
 }
 
 fn default_scene() -> (Project, HeightField) {
@@ -5989,6 +7299,7 @@ fn help_topic_for_workspace(workspace: Workspace) -> help::HelpTopic {
         Workspace::Light => help::HelpTopic::Light,
         Workspace::Camera => help::HelpTopic::Camera,
         Workspace::Render => help::HelpTopic::RenderFinal,
+        Workspace::Files => help::HelpTopic::Export,
     }
 }
 

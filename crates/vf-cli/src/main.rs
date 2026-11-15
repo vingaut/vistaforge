@@ -110,6 +110,22 @@ enum RigCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Export the camera/target animation only (.vfcam, .glb or .csv).
+    Export {
+        project: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a camera/target animation without changing the terrain.
+    Import {
+        project: PathBuf,
+        animation: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -208,8 +224,17 @@ enum DemCommand {
 enum TerrainCommand {
     /// Generate a Classic or Modern fractal terrain and save a project.
     Generate(GenerateArgs),
-    /// Import a legacy DEM or ESRI ASCII grid into a project.
+    /// Import a GeoTIFF DEM, ESRI ASCII grid, legacy DEM or heightmap image.
     Import(ImportArgs),
+    /// Export the current terrain to GeoTIFF, ASCII, DEM, PNG or JPEG.
+    Export {
+        project: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        nodata: Option<f32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print project and terrain statistics.
     Info {
         project: PathBuf,
@@ -287,6 +312,9 @@ struct SculptArgs {
     strength: f32,
     #[arg(long, default_value_t = 0.25)]
     roughness: f32,
+    /// Edge hardness, 0 = soft, 1 = hard.
+    #[arg(long, default_value_t = 0.35)]
+    hardness: f32,
     #[arg(long, default_value_t = 4)]
     aa: u32,
     #[arg(long, default_value_t = 1.0)]
@@ -295,6 +323,30 @@ struct SculptArgs {
     angle: f32,
     #[arg(long, default_value_t = 25.0)]
     step: f32,
+    /// Stratum dip for terraces, degrees.
+    #[arg(long, default_value_t = 0.0)]
+    dip: f32,
+    /// Down-dip azimuth, degrees (0 = +X, 90 = +Y).
+    #[arg(long, default_value_t = 0.0)]
+    dip_azimuth: f32,
+    /// Fraction of each stratum that is a flat bench (0.3..0.99).
+    #[arg(long, default_value_t = 0.82)]
+    bench_ratio: f32,
+    /// Relative thickness variation between benches (0..1).
+    #[arg(long, default_value_t = 0.25)]
+    bench_variation: f32,
+    /// Riser sharpness (0 = wide slope, 1 = near-vertical step).
+    #[arg(long, default_value_t = 0.7)]
+    riser_sharpness: f32,
+    /// Columnar joint spacing in metres (0 disables joints).
+    #[arg(long, default_value_t = 0.0)]
+    column_spacing: f32,
+    /// Depth of the columnar grooves, metres.
+    #[arg(long, default_value_t = 2.0)]
+    column_depth: f32,
+    /// Irregularity of the column spacing (0..1).
+    #[arg(long, default_value_t = 0.35)]
+    column_jitter: f32,
     #[arg(long)]
     invert: bool,
     /// none, x, y, xy or radial.
@@ -545,9 +597,19 @@ struct ImportArgs {
     /// keep their header cellsize unless this is set).
     #[arg(long)]
     spacing: Option<f32>,
-    /// Input is an ESRI ASCII grid rather than a legacy DEM.
+    /// Force the legacy ESRI ASCII reader instead of format detection.
     #[arg(long)]
     ascii: bool,
+    /// Minimum elevation for normalised heightmaps (PNG/JPEG); 0 with
+    /// --max-height 0 means "use the JSON sidecar, else 0..1000".
+    #[arg(long, default_value_t = 0.0)]
+    min_height: f32,
+    /// Maximum elevation for normalised heightmaps (PNG/JPEG).
+    #[arg(long, default_value_t = 0.0)]
+    max_height: f32,
+    /// Keep image rows north-first instead of flipping to VistaForge.
+    #[arg(long)]
+    no_flip_y: bool,
     /// Render a preview PNG immediately after import.
     #[arg(long)]
     render: Option<PathBuf>,
@@ -916,6 +978,12 @@ fn run_terrain(command: TerrainCommand) -> Result<()> {
     match command {
         TerrainCommand::Generate(args) => generate(args)?,
         TerrainCommand::Import(args) => import(args)?,
+        TerrainCommand::Export {
+            project,
+            output,
+            nodata,
+            json,
+        } => export_terrain_command(&project, &output, nodata, json)?,
         TerrainCommand::Info { project, json } => print_project_info(&project, json)?,
         TerrainCommand::Rock {
             project,
@@ -1073,15 +1141,26 @@ fn run_sculpt(args: SculptArgs) -> Result<()> {
         radius_m: args.radius,
         strength: args.strength,
         roughness: args.roughness,
+        hardness: args.hardness,
         aa_samples: args.aa,
         aspect: args.aspect,
         angle_deg: args.angle,
         step_m: args.step,
+        dip_deg: args.dip,
+        dip_azimuth_deg: args.dip_azimuth,
+        bench_ratio: args.bench_ratio,
+        bench_variation: args.bench_variation,
+        riser_sharpness: args.riser_sharpness,
+        column_spacing_m: args.column_spacing,
+        column_depth_m: args.column_depth,
+        column_jitter: args.column_jitter,
         invert: args.invert,
         symmetry,
         ..Brush::default()
     };
-    brush.validate().map_err(|e| anyhow::anyhow!("brush: {e}"))?;
+    brush
+        .validate()
+        .map_err(|e| anyhow::anyhow!("brush: {e}"))?;
     let mut stroke = Stroke::begin(&hf, project.seed, format!("sculpt {}", mode.name()));
     stroke.stamp_to(&mut hf, &brush, args.x, args.y);
     if let (Some(x2), Some(y2)) = (args.x2, args.y2) {
@@ -1585,7 +1664,17 @@ fn generate(args: GenerateArgs) -> Result<()> {
 
 fn import(args: ImportArgs) -> Result<()> {
     let start = Instant::now();
-    let (hf, source, legacy) = if args.ascii {
+    let options = vf_io::TerrainImportOptions {
+        heightmap: vf_io::HeightmapOptions {
+            min_height: args.min_height,
+            max_height: args.max_height,
+            spacing_m: args.spacing.map(f64::from).unwrap_or(0.0),
+            origin: [0.0, 0.0],
+            flip_y: !args.no_flip_y,
+        },
+        dem_spacing_m: args.spacing.unwrap_or(30.0),
+    };
+    let (hf, source, description) = if args.ascii {
         let mut hf = vf_io::ascii::read_ascii_grid(&args.input)?;
         if let Some(spacing) = args.spacing {
             hf.set_spacing(f64::from(spacing), f64::from(spacing))?;
@@ -1605,33 +1694,12 @@ fn import(args: ImportArgs) -> Result<()> {
                     spacing_m,
                 },
             },
-            LegacyMeta {
-                dem_title: title,
-                dem_comment: "Imported ESRI ASCII Grid".into(),
-                ..LegacyMeta::default()
-            },
+            "ESRI ASCII Grid".to_string(),
         )
     } else {
-        let spacing = args.spacing.unwrap_or(30.0);
-        let dem = read_dem(&args.input)?;
-        let hf = dem.to_heightfield(spacing)?;
-        let source = TerrainSource::Dem {
-            source: DemSource {
-                path: args.input.display().to_string(),
-                title: dem.header.title.clone(),
-                comment: dem.header.comment.clone(),
-                spacing_m: spacing,
-            },
-        };
-        let legacy = LegacyMeta {
-            dem_title: dem.header.title.clone(),
-            dem_comment: dem.header.comment.clone(),
-            session_flags: dem.header.flags,
-            ..LegacyMeta::default()
-        };
-        (hf, source, legacy)
+        let imported = vf_io::import_terrain(&args.input, options)?;
+        (imported.heightfield, imported.source, imported.description)
     };
-
     let title = match &source {
         TerrainSource::Dem { source } => source.title.clone(),
         _ => "Imported terrain".into(),
@@ -1640,7 +1708,11 @@ fn import(args: ImportArgs) -> Result<()> {
     let seed = Seed::new(fnv1a(&title));
     let mut project = Project::new(project_name, seed, hf.width() as u32);
     project.source = source;
-    project.legacy = Some(legacy);
+    project.legacy = Some(LegacyMeta {
+        dem_title: title,
+        dem_comment: description.clone(),
+        ..LegacyMeta::default()
+    });
     // Inland DEMs rarely need a global sea plane; users can enable it later.
     project.water.enabled = false;
     project.sync_terrain(&hf);
@@ -1654,9 +1726,10 @@ fn import(args: ImportArgs) -> Result<()> {
     vf_io::save_project(&project, &hf, &out, None)?;
     let stats = hf.stats();
     println!(
-        "imported {}x{} into {} in {} ms",
+        "imported {}x{} ({}) into {} in {} ms",
         hf.width(),
         hf.height(),
+        description,
         out.display(),
         start.elapsed().as_millis()
     );
@@ -1681,7 +1754,6 @@ fn import(args: ImportArgs) -> Result<()> {
     }
     Ok(())
 }
-
 fn run_scene(command: SceneCommand) -> Result<()> {
     match command {
         SceneCommand::Preset {
@@ -1898,8 +1970,7 @@ fn run_anim(command: AnimCommand) -> Result<()> {
                     project.camera = sample.camera;
                     let options =
                         render_options(&project, args.width, args.height, args.quality, None);
-                    let output =
-                        render_with_options(&project, &loaded.heightfield, &options)?;
+                    let output = render_with_options(&project, &loaded.heightfield, &options)?;
                     let path = args.out.join(format!("frame_{index:05}.png"));
                     output.image.save_png(&path)?;
                     written += 1;
@@ -2291,10 +2362,17 @@ fn run_rig(command: RigCommand) -> Result<()> {
                     }))?
                 );
             } else {
-                println!("rig:         {} ({})", rig.name, if rig.enabled { "on" } else { "off" });
+                println!(
+                    "rig:         {} ({})",
+                    rig.name,
+                    if rig.enabled { "on" } else { "off" }
+                );
                 println!(
                     "duration:    {:.2}s @ {} fps · body {} · target {:?}",
-                    rig.duration_s, rig.fps, rig.body.preset.name(), rig.target.mode
+                    rig.duration_s,
+                    rig.fps,
+                    rig.body.preset.name(),
+                    rig.target.mode
                 );
                 println!(
                     "optics:      fov {:.0}° · DOF {} · f/{:.1}",
@@ -2372,9 +2450,7 @@ fn run_rig(command: RigCommand) -> Result<()> {
         } => {
             let loaded = vf_io::load_project(&project)?;
             let mut p = loaded.project;
-            p.rig
-                .eye
-                .push(vf_core::PathKey::new(time, [x, y, z]));
+            p.rig.eye.push(vf_core::PathKey::new(time, [x, y, z]));
             p.rig.duration_s = p.rig.duration_s.max(time);
             p.rig.validate().map_err(|e| anyhow::anyhow!("rig: {e}"))?;
             p.mark_modified();
@@ -2386,7 +2462,140 @@ fn run_rig(command: RigCommand) -> Result<()> {
             );
             Ok(())
         }
+        RigCommand::Export {
+            project,
+            output,
+            json,
+        } => run_rig_export(&project, &output, json),
+        RigCommand::Import {
+            project,
+            animation,
+            out,
+            json,
+        } => run_rig_import(&project, &animation, out.as_deref(), json),
     }
+}
+
+fn run_rig_export(project: &Path, output: &Path, json: bool) -> Result<()> {
+    let loaded = vf_io::load_project(project)?;
+    let report = vf_export::export_animation(
+        output,
+        &loaded.project.rig,
+        &loaded.heightfield,
+        loaded.project.seed,
+    )
+    .map_err(|error| anyhow::anyhow!("animation export: {error}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "path": report.path,
+                "format": report.format,
+                "frames": report.frames,
+                "duration_s": report.duration_s,
+                "has_target": report.has_target,
+            }))?
+        );
+    } else {
+        println!(
+            "exported {} frames ({:.2}s) to {} ({})",
+            report.frames,
+            report.duration_s,
+            report.path.display(),
+            report.format
+        );
+        if report.path.extension().and_then(|e| e.to_str()) == Some("glb") {
+            println!("Blender: File > Import > glTF 2.0, or use bridge/blender/vistaforge_io.py");
+        }
+    }
+    Ok(())
+}
+
+fn run_rig_import(project: &Path, animation: &Path, out: Option<&Path>, json: bool) -> Result<()> {
+    let loaded = vf_io::load_project(project)?;
+    let imported = vf_export::import_animation(animation)
+        .map_err(|error| anyhow::anyhow!("animation import: {error}"))?;
+    let mut p = loaded.project;
+    let keys = imported.rig.eye.keys.len();
+    let duration = imported.rig.duration_s;
+    let target_mode = format!("{:?}", imported.rig.target.mode);
+    let terrain = imported.terrain.clone();
+    p.rig = imported.rig;
+    p.rig.enabled = true;
+    p.mark_modified();
+    let target = out.unwrap_or(project);
+    vf_io::save_project(&p, &loaded.heightfield, target, loaded.preview.as_ref())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "project": target,
+                "source": imported.source,
+                "format": imported.format,
+                "keys": keys,
+                "duration_s": duration,
+                "target_mode": target_mode,
+                "terrain_reference": terrain,
+            }))?
+        );
+    } else {
+        println!(
+            "imported {} ({}): {} keys, {:.2}s, target {} -> {}",
+            imported.format,
+            imported.source,
+            keys,
+            duration,
+            target_mode,
+            target.display()
+        );
+        if let Some(terrain) = terrain {
+            println!(
+                "source terrain was {}x{} at {:.2} m/cellule",
+                terrain.width, terrain.height, terrain.spacing_x
+            );
+        }
+    }
+    Ok(())
+}
+
+fn export_terrain_command(
+    project: &Path,
+    output: &Path,
+    nodata: Option<f32>,
+    json: bool,
+) -> Result<()> {
+    let loaded = vf_io::load_project(project)?;
+    let report = vf_io::export_terrain(
+        output,
+        &loaded.heightfield,
+        &loaded.project.meta.name,
+        nodata,
+    )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "path": report.path,
+                "format": report.format,
+                "width": report.width,
+                "height": report.height,
+                "spacing_m": report.spacing_m,
+                "warnings": report.warnings,
+            }))?
+        );
+    } else {
+        println!(
+            "exported {}x{} terrain to {} ({})",
+            report.width,
+            report.height,
+            report.path.display(),
+            report.format
+        );
+        for warning in &report.warnings {
+            println!("warning: {warning}");
+        }
+    }
+    Ok(())
 }
 
 fn run_blender(command: BlenderCommand) -> Result<()> {
@@ -2408,8 +2617,9 @@ fn run_blender(command: BlenderCommand) -> Result<()> {
                 sun: !no_sun,
                 ..vf_export::ExportOptions::default()
             };
-            let report = vf_export::export_project(&loaded.project, &loaded.heightfield, &out, &options)
-                .map_err(|e| anyhow::anyhow!("blender export failed: {e}"))?;
+            let report =
+                vf_export::export_project(&loaded.project, &loaded.heightfield, &out, &options)
+                    .map_err(|e| anyhow::anyhow!("blender export failed: {e}"))?;
             if json_output {
                 println!(
                     "{}",
@@ -2469,9 +2679,11 @@ fn run_blender(command: BlenderCommand) -> Result<()> {
                 subdivision: loaded.project.render.subdivision.max(1) as u32,
                 ..vf_export::ExportOptions::default()
             };
-            let report = vf_export::export_project(&loaded.project, &loaded.heightfield, &dir, &options)
-                .map_err(|e| anyhow::anyhow!("blender export failed: {e}"))?;
-            let script = script.unwrap_or_else(|| PathBuf::from("bridge/blender/vistaforge_import.py"));
+            let report =
+                vf_export::export_project(&loaded.project, &loaded.heightfield, &dir, &options)
+                    .map_err(|e| anyhow::anyhow!("blender export failed: {e}"))?;
+            let script =
+                script.unwrap_or_else(|| PathBuf::from("bridge/blender/vistaforge_import.py"));
             if !script.exists() {
                 bail!(
                     "Blender import script not found at {} (pass --script)",
@@ -2630,7 +2842,11 @@ fn print_project_info(path: &Path, json_output: bool) -> Result<()> {
         );
         println!(
             "render:      {}x{} ssaa {} · subdivision {}× · cliff warp {:.2}",
-            p.render.width, p.render.height, p.render.ssaa, p.render.subdivision, p.render.cliff_warp
+            p.render.width,
+            p.render.height,
+            p.render.ssaa,
+            p.render.subdivision,
+            p.render.cliff_warp
         );
         println!(
             "detail:      {} (profile {}, scale {:.1} m, amplitude {:.1} m, hétérogénéité {:.2})",

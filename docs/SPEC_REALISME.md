@@ -574,7 +574,7 @@ Critères de sortie à chaque lot :
 | Auto-retopologie de production | non ; décimation + remesh Blender |
 | Parité complète LightWave (IK, expressions, scène) | non ; rig eye/target/camera |
 | Textures scannées PBR | non ; procédural cuit + texturing Blender |
-| Round-trip Blender → VistaForge | non ; export aller seulement |
+| Round-trip Blender → VistaForge | géométrie : non (export aller) ; trajectoires caméra/cible : oui (.vfcam/GLB + addon) |
 
 ---
 

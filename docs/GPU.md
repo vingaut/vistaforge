@@ -48,7 +48,9 @@ Points clés :
   du viewport. `prepare` encode le rendu offscreen dans l'encodeur d'egui ;
   `paint` blitte la texture. Aucun command buffer séparé n'est nécessaire.
 - **Maillage** : échantillonnage du heightfield avec un pas calculé pour ne pas
-  dépasser 1024 segments par côté (≈ 1 M de sommets au maximum). Les normales
+  dépasser 2 049 segments par côté (≈ 4,2 M de sommets au maximum). Un terrain
+  2050² est donc affiché à sa résolution native ; 4096² est encore réduit de
+  moitié. Les normales
   sont calculées par différences centrées. Une grande nappe d'eau est ajoutée
   au maillage lorsque l'eau est active.
 - **Coordonnées** : les sommets et la caméra sont translatés par rapport au

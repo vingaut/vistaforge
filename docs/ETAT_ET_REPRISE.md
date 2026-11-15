@@ -5,7 +5,356 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 04:20** (fusion Animation et aide contextuelle terminées).
+Dernière mise à jour : **2026-11-15 17:30** (sculpture fine, animation, timeline, fichiers/DEM/Blender — lot terminé).
+
+---
+
+## 0quindecies. Session du 15 novembre — sculpture fine, animation, fichiers et Blender (livré)
+
+> **État : lot terminé.** Le WIP « terrasses basaltiques » ci-dessous a été
+> repris, complété et intégré. Workspace compilé, **219 tests verts**,
+> `clippy -D warnings` propre, `cargo fmt` appliqué, captures UI et validation
+> Blender 5.3 effectuées.
+
+### Demande initiale
+
+1. Reprendre l'amélioration de la **finesse des détails du mode Sculpter**
+   (terrasses basaltiques, risers, orgues, aperçu).
+2. Lire l'animation **en restant en vue design**, pas seulement en vue caméra.
+3. Corriger la **durée d'animation** bloquée au-dessus de ~49,99 s.
+4. Corriger les **profils de mouvement** (roulis frénétique, évitement de
+   parois, cible par avance).
+5. Ajouter une **timeline avec graph editor**, liée aux réglages de profil et
+   d'animation, avec keyframing.
+6. Déplacer les clés **librement à la souris**, en plus du gizmo et du
+   numérique.
+7. Fiabiliser lecture/sauvegarde et ajouter heightmaps PNG/TIFF/JPG,
+   import/export DEM, bridge Blender (GLB) et export/import d'une animation
+   caméra/cible **sans géométrie**.
+
+### Livré
+
+#### Sculpter
+
+- `Brush::riser_sharpness` (0 = pente large, 1 = marche quasi verticale), exposé
+  dans l'UI et le CLI (`--riser-sharpness`).
+- `hillshade_sculpt` : hillshade supersamplé + **courbes de niveau** (majeures
+  toutes les 5 lignes), avec réglage de l'intervalle.
+- Aperçu 2× possible sur un terrain 2050² (cap ~24 M pixels au lieu de 4 M) ;
+  l'ancien cap désactivait silencieusement le supersampling sur les gros DEM.
+- Maillage GPU porté à **2 049 segments** : un terrain 2050² n'est plus
+  sous-échantillonné (3× avant) ; 4096² reste à 2×.
+- Densification ×2, avertissement cellule > 8 m, presets Terrasses basaltiques
+  et Orgues de pente, tests bancs/risers/orgues/déterminisme.
+- Doc dédiée : [`SCULPT.md`](SCULPT.md).
+
+#### Rig et animation
+
+- **Durée indépendante des clés** : suppression du bump automatique
+  `duration >= eye.duration_s()` ; slider logarithmique + champ fin ; les clés
+  au-delà de la fin sont conservées mais non jouées, avec bouton d'extension.
+- **`RigTrack`** : simulation précalculée à 60 Hz, échantillonnage O(1) ;
+  la lecture ne re-simule plus depuis t=0 à chaque frame.
+- **Lecture en vue design** : le frustum, l'œil et la cible s'animent sans
+  quitter l'orbite ; la vue caméra reste disponible. `Lire` lit la vue courante.
+- **Cible/avance** : distance d'avance minimale de 45 m, lissage de visée
+  effectif (filtre du premier ordre : `smoothing`, `look_lag`, 60 ms).
+- **Évitement de parois** : champ de distance lissé (box blur + stencil 2
+  cellules), sommet du mur le plus proche stocké, accélération d'évitement
+  filtrée et bornée, désactivation au-dessus d'une falaise, roulis limité à
+  120°/s avec objectif filtré.
+- **Timeline + graph editor** : pistes Œil/Cible, retiming par glisser,
+  insertion double-clic, suppression clic droit, zoom molette, canaux X/Y/Z,
+  vitesse et roulis simulés par le profil actif ; graphe éditable en temps et
+  valeur.
+- **Glisser libre des clés** : plan de l'écran, `Maj` = vertical, `Alt` = poser
+  sur le terrain, aimant ; gizmo et champs numériques conservés.
+- **Export/import animation seule** : `.vfcam` (rig complet), `.glb` (caméra +
+  cible, extras VistaForge), `.csv` (une ligne/image) ; réimport sans perte,
+  reconstruction depuis translation/rotation d'un GLB Blender.
+- Addon Blender `bridge/blender/vistaforge_io.py` : import GLB animation
+  (sélection caméra, remplacement de la caméra statique, fps et plage
+  d'images), export `.vfcam` depuis la caméra active + empty cible.
+
+#### Fichiers et DEM
+
+- **GeoTIFF 32 bits float** en lecture/écriture : `ModelPixelScale`,
+  `ModelTiepoint`, GeoKeyDirectory (projeté, mètres, pixel-is-point),
+  `GDAL_NODATA`. Lecture entiers/floats, multi-canal, masque nodata.
+- **ESRI ASCII Grid**, **DEM legacy v1**, **PNG 16 bits + sidecar JSON + PGW**,
+  **JPEG** (lossy), **raw f32 + JSON**.
+- Import **PNG/TIFF/JPEG** avec plage min/max ou sidecar ; `0/0 = auto` ;
+  retournement nord→sud ; dimensions jusqu'à 16 384².
+- Espace **Fichiers** : projet, import/export terrain, export Blender
+  (`scene.glb` + textures + `camera_animation.glb`), animation, navigateur de
+  fichiers intégré (pas de dépendance native), `Ctrl+O`/`Ctrl+S`.
+- Projet : sauvegarde atomique (le fichier précédent survit à un échec),
+  validation du rig au chargement, réparation migration durée/fps/FOV,
+  normalisation de l'extension `.vfproj`.
+- Doc dédiée : [`FICHIERS.md`](FICHIERS.md).
+
+### Validation
+
+- `cargo test --workspace` : **219 tests verts** (dont GeoTIFF, heightmap
+  PNG/JPEG, import/export animation, timeline, glisser libre, durée, parois).
+- `cargo clippy --workspace --all-targets -- -D warnings` : propre.
+- `cargo fmt --all` : appliqué.
+- Captures eframe (glow) de tous les espaces, dont `workspace_files.png`,
+  `animation_timeline.png`, `animation_graph.png`, `sculpt_preview.png`.
+- **Blender 5.3** :
+  - import du GLB caméra : `VistaForge Camera` + `VistaForge Target`, action
+    `0..192`, positions caméra/cible distinctes à plusieurs frames ;
+  - addon : import scène + animation, caméra active `VistaForge Camera`,
+    0..192 à 24 fps, rendu Cycles 320×180 frame 96 ;
+  - export `.vfcam` depuis Blender : 193 clés, réimport VistaForge
+    `target Path`, 8 s ;
+  - export `.vfcam` → `rig import` → `rig export` GLB testé.
+- Import/export GeoTIFF 2050² : ~1 s, valeurs et origine conservées.
+- PNG 16 bits + sidecar : round-trip 100..500 m, erreur de quantification
+  inférieure à 0,1 m ; JPEG accepté mais lossy.
+- `/tmp/vfcap-gpu` : projet 2050² chargé avec le viewport **wgpu/Vulkan**
+  (Quadro RTX 5000), tour de captures complet, mesh 2049 segments ; pas de
+  sous-échantillonnage 3× comme avant.
+
+### Fichiers touchés (principaux)
+
+| Fichier | Rôle |
+|---|---|
+| `crates/vf-terrain/src/brush.rs`, `lib.rs` | riser sharpness, hillshade sculpt + contours |
+| `crates/vf-flight/src/rig.rs`, `clearance.rs` | RigTrack, cible lissée, évitement lissé, roulis |
+| `crates/vf-ui/src/timeline.rs` | timeline + graph editor |
+| `crates/vf-ui/src/animation_editor.rs` | glisser libre, frustum live |
+| `crates/vf-ui/src/file_picker.rs` | navigateur de fichiers intégré |
+| `crates/vf-ui/src/lib.rs` | espace Fichiers, transport design, timeline, IO UI |
+| `crates/vf-ui/src/help.rs` | fiches mises à jour |
+| `crates/vf-io/src/geotiff.rs`, `heightmap.rs`, `terrain_io.rs` | formats DEM/heightmap |
+| `crates/vf-io/src/project.rs` | sauvegarde atomique, migration rig |
+| `crates/vf-export/src/animation.rs` | `.vfcam`, GLB caméra, CSV |
+| `bridge/blender/vistaforge_io.py` | addon Blender aller-retour |
+| `docs/FICHIERS.md`, `docs/SCULPT.md`, `docs/ANIMATION.md`, `docs/BLENDER.md`, `docs/USAGE.md` | documentation |
+
+### Limites restantes
+
+- Les poignées Bézier restent éditables numériquement (ease/handles) mais pas
+  par un graphe de poignées dédié ; la timeline édite temps et valeurs.
+- Le GeoTIFF utilise un CRS **utilisateur** en mètres ; renseigner le CRS réel
+  dans QGIS/GDAL pour une superposition géographique.
+- Le round-trip **géométrie** Blender reste aller seulement ; le round-trip
+  **trajectoire** est assuré (`.vfcam`/GLB + addon).
+- JPEG et DEM v1 sont lossy.
+- Le mesh GPU à 2 049 segments peut être lourd sur une petite carte ; le rendu
+  final reste CPU.
+- Pas encore de MP4 depuis l'UI (CLI seulement), ni de dialogue natif de
+  fichiers (le navigateur intégré le remplace).
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+
+# Terrain / DEM
+cargo run -p vf-cli -- terrain import dem.tif --out dem.vfproj
+cargo run -p vf-cli -- terrain export dem.vfproj dem.tif
+
+# Animation seule
+cargo run -p vf-cli -- rig export scene.vfproj survol.glb
+cargo run -p vf-cli -- rig import scene.vfproj survol.vfcam --out rejoue.vfproj
+
+# Blender
+cargo run -p vf-cli -- blender export scene.vfproj blender-out --subdivision 2
+blender --background --python bridge/blender/vistaforge_import.py --   blender-out/scene.glb blender-out/scene.json --validate
+```
+
+---
+
+## 0quaterdecies. Session du 15 novembre — sculpt de terrasses basaltiques (WIP intégré)
+
+> **État : section historique.** Le travail décrit ci-dessous a été repris et
+> terminé dans la section précédente. Les changements sont désormais dans
+> l'arbre de travail (commit à venir).
+
+### Demande
+
+L'utilisateur a sculpté des terrasses et des sillons dans l'espace **Sculpter**
+(scène 514×514, cellules de 25 m). Résultat jugé médiocre dans la vue 3D, et
+**définition insuffisante dans le module de sculptage** (hillshade très bruité,
+facettes, motif en pochoir). Il a joint une photo de référence : une **falaise
+basaltique stratifiée**, avec de nombreux bancs fins, des risers raides, des
+orgues verticales et de la végétation sur les replats.
+
+Objectif : rendre le pinceau Terrasse/Groove plus proche de cette morphologie
+et améliorer la définition de l'aperçu de sculpture.
+
+### Ce qui a été implémenté (WIP)
+
+#### Modèle de pinceau (`crates/vf-terrain/src/brush.rs`)
+
+- Nouveaux champs de `Brush` : `dip_deg`, `dip_azimuth_deg`, `bench_ratio`,
+  `bench_variation`, `column_spacing_m`, `column_depth_m`, `column_jitter`,
+  avec validation.
+- **Terrasse stratifiée** : les couches sont quantifiées dans un repère
+  incliné (pendage + azimut), en coordonnées **monde** pour que les bancs
+  s'alignent entre deux traits qui se chevauchent. Chaque couche est un banc
+  plat (`bench_ratio`) suivi d'un **riser étroit** (largeur fixe ~35 % de la
+  transition, pas un long smoothstep). L'épaisseur varie avec un bruit basse
+  fréquence (`bench_variation`) et une rugosité légère.
+- **Orgues verticales** : option `column_spacing_m` / `column_depth_m` /
+  `column_jitter`. Les rainures sont creusées uniquement sur les risers, avec
+  un décalage irrégulier. Coordonnées globales pour la continuité entre traits.
+- **Groove aligné sur la pente** : quand `column_spacing_m > 0`, les sillons
+  sont orientés selon la **descente locale** (gradient), avec un espacement
+  périodique, un jitter et une pondération par la pente. L'ancien mode bruit
+  reste disponible si l'espacement vaut 0.
+- **Correction d'un bug de gradient** : `gradient_world` passait des coordonnées
+  déjà converties à un helper `sample_bilinear` qui reconvertissait en monde,
+  divisant la pente par l'espacement. Les orgues étaient donc trop peu
+  profondes. Corrigé (`hf.sample_bilinear` directement).
+- Tests ajoutés : bancs plats + risers raides, canaux périodiques, déterminisme.
+
+#### Aperçu de sculpture (`crates/vf-terrain/src/lib.rs`, `vf-ui`)
+
+- Nouvelle fonction `hillshade_supersampled(hf, params, factor)` (facteur 1–4) :
+  échantillonnage bilinéaire entre les centres de cellules, normales lissées avec
+  un stencil d'une cellule, image agrandie `width×factor` par `height×factor`.
+  But : supprimer le motif en pochoir du hillshade 1×/cellule.
+- Champs UI `sculpt_detail` (1×/2×/3×, capé à ~4 M de pixels) et
+  `sculpt_exaggeration` (0,5–4×, défaut 1,8).
+- Nouvelle section **Définition** dans l'espace Sculpter : résolution, taille de
+  cellule, relief, choix de l'aperçu, exagération, bouton **Densifier ×2**.
+- **Densifier ×2** : rééchantillonnage bicubique jusqu'à 4096², mise à jour de
+  `Project::sync_terrain`, vidage de l'undo/redo (les régions ne sont plus
+  valides), régénération du hillshade et du mesh GPU, message de statut.
+- Avertissement si cellule > 8 m : « les terrasses fines demandent ≤ 8 m/cellule ».
+
+#### Interface Sculpter (`crates/vf-ui/src/lib.rs`)
+
+- Section « Strates et colonnes » pour Terrasse : épaisseur des bancs,
+  inclinaison, azimut du pendage, part banc/falaise, variation, espacement /
+  profondeur / irrégularité des orgues.
+- Section « Orgues de pente » pour Groove : espacement et irrégularité.
+- Presets ajoutés : **Terrasses basaltiques** (bancs de 8 m, pendage 3°,
+  colonnes 18 m, profondeur 2,5 m) et **Orgues de pente** (colonnes 12 m,
+  profondeur 3,5 m).
+- Au changement de mode, valeurs par défaut cohérentes (Terrasse = mélange 1,
+  Groove = profondeur 4 m, etc.). Libellés d'intensité corrigés :
+  « Mélange » pour Terrasse/Smooth/Flatten/Clone, « Profondeur » pour Groove.
+- Aide contextuelle de l'espace Sculpter mise à jour (résolution, densification,
+  bancs/risers, orgues, aperçu 2×–3×).
+
+#### CLI (`crates/vf-cli/src/main.rs`)
+
+- Nouvelles options `terrain sculpt` : `--dip`, `--dip-azimuth`,
+  `--bench-ratio`, `--bench-variation`, `--column-spacing`, `--column-depth`,
+  `--column-jitter`.
+- **Manque encore `--hardness`** : la dureté n'est pas exposée par le CLI,
+  seulement par l'UI. Les commandes de démo ci-dessous l'omettent.
+
+### Vérifications faites
+
+- `cargo test --workspace` : **191 tests verts** (3 ajoutés : hillshade
+  supersamplé, terrasse, orgues).
+- `cargo clippy --workspace --all-targets -- -D warnings` : propre après
+  correction d'un `manual_clamp`.
+- `cargo fmt -p vf-terrain -p vf-ui -p vf-cli` : appliqué.
+- Tests brush : 9/9.
+- Le code compile (`cargo check -p vf-app` via les tests).
+- **Pas encore** : capture et inspection visuelle du nouveau panneau Sculpter,
+  test du bouton Densifier dans l'UI, validation de la lisibilité du hillshade
+  2×/3×, comparaison avant/après avec la référence.
+
+### Essais visuels (fichiers temporaires, non versionnés)
+
+Un projet de démonstration a été fabriqué à partir de `demo-out/qual/carve2.vfproj`
+(2050², 4,9 m/cellule) :
+
+```bash
+cp demo-out/qual/carve2.vfproj /tmp/terrace2.vfproj
+cargo run -p vf-cli -- terrain sculpt /tmp/terrace2.vfproj \
+  --x 3800 --y 4200 --x2 6200 --y2 5200 \
+  --mode terrace --radius 450 --strength 1 --step 6 --dip 4 \
+  --bench-ratio 0.90 --bench-variation 0.45 \
+  --column-spacing 12 --column-depth 3.5 --column-jitter 0.5 \
+  --falloff smooth --roughness 0.08 --aa 4
+cargo run -p vf-cli -- render /tmp/terrace2.vfproj /tmp/terrace2_close.png \
+  --preview --width 1200 --height 800 --camera 5600,4300,1100 \
+  --target 5000,5000,700 --fov 45 --sun 310,35 --exposure 1.15
+```
+
+Rendus : `/tmp/terrace1.png`, `/tmp/terrace2_close.png`,
+`/tmp/terrace3_close.png` (ce dernier sur un versant raide autour de
+`(3300, 3750)`).
+
+**Constat** : la structure en bancs est là, les orgues verticales apparaissent
+sur les parois, mais les risers restent **arrondis et larges**. À 4,9 m/cellule,
+les bancs de 5–6 m sont à peine résolus et le rendu lisse les marches. Le
+résultat est plus proche de la référence qu'avant, mais pas encore convaincant.
+Le vrai gain passera par une résolution de 2–3 m/cellule et/ou une passe de
+raffermissement local des risers.
+
+Un rendu sur un versant très raide (moyenne de pente ~2,2) a été tenté mais la
+caméra était collée à la paroi et l'image n'est pas exploitable (`terrace3_close.png`).
+Il faut recadrer et probablement réduire le rayon pour éviter de tout lisser.
+
+### État Git
+
+- Travail **non commité**, **non poussé**.
+- Dernier commit : `afa4c0c Merge flight into animation, add path editor and contextual help`.
+- Fichiers modifiés (5) :
+  - `crates/vf-terrain/src/brush.rs`
+  - `crates/vf-terrain/src/lib.rs`
+  - `crates/vf-ui/src/lib.rs`
+  - `crates/vf-ui/src/help.rs`
+  - `crates/vf-cli/src/main.rs`
+- Aucun nouveau fichier de documentation ni capture n'a été ajouté pour ce lot.
+- Les projets et rendus de démo sont dans `/tmp`, pas dans le dépôt.
+
+### Prochaines étapes conseillées, dans l'ordre
+
+1. **Valider l'UI** : lancer `cargo run -p vf-app -- demo-out/qual/carve2.vfproj`,
+   ouvrir Sculpter, vérifier la section Définition, le hillshade 2×/3×, le
+   bouton Densifier (undo vidé, mesh GPU mis à jour), les sliders strates/orgues.
+2. **Tester sur une vraie paroi raide** : densifier à 2–3 m/cellule, rayon
+   100–200 m, `bench_ratio` 0.9, colonnes 6–10 m, profondeur 2–3 m ; recadrer
+   la caméra à 200–400 m de la paroi.
+3. **Raffermir les risers** :
+   - réduire encore la largeur de transition ;
+   - ajouter un paramètre `riser_sharpness` ou une passe de sharpening local
+     (cliff) après le stamp ;
+   - envisager un mesh local pour les surplombs, impossible en heightfield.
+4. **Ajouter talus / caprock / végétation de replat** : le pinceau peut
+   adoucir le pied de falaise et préserver une dalle dure au sommet ; le
+   matériau doit verdir les bancs plats.
+5. **Réduire l'écart de définition** : vérifier le coût du hillshade 4096² et
+   du densify ; éventuellement calculer le hillshade dans un worker.
+6. **GPU** : le mesh était plafonné à 1024 segments ; à 2050² il sous-échantillonnait. Corrigé à 2 049 segments dans le lot suivant.
+   Augmenter le plafond ou ajouter un LOD pour que la vue 3D montre les bancs.
+7. **CLI/docs** : ajouter `--hardness`, documenter les nouvelles options,
+   créer `docs/SCULPT.md`, refaire `docs/help/sculpt.png` avec un avant/après
+   réel, mettre à jour USAGE et ce fichier une fois le lot terminé.
+8. **Tests** : ajouter un test UI du densify (taille, undo vidé), un test de
+   continuité des colonnes entre deux stamps, et un test de rendu/normal.
+9. **Commit/push** quand le rendu est validé.
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace          # 191 tests attendus
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p vf-app -- demo-out/qual/carve2.vfproj
+
+# Densifier un projet avant de sculpter
+cargo run -p vf-cli -- terrain resample /tmp/terrace.vfproj --width 4096 --filter bicubic
+
+# Terrasse + orgues (sans --hardness, absent du CLI)
+cargo run -p vf-cli -- terrain sculpt /tmp/terrace.vfproj \
+  --x 3100 --y 3550 --x2 3500 --y2 3900 \
+  --mode terrace --radius 180 --strength 1 --step 4 --dip 5 \
+  --bench-ratio 0.92 --bench-variation 0.5 \
+  --column-spacing 8 --column-depth 2.5 --column-jitter 0.5 \
+  --falloff smooth --roughness 0.05 --aa 4
+```
 
 ---
 

@@ -146,10 +146,11 @@ pub fn ensure_animation(rig: &mut CameraRig, hf: &HeightField) -> bool {
     {
         changed = true;
     }
-    if rig.duration_s < rig.eye.duration_s() {
-        rig.duration_s = rig.eye.duration_s().clamp(0.1, 600.0);
-        changed = true;
-    }
+    // The duration is deliberately independent from the last authored key.
+    // Keys beyond the end of the clip are valid (they are simply not played);
+    // forcing duration >= eye.duration_s() made it impossible to shorten an
+    // animation after a few test keys.
+    let _ = rig.eye.duration_s();
     changed
 }
 
@@ -565,6 +566,22 @@ mod tests {
         rig.target.fixed = [320.0, 320.0, 40.0];
         rig.constraints.enabled = false;
         rig
+    }
+
+    #[test]
+    fn duration_can_be_shorter_than_the_last_key() {
+        let hf = flat_field();
+        let mut rig = demo_rig();
+        rig.duration_s = 30.0;
+        rig.eye.keys[2].time_s = 49.99;
+        ensure_animation(&mut rig, &hf);
+        rig.duration_s = 12.0;
+        ensure_animation(&mut rig, &hf);
+        assert!(
+            (rig.duration_s - 12.0).abs() < 1e-4,
+            "duration was silently bumped to {}",
+            rig.duration_s
+        );
     }
 
     #[test]

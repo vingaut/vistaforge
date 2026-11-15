@@ -82,7 +82,7 @@ impl HelpTopic {
             Self::Constraints => "Contraintes de vol",
             Self::Profile => "Profil de vol",
             Self::Preview => "Lecture de l'animation",
-            Self::Export => "Export de la séquence",
+            Self::Export => "Fichiers, export et Blender",
             Self::Terrain => "Génération du terrain",
             Self::World => "Monde et tuilage",
             Self::Modifiers => "Modificateurs",
@@ -159,7 +159,7 @@ impl HelpTopic {
                 "La lecture anime la caméra dans le viewport. On peut régler le temps à la main, changer la vitesse et basculer entre vue design et vue caméra."
             }
             Self::Export => {
-                "L'export écrit une séquence PNG, une image par frame, avec la résolution et la qualité du panneau Rendu. C'est le même rendu CPU déterministe que le bouton Render."
+                "L'espace Fichiers échange le terrain (GeoTIFF, ASCII, DEM, PNG/JPEG), exporte la scène pour Blender (GLB + textures) et les trajectoires seules (.vfcam, GLB, CSV). La séquence PNG reste dans l'onglet Lecture."
             }
             Self::Terrain => {
                 "Génère un nouveau relief à partir d'un mode, d'une taille, d'une graine et d'un preset. La génération remplace le heightfield courant."
@@ -177,7 +177,7 @@ impl HelpTopic {
                 "Le détail ajoute un relief fractal évalué au-dessus du heightfield, avec un maillage plus fin et un patch de gros plan. C'est ce qui donne du grain à quelques mètres."
             }
             Self::Sculpt => {
-                "Le pinceau sculpte directement le heightfield. Chaque trait est annulable et ne touche que la région concernée."
+                "Le pinceau sculpte directement le heightfield. Chaque trait est annulable et ne touche que la région concernée ; la densification et l'aperçu supersamplé révèlent les fins de banc."
             }
             Self::Erosion => {
                 "L'érosion hydraulique creuse des ravines et dépose des sédiments ; l'érosion thermique adoucit les pentes. Elle précède la géologie."
@@ -219,16 +219,16 @@ impl HelpTopic {
                 "Les faces du cube sont cliquables, y compris les axes négatifs.",
             ],
             Self::Transport => &[
-                "▶ Lire passe en vue caméra et démarre la lecture ; Espace fait la même chose.",
-                "Le curseur de temps place la caméra à l'instant choisi ; − et + avancent d'une image.",
+                "▶ Lire lit dans la vue courante : design (frustum et marqueurs animés) ou caméra (cadre rendu). Espace fait la même chose.",
+                "Le curseur de temps place l'animation à l'instant choisi ; − et + avancent d'une image.",
                 "Design montre le tracé et le gizmo ; Caméra montre le cadre réel.",
-                "⟲ active la boucle ; le nombre d'images est calculé depuis durée × fps.",
+                "Timeline ouvre le dock de pistes et le graph editor ; ⟲ active la boucle.",
             ],
             Self::Path => &[
                 "Tracer : cliquez sur le terrain ; chaque clic ajoute une clé et allonge la durée. L'altitude est réglable avant le clic.",
-                "Sélectionnez une clé, puis tirez la flèche X (rouge), Y (vert) ou Z (bleu). L'aimant arrondit la valeur en mètres.",
-                "Insérer au temps courant ajoute une clé sur la courbe sans déplacer les voisines.",
-                "Suppr ou Retour arrière supprime la clé sélectionnée ; Échap quitte le mode Tracer.",
+                "Trois méthodes équivalentes : gizmo X/Y/Z, glisser libre de la clé dans le viewport, ou valeurs numériques.",
+                "Glisser libre : plan de l'écran ; Maj = vertical seul ; Alt = poser la clé sur le terrain.",
+                "Timeline : glisser un losange change son temps ; double-clic insère une clé ; clic droit supprime.",
             ],
             Self::Target => &[
                 "Fixe : un point immobile, utile pour un plan large ou une orbite.",
@@ -241,6 +241,7 @@ impl HelpTopic {
                 "Une durée trop courte demande une vitesse que le corps ne peut pas atteindre : il sature et rate les virages.",
                 "Le bouton « Durée conseillée » calcule une durée à partir de la longueur du tracé et de la vitesse de croisière du profil.",
                 "Changer la durée ne déplace aucune clé : c'est la vitesse de parcours qui change.",
+                "La durée est indépendante de la dernière clé ; les clés au-delà de la fin restent conservées mais ne sont pas jouées.",
             ],
             Self::Optics => &[
                 "Un FOV large (70–90°) accélère la sensation de vitesse ; un FOV serré (25–40°) comprime la scène.",
@@ -262,16 +263,16 @@ impl HelpTopic {
                 "« Tracé de démonstration » crée un S adapté au profil, à 90 % de sa vitesse max, pour voir la différence en quelques secondes.",
             ],
             Self::Preview => &[
-                "Espace = lecture / pause. Le curseur de temps place la caméra à l'instant choisi.",
+                "Espace = lecture / pause. En vue design, l'animation se lit sans quitter l'orbite.",
                 "Vitesse ralentit ou accélère la lecture ; elle ne change pas la physique du clip.",
                 "En vue caméra, orbiter ou zoomer repasse automatiquement en vue design.",
-                "Le rendu de lecture CPU est volontairement throttlé ; le GPU est fluide.",
+                "Le graph editor trace vitesse et roulis du profil sélectionné sur la même timeline.",
             ],
             Self::Export => &[
-                "Choisissez le dossier, puis « Rendre la séquence » : frame_00000.png, frame_00001.png…",
-                "La résolution et la qualité viennent du panneau Rendu ; à pleine résolution, c'est long.",
-                "Le bouton Annuler arrête proprement le thread d'export.",
-                "L'encodeur MP4 reste disponible en CLI : vistaforge anim render … --video.",
+                "Terrain : GeoTIFF 32 bits (DEM géoréférencé), ESRI ASCII Grid, DEM v1, PNG 16 bits + sidecar JSON, JPEG de contrôle.",
+                "Heightmap : PNG, TIFF, JPEG ; la plage min/max ou le sidecar fixe l'altitude, 0/0 = automatique.",
+                "Blender : dossier scene.glb + textures + scene.json, ou addon bridge/blender/vistaforge_io.py pour les trajectoires.",
+                "Animation seule : .vfcam (rig complet), .glb (caméra + cible, réimportable dans Blender) ou .csv.",
             ],
             Self::Terrain => &[
                 "Classic est un relief fractal direct ; Modern combine des familles de formes.",
@@ -304,10 +305,11 @@ impl HelpTopic {
                 "Trop de détail à distance produit du bruit : la montée en fréquence est limitée par l'empreinte pixel.",
             ],
             Self::Sculpt => &[
-                "Mode, forme, taille, retombée et dureté se combinent ; l'aperçu du curseur montre le rayon.",
-                "La symétrie X/Y/XY/radiale duplique le trait : parfaite pour un relief taillé.",
+                "Le module travaille à la résolution du heightfield : à 25 m/cellule, un banc de 8 m ne peut pas être sculpté. Densifiez ×2 avant les terrasses fines.",
+                "Terrasse : les bancs suivent un pendage, avec une part de banc plat et un riser raide. Les orgues verticales creusent les risers.",
+                "Orgues de pente : sillons alignés sur la descente, pour une paroi basaltique. Intensité = profondeur.",
+                "L'aperçu 2×–3× lisse les facettes sans changer le terrain ; l'exagération règle le relief ombré.",
                 "Chaque trait garde une copie de la région avant/après : Ctrl+Z / Ctrl+Y.",
-                "Après un modificateur, cliquez « Recalculer le hillshade ».",
             ],
             Self::Erosion => &[
                 "Les gouttes creusent des ravines ; le dépôt et l'inertie règlent les dépôts en pied de pente.",
@@ -437,7 +439,7 @@ impl HelpTopic {
                 "Effet attendu : la roche gagne du grain et des aspérités à l'échelle métrique."
             }
             Self::Sculpt => {
-                "Effet attendu : le trait modifie le relief localement, avec un undo par région."
+                "Effet attendu : des bancs stratifiés à risers raides, des orgues verticales, et un aperçu assez net pour les distinguer."
             }
             Self::Erosion => {
                 "Effet attendu : des ravines ramifiées et des dépôts en pied de pente."
@@ -487,7 +489,9 @@ impl HelpTopic {
             Self::Export => {
                 "À essayer : 320×180 en qualité Low dans un dossier temporaire avant un export final."
             }
-            Self::Sculpt => "À essayer : symétrie XY, un trait de crête, puis Ctrl+Z.",
+            Self::Sculpt => {
+                "À essayer : densifiez, preset Terrasses basaltiques, trait horizontal, puis Orgues de pente sur le riser."
+            }
             Self::Detail => "À essayer : activez le patch de gros plan et zoomez sur une paroi.",
             Self::Gpu => {
                 "À essayer : orbitez en vue GPU, puis cliquez Render : l'image CPU reste la référence."

@@ -6,6 +6,7 @@
 //! families a texture artist wants to work on, and a JSON sidecar carries the
 //! non-mesh scene state (sun, camera, palette, height map, render settings).
 
+pub mod animation;
 pub mod gltf;
 
 use std::fs;
@@ -16,6 +17,10 @@ use vf_core::{HeightField, Palette, Project};
 use vf_detail::DetailSampler;
 use vf_mesh::MeshData;
 
+pub use animation::{
+    ANIMATION_FORMAT, AnimationReport, CameraAnimationFile, ImportedAnimation, TerrainReference,
+    export_animation, import_animation,
+};
 pub use gltf::{CameraNode, GltfScene, Material, SunNode};
 
 /// Export parameters.
@@ -73,6 +78,8 @@ pub enum ExportError {
     NoTerrain,
     #[error("surface pipeline error: {0}")]
     Pipeline(String),
+    #[error("animation error: {0}")]
+    Animation(String),
 }
 
 pub type Result<T> = std::result::Result<T, ExportError>;
@@ -110,18 +117,29 @@ pub fn export_project(
     );
     let built = build_scene(project, &export_hf, &mesh, options)?;
     let scene = &built.scene;
-    let glb = scene
-        .to_glb()
-        .map_err(ExportError::Gltf)?;
+    let glb = scene.to_glb().map_err(ExportError::Gltf)?;
     let glb_path = out_dir.join("scene.glb");
     fs::write(&glb_path, glb)?;
 
     let heightmap_path = out_dir.join("heightmap_16.png");
     write_heightmap(&export_hf, &heightmap_path)?;
-    let textures = write_texture_maps(project, &export_hf, &mesh, &built.albedo, &built.masks, out_dir)?;
+    let textures = write_texture_maps(
+        project,
+        &export_hf,
+        &mesh,
+        &built.albedo,
+        &built.masks,
+        out_dir,
+    )?;
     let sidecar_path = out_dir.join("scene.json");
-    let sidecar = build_sidecar(project, &export_hf, scene, &options.clone(), &heightmap_path)
-        .map_err(ExportError::Json)?;
+    let sidecar = build_sidecar(
+        project,
+        &export_hf,
+        scene,
+        &options.clone(),
+        &heightmap_path,
+    )
+    .map_err(ExportError::Json)?;
     fs::write(&sidecar_path, serde_json::to_vec_pretty(&sidecar)?)?;
 
     let readme = format!(
@@ -261,12 +279,23 @@ fn build_scene(
         for (index, (x, y)) in corners.into_iter().enumerate() {
             positions.push([x as f32, y as f32, sea]);
             normals.push([0.0, 0.0, 1.0]);
-            uv0.push(if index % 2 == 0 { [0.0, 0.0] } else { [1.0, 0.0] });
+            uv0.push(if index % 2 == 0 {
+                [0.0, 0.0]
+            } else {
+                [1.0, 0.0]
+            });
             uv1.push([0.0, 0.0]);
             colors.push([1.0, 1.0, 1.0, 1.0]);
             albedo.push(project.palette.water_deep.to_array());
         }
-        primitives[MATERIAL_WATER].extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        primitives[MATERIAL_WATER].extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base + 1,
+            base + 3,
+            base + 2,
+        ]);
     }
 
     let materials = build_materials(&project.palette);
@@ -317,7 +346,6 @@ fn build_scene(
         masks: vertex_masks,
     })
 }
-
 
 /// Per-vertex material masks, shared by colour and material assignment.
 #[derive(Debug, Clone, Copy, Default)]
@@ -375,10 +403,7 @@ fn masks_at(
 fn blend_albedo(palette: &Palette, masks: Masks, normal: [f32; 3]) -> [f32; 3] {
     let slope = (1.0 - normal[2]).clamp(0.0, 1.0);
     let rock = palette.rock.lerp(palette.cliff, 0.55 * slope);
-    let rock = rock.lerp(
-        palette.sand,
-        0.22 * (masks.strata - 0.5).abs() * 2.0,
-    );
+    let rock = rock.lerp(palette.sand, 0.22 * (masks.strata - 0.5).abs() * 2.0);
     let vegetation = palette.grass.lerp(palette.forest, 0.45);
     let color = rock
         .lerp(palette.sand, masks.scree * 0.55)
@@ -415,7 +440,12 @@ fn material_for(masks: Masks, project: &Project) -> usize {
 /// stays the bake UV; UV1 gives a non-stretched starting point for cliffs.
 fn box_atlas_uvs(positions: &[[f32; 3]], normals: &[[f32; 3]]) -> Vec<[f32; 2]> {
     let mut axes = vec![0u8; positions.len()];
-    let mut bounds = [[f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY]; 6];
+    let mut bounds = [[
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ]; 6];
     for (index, normal) in normals.iter().enumerate() {
         let abs = [normal[0].abs(), normal[1].abs(), normal[2].abs()];
         let axis = if abs[0] >= abs[1] && abs[0] >= abs[2] {
@@ -577,7 +607,11 @@ fn write_texture_maps(
             let dx = zx / ((x1 - x0).max(1) as f32 * sx as f32);
             let dy = zy / ((y1 - y0).max(1) as f32 * sy as f32);
             let len = (dx * dx + dy * dy + 1.0).sqrt();
-            let n = [(-dx / len) * 0.5 + 0.5, (-dy / len) * 0.5 + 0.5, (1.0 / len) * 0.5 + 0.5];
+            let n = [
+                (-dx / len) * 0.5 + 0.5,
+                (-dy / len) * 0.5 + 0.5,
+                (1.0 / len) * 0.5 + 0.5,
+            ];
             normal_img.put_pixel(
                 ox as u32,
                 oy as u32,

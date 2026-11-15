@@ -459,6 +459,89 @@ pub fn hillshade(hf: &HeightField, params: HillshadeParams) -> GrayImage {
     }
 }
 
+/// Supersampled shaded relief for the sculpting canvas.
+///
+/// The plain [`hillshade`] computes one normal per cell and therefore shows
+/// the grid as a stipple pattern when the image is scaled up. This version
+/// evaluates the gradient between cell centres at sub-cell positions with a
+/// one-cell stencil, which keeps the terraces readable while smoothing the
+/// facets. `factor` is clamped to 1..=4; the returned image is
+/// `width * factor` by `height * factor`.
+pub fn hillshade_supersampled(hf: &HeightField, params: HillshadeParams, factor: u32) -> GrayImage {
+    hillshade_sculpt(hf, params, factor, 0.0)
+}
+
+/// Supersampled shaded relief with optional contour lines.
+///
+/// `contour_step_m` draws a darker line every N metres of elevation (0
+/// disables them). Contours make thin benches readable even when the sun is
+/// almost aligned with the strata, which is exactly the case while sculpting
+/// basalt terraces. Major contours (every fifth line) are stronger.
+pub fn hillshade_sculpt(
+    hf: &HeightField,
+    params: HillshadeParams,
+    factor: u32,
+    contour_step_m: f32,
+) -> GrayImage {
+    let factor = factor.clamp(1, 4) as usize;
+    let width = hf.width() * factor;
+    let height = hf.height() * factor;
+    if factor == 1 && contour_step_m <= 0.0 {
+        return hillshade(hf, params);
+    }
+    let sun = Sun {
+        azimuth_deg_from_south: params.azimuth_deg_from_south,
+        declination_deg: params.declination_deg.clamp(0.0, 90.0),
+        ..Sun::default()
+    };
+    let l = sun.direction();
+    let l = [l.x as f32, l.y as f32, l.z as f32];
+    let ambient = params.ambient.clamp(0.0, 1.0);
+    let exaggeration = params.vertical_exaggeration;
+    let (sx, sy) = hf.spacing();
+    let mut pixels = vec![0u8; width * height];
+    let inv = 1.0 / factor as f64;
+    for y in 0..height {
+        let gy = (y as f64 + 0.5) * inv - 0.5;
+        for x in 0..width {
+            let gx = (x as f64 + 0.5) * inv - 0.5;
+            let dx = (hf.sample_bilinear(gx + 1.0, gy) - hf.sample_bilinear(gx - 1.0, gy))
+                / (2.0 * sx) as f32;
+            let dy = (hf.sample_bilinear(gx, gy + 1.0) - hf.sample_bilinear(gx, gy - 1.0))
+                / (2.0 * sy) as f32;
+            let nx = -dx * exaggeration;
+            let ny = -dy * exaggeration;
+            let nz = 1.0f32;
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-12);
+            let ndl = ((nx * l[0] + ny * l[1] + nz * l[2]) / len).max(0.0);
+            let mut shade = ambient + (1.0 - ambient) * ndl;
+            if contour_step_m > 0.0 {
+                // Height contours with a one-pixel soft edge. The height is
+                // sampled at the same sub-cell position as the normal, so the
+                // lines follow the real surface instead of the grid.
+                let h = f64::from(hf.sample_bilinear(gx, gy));
+                let step = f64::from(contour_step_m.max(0.01));
+                let unit = h / step;
+                let phase = unit - unit.floor();
+                let distance = phase.min(1.0 - phase);
+                let major = (unit.round() as i64).rem_euclid(5) == 0;
+                let width = if major { 0.16f64 } else { 0.09f64 };
+                if distance < width {
+                    let strength = if major { 0.34f64 } else { 0.20f64 };
+                    shade *= (1.0 - strength * (1.0 - distance / width)) as f32;
+                }
+            }
+            let dst_y = height - 1 - y;
+            pixels[dst_y * width + x] = (shade.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+    }
+    GrayImage {
+        width,
+        height,
+        pixels,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +589,32 @@ mod tests {
         assert_eq!(img.pixels.len(), 81);
         let flat = HeightField::filled(9, 9, 1.0, 100.0).unwrap();
         let flat_img = hillshade(&flat, HillshadeParams::default());
+        assert!(flat_img.pixels.iter().all(|&v| v == flat_img.pixels[0]));
+    }
+
+    #[test]
+    fn sculpt_hillshade_contours_darken_some_pixels() {
+        let hf = ramp(9);
+        let plain = hillshade_supersampled(&hf, HillshadeParams::default(), 2);
+        let contoured = hillshade_sculpt(&hf, HillshadeParams::default(), 2, 2.0);
+        assert_eq!(plain.pixels.len(), contoured.pixels.len());
+        assert!(
+            contoured
+                .pixels
+                .iter()
+                .zip(&plain.pixels)
+                .any(|(a, b)| a < b)
+        );
+    }
+
+    #[test]
+    fn supersampled_hillshade_has_the_requested_size() {
+        let hf = ramp(9);
+        let img = hillshade_supersampled(&hf, HillshadeParams::default(), 3);
+        assert_eq!((img.width, img.height), (27, 27));
+        assert_eq!(img.pixels.len(), 27 * 27);
+        let flat = HeightField::filled(9, 9, 1.0, 100.0).unwrap();
+        let flat_img = hillshade_supersampled(&flat, HillshadeParams::default(), 2);
         assert!(flat_img.pixels.iter().all(|&v| v == flat_img.pixels[0]));
     }
 

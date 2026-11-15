@@ -10,7 +10,7 @@ depuis la source de ce dépôt avec `cargo build --release --workspace`.
 | `vistaforge-mcp` | Serveur MCP stdio (29 outils). |
 
 Tailles : CLI 5,8 Mo, interface 24 Mo, serveur MCP 4,6 Mo. Binaires
-`strip`és, construits depuis la source au commit `229cea7` avec
+`strip`és, construits depuis la source au commit `2e021b2` avec
 `cargo build --release --workspace` (Rust 1.99.1).
 
 ## Utilisation

@@ -5,7 +5,7 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 22:05** (vitesse exacte par longueur d'arc, keyframing et liens caméra/cible).
+Dernière mise à jour : **2026-11-15 22:20** (vitesse exacte par longueur d'arc, keyframing et liens caméra/cible — binaires publiés).
 
 ---
 
@@ -13,7 +13,9 @@ Dernière mise à jour : **2026-11-15 22:05** (vitesse exacte par longueur d'arc
 
 > **État : lot terminé, compilé et publié.** Le suivi caméra du lot précédent
 > est conservé ; cette session ajoute le contrôle du timing et des liens
-> caméra/cible. Commits : `218771e` (code/docs), `82ee595` (binaires).
+> caméra/cible. Commits : `218771e` (timing/liens), `56350bf` (longueur
+> d'arc + suivi exact), `229cea7` (cible étirée indépendamment), `a3f39dd`
+> (binaires). `origin/master` à jour.
 
 ### Demande
 

@@ -78,7 +78,7 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 227 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 228 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|

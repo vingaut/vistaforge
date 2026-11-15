@@ -526,6 +526,18 @@ fn default_exact_path() -> bool {
     true
 }
 
+fn scale_keys(keys: &mut [PathKey], factor: f32) -> bool {
+    let mut changed = false;
+    for key in keys {
+        let time = key.time_s * factor;
+        if time.is_finite() && (time - key.time_s).abs() > 1e-6 {
+            key.time_s = time;
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl CameraRig {
     pub fn preset(name: &str) -> Option<Self> {
         let preset = AircraftPreset::parse(name)?;
@@ -570,53 +582,37 @@ impl CameraRig {
     }
 
     /// Scale every authored key time by `factor`, keeping positions and
-    /// handles untouched. This is how a duration change slows down or speeds
-    /// up the whole flight instead of letting the camera reach the last key
-    /// early and wait there.
+    /// handles untouched.
     pub fn scale_path_times(&mut self, factor: f32) -> bool {
         if !factor.is_finite() || factor <= 0.0 {
             return false;
         }
-        let mut changed = false;
-        for key in &mut self.eye.keys {
-            let time = key.time_s * factor;
-            if time.is_finite() && (time - key.time_s).abs() > 1e-6 {
-                key.time_s = time;
-                changed = true;
-            }
-        }
-        for key in &mut self.target.path.keys {
-            let time = key.time_s * factor;
-            if time.is_finite() && (time - key.time_s).abs() > 1e-6 {
-                key.time_s = time;
-                changed = true;
-            }
-        }
+        let mut changed = scale_keys(&mut self.eye.keys, factor);
+        changed |= scale_keys(&mut self.target.path.keys, factor);
         changed
     }
 
-    /// Set the clip duration and stretch the authored paths to fill it.
+    /// Set the clip duration and stretch each authored path to fill it.
     ///
-    /// The factor is computed from the **end of the authored path**, not from
-    /// the previous duration: this repairs projects whose duration was changed
-    /// without retiming the keys (the camera used to reach the end at the old
-    /// key time and then stand still). Positions are never modified.
+    /// The eye and target paths are scaled independently (each to its own
+    /// authored end): a target path that was longer than the eye path must not
+    /// leave the camera waiting at the end. When both paths share the same
+    /// timing, the factors are identical. Positions are never modified.
     pub fn stretch_duration(&mut self, new_duration: f32) -> bool {
         if !new_duration.is_finite() {
             return false;
         }
         let new_duration = new_duration.clamp(0.1, 600.0);
-        let path_end = self
-            .eye
-            .duration_s()
-            .max(if self.target.mode == TargetMode::Path {
-                self.target.path.duration_s()
-            } else {
-                0.0
-            });
         let mut changed = false;
-        if path_end > 1e-6 && (new_duration - path_end).abs() > 1e-5 {
-            changed |= self.scale_path_times(new_duration / path_end);
+        let eye_end = self.eye.duration_s();
+        if eye_end > 1e-6 && (new_duration - eye_end).abs() > 1e-5 {
+            changed |= scale_keys(&mut self.eye.keys, new_duration / eye_end);
+        }
+        if self.target.mode == TargetMode::Path {
+            let target_end = self.target.path.duration_s();
+            if target_end > 1e-6 && (new_duration - target_end).abs() > 1e-5 {
+                changed |= scale_keys(&mut self.target.path.keys, new_duration / target_end);
+            }
         }
         if (self.duration_s - new_duration).abs() > 1e-6 {
             self.duration_s = new_duration;
@@ -681,6 +677,24 @@ mod tests {
                 .map(|key| key.position)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn duration_stretch_fills_eye_and_target_paths_independently() {
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.duration_s = 50.0;
+        rig.eye.keys = vec![
+            PathKey::new(0.0, [0.0, 0.0, 500.0]),
+            PathKey::new(50.0, [500.0, 0.0, 500.0]),
+        ];
+        rig.target.mode = TargetMode::Path;
+        rig.target.path.keys = vec![
+            PathKey::new(0.0, [0.0, 100.0, 500.0]),
+            PathKey::new(25.0, [250.0, 100.0, 500.0]),
+        ];
+        rig.stretch_duration(100.0);
+        assert!((rig.eye.keys[1].time_s - 100.0).abs() < 1e-4);
+        assert!((rig.target.path.keys[1].time_s - 100.0).abs() < 1e-4);
     }
 
     #[test]

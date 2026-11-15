@@ -84,7 +84,9 @@ vitesse instantanée variait fortement à l'intérieur du segment.
   `exact_path = false`.
 - Cible : le mode Path utilise le même échantillonnage par longueur d'arc ; les
   modes Avance / Décalage / Retard suivent l'œil exact. Le tableau de timing
-  affiche aussi les segments de la cible (`T0→T1`).
+  affiche aussi les segments de la cible (`T0→T1`). `stretch_duration` étire
+  l'œil et la cible **indépendamment** vers la durée du clip : une cible plus
+  longue ne laisse plus la caméra attendre à la fin.
 
 Test clé : `exact_path_matches_key_times_and_target_keys` — à `t=10` la caméra
 est sur la clé, la cible sur sa clé, et à `t=5` elle est à 50 m sur un segment
@@ -92,7 +94,7 @@ de 100 m.
 
 ### Validation
 
-- `cargo test --workspace` : **227 tests verts**.
+- `cargo test --workspace` : **228 tests verts**.
 - `clippy -D warnings` propre, `cargo fmt` appliqué.
 - Capture UI avec le tableau de timing et les barres de segment.
 - Tests ajoutés : répartition par distance, vitesse cible, cible Offset,

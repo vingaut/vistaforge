@@ -11,6 +11,8 @@ bytemuck.workspace = true
 eframe.workspace = true
 glam.workspace = true
 image.workspace = true
+ron.workspace = true
+serde.workspace = true
 vf-core = { path = "../vf-core" }
 vf-export = { path = "../vf-export" }
 vf-geology = { path = "../vf-geology" }

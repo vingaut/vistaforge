@@ -33,6 +33,23 @@ struct TerrainVertex {
     height: f32,
 }
 
+/// CPU-side mesh produced by [`build_terrain_mesh`]. It can be built on a
+/// worker thread and uploaded later, so the GPU mesh refresh never blocks the
+/// message pump on a large terrain with modifiers.
+pub struct TerrainMeshData {
+    vertices: Vec<TerrainVertex>,
+    indices: Vec<u32>,
+    origin: DVec3,
+    min_z: f64,
+    max_z: f64,
+    summary: String,
+    sea_level: f64,
+    spacing_x: f64,
+    spacing_y: f64,
+    width: usize,
+    height: usize,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct GpuUniforms {
@@ -93,18 +110,13 @@ impl GpuViewport {
         &self.label
     }
 
-    /// Rebuild the GPU mesh after a terrain or modifier change.
-    pub fn set_terrain(
-        &self,
-        project: &Project,
-        heightfield: &HeightField,
-        water_enabled: bool,
-    ) -> Result<(), String> {
+    /// Upload CPU mesh data built off the UI thread.
+    pub fn upload_mesh(&self, data: TerrainMeshData) -> Result<(), String> {
         let mut renderer = self
             .shared
             .lock()
             .map_err(|_| "GPU state lock poisoned".to_string())?;
-        renderer.upload_terrain(project, heightfield, water_enabled)
+        renderer.upload_mesh_data(data)
     }
 
     /// Build the per-frame paint callback for an egui rectangle.
@@ -449,38 +461,40 @@ impl GpuRenderer {
         heightfield: &HeightField,
         water_enabled: bool,
     ) -> Result<(), String> {
-        let (vertices, indices, origin, min_z, max_z, summary) =
-            build_terrain(project, heightfield, water_enabled)?;
-        if vertices.is_empty() || indices.is_empty() {
+        let data = build_terrain_mesh(project, heightfield, water_enabled)?;
+        self.upload_mesh_data(data)
+    }
+
+    fn upload_mesh_data(&mut self, data: TerrainMeshData) -> Result<(), String> {
+        if data.vertices.is_empty() || data.indices.is_empty() {
             return Err("terrain mesh is empty".into());
         }
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vistaforge-gpu-terrain-vertices"),
-                contents: bytemuck::cast_slice(&vertices),
+                contents: bytemuck::cast_slice(&data.vertices),
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vistaforge-gpu-terrain-indices"),
-                contents: bytemuck::cast_slice(&indices),
+                contents: bytemuck::cast_slice(&data.indices),
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             });
         self.vertex_buffer = vertex_buffer;
         self.index_buffer = index_buffer;
-        self.index_count = indices.len() as u32;
-        self.origin = origin;
-        self.min_z = min_z;
-        self.relief = (max_z - min_z).max(1.0);
-        self.sea_level = f64::from(project.water.sea_level);
-        let (sx, sy) = heightfield.spacing();
-        self.world_extent = ((heightfield.width() as f64 - 1.0) * sx)
-            .max((heightfield.height() as f64 - 1.0) * sy)
+        self.index_count = data.indices.len() as u32;
+        self.origin = data.origin;
+        self.min_z = data.min_z;
+        self.relief = (data.max_z - data.min_z).max(1.0);
+        self.sea_level = data.sea_level;
+        self.world_extent = ((data.width as f64 - 1.0) * data.spacing_x)
+            .max((data.height as f64 - 1.0) * data.spacing_y)
             .max(self.relief * 1.2)
             .max(1.0);
-        self.mesh_summary = summary;
+        self.mesh_summary = data.summary;
         Ok(())
     }
 
@@ -682,13 +696,11 @@ fn rgba(color: vf_core::Rgb) -> [f32; 4] {
     [color.r, color.g, color.b, 1.0]
 }
 
-type MeshBuild = (Vec<TerrainVertex>, Vec<u32>, DVec3, f64, f64, String);
-
-fn build_terrain(
+pub fn build_terrain_mesh(
     project: &Project,
     heightfield: &HeightField,
     water_enabled: bool,
-) -> Result<MeshBuild, String> {
+) -> Result<TerrainMeshData, String> {
     let modulated = if project.modifiers.active().next().is_some() {
         Some(
             vf_modifiers::apply(heightfield, &project.modifiers, project.seed)
@@ -817,7 +829,19 @@ fn build_terrain(
         "{}×{} -> {}×{} sommets · {} triangles",
         width, height, cols, rows, triangles
     );
-    Ok((vertices, indices, origin, min_z, max_z, summary))
+    Ok(TerrainMeshData {
+        vertices,
+        indices,
+        origin,
+        min_z,
+        max_z,
+        summary,
+        sea_level: f64::from(project.water.sea_level),
+        spacing_x,
+        spacing_y,
+        width,
+        height,
+    })
 }
 
 #[cfg(test)]
@@ -846,7 +870,8 @@ mod tests {
     #[test]
     fn mesh_contains_terrain_and_water() {
         let heightfield = terrain(65, 10.0);
-        let (vertices, indices, ..) = build_terrain(&project(), &heightfield, true).unwrap();
+        let mesh = build_terrain_mesh(&project(), &heightfield, true).unwrap();
+        let (vertices, indices) = (&mesh.vertices, &mesh.indices);
         assert!(vertices.iter().any(|vertex| vertex.kind == 0.0));
         assert!(vertices.iter().any(|vertex| vertex.kind == 1.0));
         assert_eq!(indices.len() % 3, 0);
@@ -859,21 +884,24 @@ mod tests {
         let heightfield = terrain(65, 10.0);
         let mut project = project();
         project.water.enabled = false;
-        let (vertices, ..) = build_terrain(&project, &heightfield, true).unwrap();
+        let mesh = build_terrain_mesh(&project, &heightfield, true).unwrap();
+        let vertices = &mesh.vertices;
         assert!(vertices.iter().all(|vertex| vertex.kind == 0.0));
     }
 
     #[test]
     fn water_ui_flag_removes_water() {
         let heightfield = terrain(65, 10.0);
-        let (vertices, ..) = build_terrain(&project(), &heightfield, false).unwrap();
+        let mesh = build_terrain_mesh(&project(), &heightfield, false).unwrap();
+        let vertices = &mesh.vertices;
         assert!(vertices.iter().all(|vertex| vertex.kind == 0.0));
     }
 
     #[test]
     fn mesh_resolution_is_capped() {
         let heightfield = terrain(1300, 5.0);
-        let (vertices, ..) = build_terrain(&project(), &heightfield, true).unwrap();
+        let mesh = build_terrain_mesh(&project(), &heightfield, true).unwrap();
+        let vertices = &mesh.vertices;
         let max = (MAX_MESH_SEGMENTS + 1) * (MAX_MESH_SEGMENTS + 1) + 4;
         assert!(vertices.len() <= max, "{} vertices", vertices.len());
     }
@@ -881,7 +909,8 @@ mod tests {
     #[test]
     fn mesh_normals_are_finite_and_upward() {
         let heightfield = terrain(65, 10.0);
-        let (vertices, ..) = build_terrain(&project(), &heightfield, true).unwrap();
+        let mesh = build_terrain_mesh(&project(), &heightfield, true).unwrap();
+        let vertices = &mesh.vertices;
         for vertex in vertices.iter().filter(|v| v.kind == 0.0) {
             assert!(vertex.normal.iter().all(|value| value.is_finite()));
             assert!(vertex.normal[2] > 0.0);

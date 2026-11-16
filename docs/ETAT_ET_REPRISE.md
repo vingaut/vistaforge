@@ -5,7 +5,94 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-15 23:50** (garde au sol et contournement de parois — livré, binaires publiés).
+Dernière mise à jour : **2026-11-17 00:25** (aide consultable, historique global, opérations en arrière-plan — livré).
+
+---
+
+## 0octodecies. Session du 16 novembre — aide, historique et travail en arrière-plan (LIVRÉ)
+
+> **État : livré, testé.** L'aide est désactivée au démarrage et reste
+> consultable ; le viewport ne se fige plus pendant les opérations longues ;
+> Annuler/Rétablir est global et réglable. **51 tests `vf-ui` verts.**
+
+### Aide
+
+- `HelpState::new()` démarre avec `enabled: false`. Le bouton **Aide
+  flottante** et `F1` l'activent ; `×`, `Échap` ou `F1` la ferment.
+- La carte **reste ouverte** après le premier survol : on peut déplacer la
+  souris jusqu'à elle, la faire défiler, ouvrir son sommaire et cliquer dedans.
+  C'est le défaut signalé (« dès qu'on sort du menu, elle se ferme ») qui est
+  corrigé. `Épingler` fige en plus la fiche contre le survol d'autres réglages.
+- La carte est déplaçable (`Area::movable`) et contrainte au viewport ; son
+  bouton **Aide** ouvre la fiche dans la rubrique complète.
+- Nouvel espace **Aide** dans la barre des espaces : sommaire filtrable à
+  gauche, fiche en pleine largeur au centre, navigation précédente/suivante.
+  Il est toujours accessible, indépendamment de l'aide flottante.
+- 26e fiche « Aide, historique et préférences » ; les tests vérifient le
+  contenu, le visuel 960×540 et le nommage CLI.
+
+### Barre d'outils
+
+- Suppression des boutons **Open** / **Save** et du champ de chemin éditables,
+  doublons de l'espace **Fichiers**. La barre affiche seulement le nom du
+  projet (cliquable pour aller dans Fichiers), Annuler/Rétablir, Render, Aide,
+  Aide flottante et Préférences.
+
+### Progression et réactivité
+
+- Nouveau module `crates/vf-ui/src/jobs.rs` : `Task`, `Progress`, `TaskKind`,
+  `TaskResult`. Les opérations lourdes quittent le thread UI :
+  génération, ouverture/enregistrement `.vfproj`, import/export DEM,
+  composition du monde, cuisson des modificateurs, densification, export
+  Blender, export/import de trajectoire, écriture PNG.
+- Le maillage GPU (`gpu_view::build_terrain_mesh`) et l'ombrage du sculpteur
+  sont aussi calculés hors du thread UI, puis téléversés.
+- Panneau de progression persistant en bas : titre, phase, pourcentage quand il
+  est connu, sinon barre animée + temps écoulé. Les aperçus/rendus CPU et les
+  séquences d'animation utilisent la même zone. Aucun dialogue modal, donc la
+  boucle de messages Windows continue de tourner : plus de « VistaForge ne
+  répond pas » pendant un calcul normal.
+- Le heightfield passe en `Arc<HeightField>` (copy-on-write). Les clones pour
+  les aperçus et les tâches sont désormais des incréments de référence ; une
+  modification réelle ne copie les échantillons qu'une fois par geste.
+
+### Annuler/Rétablir
+
+- Nouveau module `crates/vf-ui/src/history.rs` :
+  - baseline + détection des changements du projet et du pointeur de
+    heightfield ; les mouvements de caméra et les horodatages sont ignorés ;
+  - regroupement des glissers par délai (400 ms par défaut) ;
+  - `Ctrl+Z`, `Ctrl+Y`, `Ctrl+Maj+Z`, boutons de barre d'outils et section
+    Historique de l'espace Sculpter ;
+  - entrées `Snapshot` (projet + `Arc<HeightField>`) et entrées compactes
+    `Sculpt` (région `BrushUndo`) ;
+  - profondeur, budget mémoire, délai et inclusion des traits réglables dans
+    **Préférences** ; élagage automatique et statistiques affichées ;
+  - la pile locale de sculpture est remplacée par l'historique global.
+- Les opérations longues ne peuvent pas être annulées pendant leur exécution ;
+  le message le signale.
+
+### Tests
+
+- `help_is_off_by_default`
+- `the_card_latches_so_it_can_be_reached_and_read`
+- `task_publishes_progress_and_returns_its_result`
+- `unknown_progress_still_moves_the_gauge`
+- 10 tests d'historique : commit/undo, caméra ignorée, champ de vision,
+  regroupement, profondeur, redo vidé, pinceau, stroke vide, réglages
+  persistés, budget mémoire.
+- `cargo test -p vf-ui` : 51 tests verts.
+
+### Restes connus
+
+- Le graphe d'animation reconstruit encore sa piste (`RigTrack`) sur le thread
+  UI après un changement de rig ; les clips très longs (plusieurs minutes)
+  peuvent coûter une fraction de seconde. À déplacer dans `jobs` si nécessaire.
+- La barre de progression des rendus CPU est une estimation fondée sur le
+  dernier temps mesuré : elle n'a pas de compteur de tuiles interne.
+- La capture de documentation inclut désormais `workspace_help.png` ; les
+  visuels `docs/help/*.png` restent les mêmes, la nouvelle fiche réutilise
+  `workspace.png`.
 
 ---
 

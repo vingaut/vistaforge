@@ -3055,6 +3055,8 @@ dependencies = [
  "eframe",
  "glam",
  "image",
+ "ron",
+ "serde",
  "vf-core",
  "vf-export",
  "vf-flight",

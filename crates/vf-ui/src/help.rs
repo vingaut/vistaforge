@@ -14,6 +14,7 @@ use crate::animation_ui::TimingFit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HelpTopic {
+    Help,
     Workspace,
     Navigation,
     Transport,
@@ -42,7 +43,8 @@ pub enum HelpTopic {
 }
 
 impl HelpTopic {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
+        Self::Help,
         Self::Workspace,
         Self::Navigation,
         Self::Transport,
@@ -72,6 +74,7 @@ impl HelpTopic {
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::Help => "Aide, historique et préférences",
             Self::Workspace => "Les espaces de travail",
             Self::Navigation => "Naviguer dans la scène",
             Self::Transport => "Lire et régler le temps",
@@ -102,7 +105,7 @@ impl HelpTopic {
 
     pub fn section(self) -> &'static str {
         match self {
-            Self::Workspace | Self::Navigation | Self::Transport => "Prise en main",
+            Self::Help | Self::Workspace | Self::Navigation | Self::Transport => "Prise en main",
             Self::Path
             | Self::Target
             | Self::Timing
@@ -128,6 +131,9 @@ impl HelpTopic {
 
     pub fn summary(self) -> &'static str {
         match self {
+            Self::Help => {
+                "L'aide contextuelle est désactivée au démarrage. Activez-la avec le bouton Aide flottante ou F1 : elle s'ouvre sur le réglage survolé et reste affichée pour que vous puissiez la lire, la faire défiler et changer de fiche. L'espace Aide, lui, est toujours disponible."
+            }
             Self::Workspace => {
                 "Chaque espace de la barre du haut regroupe un métier. Le panneau de gauche ne montre que les réglages utiles à cet espace ; le viewport et le projet restent les mêmes."
             }
@@ -208,6 +214,13 @@ impl HelpTopic {
 
     pub fn bullets(self) -> &'static [&'static str] {
         match self {
+            Self::Help => &[
+                "Onglet Aide : le sommaire complet et les fiches se lisent dans le panneau central, sans dépendre du survol.",
+                "Aide flottante : une carte reste ouverte après le premier survol. Vous pouvez la déplacer, la faire défiler et cliquer dans son sommaire.",
+                "Épingler fige la fiche : le survol d'autres réglages ne la remplace plus. ×, Échap ou F1 la ferment.",
+                "Annuler/Rétablir : Ctrl+Z et Ctrl+Y (ou Ctrl+Maj+Z) dans l'application ; la profondeur et la mémoire se règlent dans Préférences.",
+                "Les opérations longues s'exécutent en arrière-plan avec une jauge de progression : l'interface reste utilisable.",
+            ],
             Self::Workspace => &[
                 "Animation réunit désormais tracé, réglages, profil de vol et lecture : l'ancien onglet Vol a disparu.",
                 "Changer d'espace ne change pas le projet, seulement les outils affichés.",
@@ -222,7 +235,7 @@ impl HelpTopic {
                 "▶ Lire lit dans la vue courante : design (frustum et marqueurs animés) ou caméra (cadre rendu). Espace fait la même chose.",
                 "Le curseur de temps place l'animation à l'instant choisi ; − et + avancent d'une image.",
                 "Design montre le tracé et le gizmo ; Caméra montre le cadre réel.",
-                "Timeline ouvre le dock de pistes et le graph editor ; ⟲ active la boucle.",
+                "Timeline ouvre le dock de pistes et le graph editor ; le bouton Boucle relance la lecture.",
                 "Un bandeau signale quand le profil est loin derrière le tracé : allongez la durée, mettez l'ease à 0 ou passez en Manuel.",
             ],
             Self::Path => &[
@@ -368,6 +381,7 @@ impl HelpTopic {
 
     pub fn image(self) -> Option<HelpImage> {
         Some(match self {
+            Self::Help => HelpImage::Workspace,
             Self::Workspace => HelpImage::Workspace,
             Self::Navigation => HelpImage::Gizmo,
             Self::Transport | Self::Preview => HelpImage::Transport,
@@ -394,6 +408,9 @@ impl HelpTopic {
 
     pub fn caption(self) -> &'static str {
         match self {
+            Self::Help => {
+                "Effet attendu : l'aide reste consultable et l'historique permet de revenir sur une modification."
+            }
             Self::Workspace => {
                 "Effet attendu : le même terrain, mais un panneau et des outils adaptés à la tâche."
             }
@@ -499,6 +516,9 @@ impl HelpTopic {
             Self::Detail => "À essayer : activez le patch de gros plan et zoomez sur une paroi.",
             Self::Gpu => {
                 "À essayer : orbitez en vue GPU, puis cliquez Render : l'image CPU reste la référence."
+            }
+            Self::Help => {
+                "À essayer : ouvrez l'onglet Aide, puis activez Aide flottante et survolez un réglage sans bouger la souris vers la carte."
             }
             _ => "",
         }
@@ -717,13 +737,21 @@ pub struct HelpContext<'a> {
 }
 
 pub struct HelpState {
+    /// Floating contextual help. Off by default: the dedicated Aide workspace
+    /// is always available, but the card never opens by itself.
     pub enabled: bool,
+    /// Freeze the current topic: hovering another control no longer replaces
+    /// the card. Without pinning, the card still follows the last hovered
+    /// control but no longer closes when the pointer leaves it.
     pub pinned: bool,
     shown: Option<HelpTopic>,
     hovered: Option<HelpTopic>,
     registered: Vec<(Rect, HelpTopic)>,
     last_rect: Rect,
     textures: std::collections::HashMap<HelpImage, egui::TextureHandle>,
+    browse_topic: HelpTopic,
+    browse_filter: String,
+    browse_request: Option<HelpTopic>,
 }
 
 impl Default for HelpState {
@@ -735,18 +763,30 @@ impl Default for HelpState {
 impl HelpState {
     pub fn new() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             pinned: false,
             shown: None,
             hovered: None,
             registered: Vec::new(),
             last_rect: Rect::NOTHING,
             textures: std::collections::HashMap::new(),
+            browse_topic: HelpTopic::Help,
+            browse_filter: String::new(),
+            browse_request: None,
         }
     }
 
-    /// Open a topic and keep it visible (used by F1 and by the screenshot
-    /// capture mode).
+    /// Open a topic without pinning it. The card latches on that topic so the
+    /// user can move the pointer into it and read it.
+    pub fn open(&mut self, topic: HelpTopic) {
+        self.enabled = true;
+        self.pinned = false;
+        self.shown = Some(topic);
+        self.hovered = Some(topic);
+    }
+
+    /// Open a topic and pin it (used by the screenshot capture mode and by
+    /// `VISTAFORGE_HELP_TOPIC`).
     pub fn reveal(&mut self, topic: HelpTopic) {
         self.enabled = true;
         self.pinned = true;
@@ -763,11 +803,10 @@ impl HelpState {
     }
 
     pub fn toggle(&mut self, fallback: HelpTopic) {
-        if self.enabled {
+        if self.enabled && self.shown.is_some() {
             self.close();
         } else {
-            self.enabled = true;
-            self.reveal(fallback);
+            self.open(fallback);
         }
     }
 
@@ -798,12 +837,24 @@ impl HelpState {
         self.last_rect
     }
 
+    /// Take a request to open the dedicated Aide workspace on a topic.
+    pub fn take_browse_request(&mut self) -> Option<HelpTopic> {
+        self.browse_request.take()
+    }
+
+    pub fn set_browse_topic(&mut self, topic: HelpTopic) {
+        self.browse_topic = topic;
+    }
+
     pub fn resolve(&mut self, ctx: &egui::Context) {
+        if !self.enabled {
+            self.hovered = None;
+            return;
+        }
+        // Over the card itself: keep the current topic and let egui route the
+        // clicks to the card (scroll, sommaire, épinglage).
         let Some(pointer) = ctx.input(|input| input.pointer.hover_pos()) else {
             self.hovered = None;
-            if !self.pinned {
-                self.shown = None;
-            }
             return;
         };
         if self.last_rect.is_positive() && self.last_rect.contains(pointer) {
@@ -817,15 +868,17 @@ impl HelpState {
             }
         }
         self.hovered = found;
-        if let Some(topic) = found {
+        if let Some(topic) = found
+            && !self.pinned
+        {
             self.shown = Some(topic);
-        } else if !self.pinned {
-            self.shown = None;
         }
+        // Leaving the controls does *not* close the card: it stays latched on
+        // the last topic so the user can move the pointer into it.
     }
 
-    /// Draw the card and return its rectangle (used to keep the viewport
-    /// editor from adding keys when clicking the help window).
+    /// Draw the floating card and return its rectangle (used to keep the
+    /// viewport editor from adding keys when clicking the help window).
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -843,17 +896,22 @@ impl HelpState {
             return self.last_rect;
         };
         let width = (viewport.width() * 0.46).clamp(360.0, 540.0);
-        let max_height = (viewport.height() - bottom_offset - 26.0).max(240.0);
+        // Reserve room for the header, the table of contents and the footer so
+        // the whole card stays inside the viewport, not just its scroll area.
+        let max_height = (viewport.height() - bottom_offset - 150.0).max(160.0);
         let pos = Pos2::new(
             viewport.left() + 12.0,
             viewport.bottom() - 12.0 - bottom_offset,
         );
         let mut close = false;
         let mut jump = None;
+        let mut browse = None;
         let area = egui::Area::new(egui::Id::unique("vf-context-help"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pos)
+            .default_pos(pos)
             .pivot(egui::Align2::LEFT_BOTTOM)
+            .movable(true)
+            .constrain_to(viewport)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(Color32::from_rgba_unmultiplied(15, 20, 28, 248))
@@ -862,8 +920,9 @@ impl HelpState {
                     .inner_margin(egui::Margin::same(11))
                     .show(ui, |ui| {
                         ui.set_max_width(width);
-                        ui.set_max_height(max_height + 40.0);
-                        // Header: section, title, navigation and pin.
+                        ui.set_max_height(max_height + 150.0);
+                        // Header: section, title, navigation, pin and close.
+                        // The title bar is also the drag handle of the card.
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(
@@ -877,6 +936,11 @@ impl HelpState {
                                         .size(14.0)
                                         .color(Color32::from_rgb(226, 240, 255)),
                                 );
+                                ui.label(
+                                    egui::RichText::new("glisser pour déplacer")
+                                        .size(8.0)
+                                        .color(Color32::from_rgb(105, 122, 145)),
+                                );
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -887,10 +951,19 @@ impl HelpState {
                                     }
                                     if ui
                                         .selectable_label(self.pinned, "Épingler")
-                                        .on_hover_text("Épingler cette fiche")
+                                        .on_hover_text(
+                                            "Figer cette fiche : le survol d'autres réglages ne la remplace plus",
+                                        )
                                         .clicked()
                                     {
                                         self.pinned = !self.pinned;
+                                    }
+                                    if ui
+                                        .small_button("Aide")
+                                        .on_hover_text("Ouvrir la rubrique Aide complète")
+                                        .clicked()
+                                    {
+                                        browse = Some(topic);
                                     }
                                     let list = if available.is_empty() {
                                         &HelpTopic::ALL[..]
@@ -969,65 +1042,12 @@ impl HelpState {
                         egui::ScrollArea::vertical()
                             .max_height(max_height)
                             .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(topic.summary())
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(205, 218, 234)),
-                                );
-                                if let Some(line) = topic.live_line(context) {
-                                    ui.add_space(3.0);
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .monospace()
-                                            .size(9.5)
-                                            .color(Color32::from_rgb(120, 200, 220)),
-                                    );
-                                }
-                                ui.add_space(5.0);
-                                for bullet in topic.bullets() {
-                                    ui.label(
-                                        egui::RichText::new(format!("• {bullet}"))
-                                            .size(10.2)
-                                            .color(Color32::from_rgb(184, 198, 216)),
-                                    );
-                                }
-                                ui.add_space(6.0);
-                                if let Some(image) = topic.image()
-                                    && let Some(texture) = self.texture(ctx, image)
-                                {
-                                    let size = texture.size_vec2();
-                                    let scale = (width / size.x).min(1.0);
-                                    ui.add(
-                                        egui::Image::from_texture(egui::load::SizedTexture::new(
-                                            texture.id(),
-                                            size * scale,
-                                        ))
-                                        .corner_radius(5.0),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(topic.caption())
-                                            .italics()
-                                            .size(9.5)
-                                            .color(Color32::from_rgb(168, 184, 202)),
-                                    );
-                                }
-                                let try_it = topic.try_it();
-                                if !try_it.is_empty() {
-                                    ui.add_space(5.0);
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "À essayer : {}",
-                                            try_it.trim_start_matches("À essayer : ")
-                                        ))
-                                        .size(9.5)
-                                        .color(Color32::from_rgb(255, 214, 138)),
-                                    );
-                                }
+                                self.topic_body(ui, ctx, topic, context, width);
                             });
                         ui.add_space(3.0);
                         ui.label(
                             egui::RichText::new(
-                                "F1 : ouvrir/fermer · survolez un réglage · Épingler fige la fiche",
+                                "La carte reste ouverte · F1/Échap ferme · Épingler fige la fiche",
                             )
                             .size(8.5)
                             .color(Color32::from_rgb(112, 130, 152)),
@@ -1039,10 +1059,159 @@ impl HelpState {
             self.shown = Some(topic);
             self.pinned = true;
         }
+        if let Some(topic) = browse {
+            self.browse_request = Some(topic);
+        }
         if close {
             self.close();
         }
         self.last_rect
+    }
+
+    /// Compact index shown in the Aide workspace side panel.
+    pub fn browse_index_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Sommaire").strong().size(13.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.browse_filter)
+                .hint_text("Filtrer les fiches…")
+                .desired_width(f32::INFINITY),
+        );
+        let needle = self.browse_filter.trim().to_ascii_lowercase();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut section = "";
+                for topic in HelpTopic::ALL {
+                    if !needle.is_empty() {
+                        let haystack =
+                            format!("{} {} {}", topic.title(), topic.section(), topic.summary())
+                                .to_ascii_lowercase();
+                        if !haystack.contains(&needle) {
+                            continue;
+                        }
+                    }
+                    if topic.section() != section {
+                        section = topic.section();
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(section.to_uppercase())
+                                .size(9.0)
+                                .color(Color32::from_rgb(130, 156, 188)),
+                        );
+                    }
+                    if ui
+                        .selectable_label(self.browse_topic == topic, topic.title())
+                        .clicked()
+                    {
+                        self.browse_topic = topic;
+                    }
+                }
+            });
+    }
+
+    /// Full page shown in the central panel of the Aide workspace.
+    pub fn browse_page_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        context: &HelpContext<'_>,
+    ) {
+        let topic = self.browse_topic;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(topic.section().to_uppercase())
+                    .size(9.5)
+                    .color(Color32::from_rgb(120, 156, 192)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right-to-left layout: add "Suivante" before "Précédente"
+                // so the visual order stays Précédente → Suivante.
+                if ui.button("Suivante ›").clicked() {
+                    self.browse_topic = neighbour_topic(topic, HelpTopic::ALL, true);
+                }
+                if ui.button("‹ Précédente").clicked() {
+                    self.browse_topic = neighbour_topic(topic, HelpTopic::ALL, false);
+                }
+            });
+        });
+        ui.add_space(3.0);
+        ui.label(
+            egui::RichText::new(topic.title())
+                .strong()
+                .size(22.0)
+                .color(Color32::from_rgb(226, 240, 255)),
+        );
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let width = ui.available_width().min(980.0);
+                self.topic_body(ui, ctx, topic, context, width);
+                ui.add_space(18.0);
+            });
+    }
+
+    /// Shared article body: summary, live values, key points, visual and
+    /// "try it" line. Used by the floating card and the full Aide page.
+    fn topic_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        topic: HelpTopic,
+        context: &HelpContext<'_>,
+        width: f32,
+    ) {
+        ui.label(
+            egui::RichText::new(topic.summary())
+                .size(12.0)
+                .color(Color32::from_rgb(205, 218, 234)),
+        );
+        if let Some(line) = topic.live_line(context) {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(line)
+                    .monospace()
+                    .size(10.0)
+                    .color(Color32::from_rgb(120, 200, 220)),
+            );
+        }
+        ui.add_space(6.0);
+        for bullet in topic.bullets() {
+            ui.label(
+                egui::RichText::new(format!("• {bullet}"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(184, 198, 216)),
+            );
+        }
+        ui.add_space(8.0);
+        if let Some(image) = topic.image()
+            && let Some(texture) = self.texture(ctx, image)
+        {
+            let size = texture.size_vec2();
+            let scale = (width / size.x).min(1.0);
+            ui.add(
+                egui::Image::from_texture(egui::load::SizedTexture::new(
+                    texture.id(),
+                    size * scale,
+                ))
+                .corner_radius(6.0),
+            );
+            ui.label(
+                egui::RichText::new(topic.caption())
+                    .italics()
+                    .size(10.0)
+                    .color(Color32::from_rgb(168, 184, 202)),
+            );
+        }
+        let try_it = topic.try_it();
+        if !try_it.is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(try_it)
+                    .size(10.5)
+                    .color(Color32::from_rgb(255, 214, 138)),
+            );
+        }
     }
 
     fn texture(&mut self, ctx: &egui::Context, image: HelpImage) -> Option<&egui::TextureHandle> {
@@ -1058,6 +1227,18 @@ impl HelpState {
             entry.insert(texture);
         }
         self.textures.get(&image)
+    }
+}
+
+fn neighbour_topic(topic: HelpTopic, list: [HelpTopic; 26], forward: bool) -> HelpTopic {
+    let index = list
+        .iter()
+        .position(|candidate| *candidate == topic)
+        .unwrap_or(0);
+    if forward {
+        list[(index + 1) % list.len()]
+    } else {
+        list[(index + list.len() - 1) % list.len()]
     }
 }
 
@@ -1109,9 +1290,29 @@ mod tests {
     }
 
     #[test]
+    fn help_is_off_by_default() {
+        let help = HelpState::new();
+        assert!(!help.enabled);
+        assert!(!help.is_open());
+    }
+
+    #[test]
+    fn f1_opens_help_even_when_only_the_toggle_was_enabled() {
+        let mut help = HelpState::new();
+        help.enabled = true;
+        help.toggle(HelpTopic::Workspace);
+        assert!(help.is_open());
+        assert_eq!(help.shown, Some(HelpTopic::Workspace));
+        help.toggle(HelpTopic::Workspace);
+        assert!(!help.enabled);
+        assert!(!help.is_open());
+    }
+
+    #[test]
     fn hover_resolution_uses_the_most_specific_rectangle() {
         let ctx = egui::Context::default();
         let mut help = HelpState::new();
+        help.open(HelpTopic::Workspace);
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
         let pointer = Pos2::new(200.0, 300.0);
         // The panel fallback is wide; the section is nested inside it.
@@ -1133,6 +1334,51 @@ mod tests {
         assert_eq!(help.hovered, Some(HelpTopic::Optics));
         assert_eq!(help.shown, Some(HelpTopic::Optics));
         assert!(help.is_open());
+    }
+
+    #[test]
+    fn the_card_latches_so_it_can_be_reached_and_read() {
+        let ctx = egui::Context::default();
+        let mut help = HelpState::new();
+        help.open(HelpTopic::Timing);
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let panel = Rect::from_min_max(Pos2::new(0.0, 100.0), Pos2::new(360.0, 600.0));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.0),
+                events: vec![egui::Event::PointerMoved(Pos2::new(200.0, 300.0))],
+                ..Default::default()
+            },
+            |ui| {
+                help.begin_frame();
+                help.register_front(panel, HelpTopic::Timing);
+                help.resolve(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(help.shown, Some(HelpTopic::Timing));
+        // Move the pointer toward the card, outside every registered control.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.1),
+                events: vec![egui::Event::PointerMoved(Pos2::new(620.0, 60.0))],
+                ..Default::default()
+            },
+            |ui| {
+                help.begin_frame();
+                help.register_front(panel, HelpTopic::Timing);
+                help.resolve(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(help.hovered, None);
+        assert_eq!(
+            help.shown,
+            Some(HelpTopic::Timing),
+            "the card must stay open while the pointer travels into it"
+        );
     }
 
     #[test]

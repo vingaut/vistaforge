@@ -42,7 +42,9 @@ batch, les tests et la reproductibilité.
 4. **UI monolithique** : un seul panneau avec des `CollapsingHeader`, une
    trentaine de champs codés en dur dans `VistaForgeApp`. Chaque nouveau
    réglage demande de toucher la structure de l'app.
-5. **Pas d'undo/redo**, pas d'historique de modifications.
+5. **Pas d'undo/redo** à la date de cet audit — **corrigé le 16 novembre 2026** :
+   historique global réglable (profondeur, mémoire, regroupement), y compris
+   les traits de pinceau. Voir la session du 16 novembre dans `ETAT_ET_REPRISE.md`.
 6. **Pas de dépôt Git** : le projet n'est pas versionné (`git` absent), ce qui
    est un risque majeur dès qu'on ajoute des modules.
 7. **Le plan et le code ont divergé** : le plan décrit `wgpu`, une timeline et

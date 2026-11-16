@@ -15,6 +15,8 @@ mod animation_ui;
 mod file_picker;
 mod gpu_view;
 mod help;
+mod history;
+mod jobs;
 mod timeline;
 mod view_gizmo;
 
@@ -27,7 +29,7 @@ use vf_core::{
 };
 use vf_io::RgbaImage;
 use vf_render::{RenderOptions, RenderOutput, render_with_options};
-use vf_terrain::brush::{Brush, BrushMode, BrushShape, BrushUndo, Falloff, Stroke, Symmetry};
+use vf_terrain::brush::{Brush, BrushMode, BrushShape, Falloff, Stroke, Symmetry};
 use vf_terrain::{HillshadeParams, ResampleFilter};
 
 const PREVIEW_SIZE: (u32, u32) = (960, 540);
@@ -55,10 +57,11 @@ enum Workspace {
     Camera,
     Render,
     Files,
+    Help,
 }
 
 impl Workspace {
-    const ALL: [Workspace; 13] = [
+    const ALL: [Workspace; 14] = [
         Self::Terrain,
         Self::Modifiers,
         Self::Rock,
@@ -72,6 +75,7 @@ impl Workspace {
         Self::Camera,
         Self::Render,
         Self::Files,
+        Self::Help,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -96,6 +100,7 @@ impl Workspace {
             Self::Camera => "Caméra",
             Self::Render => "Rendu",
             Self::Files => "Fichiers",
+            Self::Help => "Aide",
         }
     }
 }
@@ -114,8 +119,6 @@ impl TerrainMode {
         }
     }
 }
-
-type BlenderExportResult = std::result::Result<(vf_export::ExportReport, Option<String>), String>;
 
 struct RenderTask {
     receiver: Receiver<std::result::Result<RenderOutput, String>>,
@@ -142,6 +145,17 @@ enum AnimationExportMsg {
     Failed(String),
 }
 
+struct HillshadeTask {
+    receiver: Receiver<vf_terrain::GrayImage>,
+    revision: u64,
+}
+
+struct GpuMeshTask {
+    receiver: Receiver<std::result::Result<gpu_view::TerrainMeshData, String>>,
+    revision: u64,
+    started: Instant,
+}
+
 struct AnimationExportTask {
     receiver: Receiver<AnimationExportMsg>,
     cancel: Arc<AtomicBool>,
@@ -162,6 +176,7 @@ struct CaptureStep {
     design: bool,
     compare: bool,
     select_key: bool,
+    preferences: bool,
 }
 
 struct CaptureState {
@@ -186,6 +201,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: true,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_help",
@@ -195,6 +211,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: true,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_target",
@@ -204,6 +221,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: false,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_profile",
@@ -213,6 +231,7 @@ impl CaptureState {
                 design: true,
                 compare: true,
                 select_key: false,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_profile_clean",
@@ -222,6 +241,7 @@ impl CaptureState {
                 design: true,
                 compare: true,
                 select_key: false,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_target_clean",
@@ -231,6 +251,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: false,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_transport",
@@ -240,6 +261,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: false,
+                preferences: false,
             },
             CaptureStep {
                 name: "animation_timing",
@@ -249,6 +271,7 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: false,
+                preferences: false,
             },
         ];
         for (name, workspace) in [
@@ -265,6 +288,7 @@ impl CaptureState {
             ("workspace_camera", Workspace::Camera),
             ("workspace_render", Workspace::Render),
             ("workspace_files", Workspace::Files),
+            ("workspace_help", Workspace::Help),
         ] {
             steps.push(CaptureStep {
                 name,
@@ -274,8 +298,19 @@ impl CaptureState {
                 design: true,
                 compare: false,
                 select_key: false,
+                preferences: false,
             });
         }
+        steps.push(CaptureStep {
+            name: "workspace_preferences",
+            workspace: Workspace::Help,
+            anim_tab: AnimTab::Path,
+            help: None,
+            design: true,
+            compare: false,
+            select_key: false,
+            preferences: true,
+        });
         Self {
             dir,
             steps,
@@ -312,7 +347,14 @@ pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
 
 struct VistaForgeApp {
     project: Project,
-    heightfield: HeightField,
+    /// Copy-on-write terrain. Preview renders, background jobs and undo
+    /// snapshots share the same samples until an edit actually needs a new
+    /// version, which keeps large heightfields responsive.
+    heightfield: Arc<HeightField>,
+    /// Cached heightfield statistics. `workspace_panel` is redrawn every
+    /// frame; scanning a 4k/16k heightfield there would freeze the UI.
+    terrain_stats: Option<vf_core::TerrainStats>,
+    terrain_stats_hf: Option<Arc<HeightField>>,
     project_path: Option<PathBuf>,
     path_input: String,
     render_path: String,
@@ -337,6 +379,8 @@ struct VistaForgeApp {
     gpu_enabled: bool,
     gpu_mesh_dirty: bool,
     gpu_mesh_due: Option<Instant>,
+    gpu_mesh_revision: u64,
+    gpu_mesh_task: Option<GpuMeshTask>,
     gpu_error: Option<String>,
     show_final_render: bool,
 
@@ -371,10 +415,10 @@ struct VistaForgeApp {
 
     sculpt_brush: Brush,
     sculpt_stroke: Option<Stroke>,
-    sculpt_undo: Vec<BrushUndo>,
-    sculpt_redo: Vec<BrushUndo>,
     sculpt_texture: Option<egui::TextureHandle>,
     sculpt_texture_dirty: bool,
+    hillshade_revision: u64,
+    hillshade_task: Option<HillshadeTask>,
     sculpt_detail: u32,
     sculpt_exaggeration: f32,
     sculpt_contours_m: f32,
@@ -423,11 +467,13 @@ struct VistaForgeApp {
     blender_export_dir: String,
     blender_subdivision: u32,
     blender_export_animation: bool,
-    blender_export_task: Option<Receiver<BlenderExportResult>>,
     file_picker: file_picker::FilePicker,
     anim_export_dir: String,
     anim_export_task: Option<AnimationExportTask>,
+    task: Option<jobs::Task>,
 
+    history: history::History,
+    preferences_open: bool,
     help: help::HelpState,
     last_viewport_rect: egui::Rect,
     capture: Option<CaptureState>,
@@ -452,9 +498,19 @@ impl VistaForgeApp {
             let (project, heightfield) = default_scene();
             (project, heightfield, None)
         };
+        let heightfield = Arc::new(heightfield);
+        let history = history::History::new(
+            history::load_settings().unwrap_or_default(),
+            &project,
+            &heightfield,
+        );
         let mut app = Self {
             project,
             heightfield,
+            terrain_stats: None,
+            terrain_stats_hf: None,
+            history,
+            preferences_open: false,
             project_path: project_path.clone(),
             path_input: project_path
                 .as_ref()
@@ -479,6 +535,8 @@ impl VistaForgeApp {
             gpu_enabled: true,
             gpu_mesh_dirty: false,
             gpu_mesh_due: None,
+            gpu_mesh_revision: 0,
+            gpu_mesh_task: None,
             gpu_error: None,
             show_final_render: false,
             workspace: Workspace::Terrain,
@@ -509,10 +567,10 @@ impl VistaForgeApp {
             add_modifier_kind: ModifierKind::Displace,
             sculpt_brush: Brush::default(),
             sculpt_stroke: None,
-            sculpt_undo: Vec::new(),
-            sculpt_redo: Vec::new(),
             sculpt_texture: None,
             sculpt_texture_dirty: true,
+            hillshade_revision: 0,
+            hillshade_task: None,
             sculpt_detail: 2,
             sculpt_exaggeration: 1.8,
             sculpt_contours_m: 5.0,
@@ -560,10 +618,10 @@ impl VistaForgeApp {
             blender_export_dir: "blender-out".into(),
             blender_subdivision: 2,
             blender_export_animation: true,
-            blender_export_task: None,
             file_picker: file_picker::FilePicker::default(),
             anim_export_dir: "anim-out".into(),
             anim_export_task: None,
+            task: None,
             help: help::HelpState::new(),
             last_viewport_rect: egui::Rect::NOTHING,
             capture: std::env::var("VISTAFORGE_CAPTURE")
@@ -665,8 +723,8 @@ impl VistaForgeApp {
         self.clouds = self.project.render.clouds;
         self.water = self.project.render.water;
         self.exposure = self.project.render.exposure;
-        self.render_width = self.project.render.width.clamp(320, 3840);
-        self.render_height = self.project.render.height.clamp(240, 2160);
+        self.render_width = self.project.render.width.clamp(64, 8192);
+        self.render_height = self.project.render.height.clamp(64, 8192);
         self.selected_modifier = self
             .selected_modifier
             .min(self.project.modifiers.items.len());
@@ -737,9 +795,27 @@ impl VistaForgeApp {
         if ctx.text_edit_focused() {
             return;
         }
+        let (undo, redo) = ctx.input(|input| {
+            let command = input.modifiers.command;
+            let shift = input.modifiers.shift;
+            (
+                command && !shift && input.key_pressed(egui::Key::Z),
+                command
+                    && (input.key_pressed(egui::Key::Y)
+                        || (shift && input.key_pressed(egui::Key::Z))),
+            )
+        });
+        if undo {
+            self.undo_history(ctx);
+            return;
+        }
+        if redo {
+            self.redo_history(ctx);
+            return;
+        }
         let save = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S));
         if save {
-            self.save_project();
+            self.save_project(ctx);
             return;
         }
         let open = ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::O));
@@ -748,12 +824,7 @@ impl VistaForgeApp {
             return;
         }
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
-            let topic = help_topic_for_workspace(self.workspace);
-            if self.help.enabled && self.help.is_open() {
-                self.help.close();
-            } else {
-                self.help.reveal(topic);
-            }
+            self.help.toggle(help_topic_for_workspace(self.workspace));
             return;
         }
         let pressed = ctx.input(|input| {
@@ -818,7 +889,27 @@ impl VistaForgeApp {
         }
     }
 
+    fn terrain_stats(&mut self) -> vf_core::TerrainStats {
+        let stale = self.terrain_stats.is_none()
+            || self
+                .terrain_stats_hf
+                .as_ref()
+                .is_none_or(|cached| !Arc::ptr_eq(cached, &self.heightfield));
+        if stale {
+            self.terrain_stats = Some(self.heightfield.stats());
+            self.terrain_stats_hf = Some(Arc::clone(&self.heightfield));
+        }
+        self.terrain_stats
+            .unwrap_or_else(|| self.heightfield.stats())
+    }
+
+    fn invalidate_terrain_stats(&mut self) {
+        self.terrain_stats_hf = None;
+    }
+
     fn mark_dirty(&mut self) {
+        self.hillshade_revision = self.hillshade_revision.wrapping_add(1);
+        self.gpu_mesh_revision = self.gpu_mesh_revision.wrapping_add(1);
         self.invalidate_preview(true);
     }
 
@@ -868,6 +959,10 @@ impl VistaForgeApp {
         if self.gpu.is_none() || !self.gpu_enabled {
             return;
         }
+        if self.gpu_mesh_task.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(40));
+            return;
+        }
         if !self.gpu_mesh_dirty {
             return;
         }
@@ -878,38 +973,102 @@ impl VistaForgeApp {
             ctx.request_repaint_after(Duration::from_millis(40));
             return;
         }
-        let started = Instant::now();
-        let result = self
-            .gpu
-            .as_ref()
-            .map(|gpu| gpu.set_terrain(&self.project, &self.heightfield, self.water));
-        match result {
-            Some(Ok(())) => {
-                self.gpu_mesh_dirty = false;
-                self.gpu_mesh_due = None;
-                self.status = format!(
-                    "Maillage GPU synchronisé en {} ms",
-                    started.elapsed().as_millis()
-                );
+        let project = self.project.clone();
+        let heightfield = Arc::clone(&self.heightfield);
+        let water = self.water;
+        let revision = self.gpu_mesh_revision;
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = gpu_view::build_terrain_mesh(&project, &heightfield, water);
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+        self.gpu_mesh_task = Some(GpuMeshTask {
+            receiver,
+            revision,
+            started: Instant::now(),
+        });
+        self.gpu_mesh_due = None;
+        self.status = "Synchronisation du maillage GPU en arrière-plan…".into();
+        ctx.request_repaint();
+    }
+
+    fn poll_gpu_mesh(&mut self, ctx: &egui::Context) {
+        let Some(task) = &self.gpu_mesh_task else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(Ok(data)) => {
+                let revision = task.revision;
+                let elapsed = task.started.elapsed();
+                self.gpu_mesh_task = None;
+                if !self.gpu_enabled || self.gpu.is_none() {
+                    self.gpu_mesh_dirty = false;
+                    self.gpu_mesh_due = None;
+                    return;
+                }
+                if revision != self.gpu_mesh_revision {
+                    // A newer edit superseded this mesh; rebuild on the next
+                    // pump instead of uploading an outdated surface.
+                    self.gpu_mesh_dirty = true;
+                    self.gpu_mesh_due = Some(Instant::now());
+                    ctx.request_repaint();
+                    return;
+                }
+                match self.gpu.as_ref().map(|gpu| gpu.upload_mesh(data)) {
+                    Some(Ok(())) => {
+                        self.gpu_mesh_dirty = false;
+                        self.gpu_mesh_due = None;
+                        self.status =
+                            format!("Maillage GPU synchronisé en {} ms", elapsed.as_millis());
+                    }
+                    Some(Err(error)) => {
+                        self.gpu_error = Some(error.clone());
+                        self.gpu_enabled = false;
+                        self.gpu_mesh_dirty = false;
+                        self.gpu_mesh_due = None;
+                        self.mark_dirty();
+                        self.gpu_mesh_dirty = false;
+                        self.gpu_mesh_due = None;
+                        self.status = format!("GPU désactivé : {error}");
+                    }
+                    None => {}
+                }
             }
-            Some(Err(error)) => {
+            Ok(Err(error)) => {
+                self.gpu_mesh_task = None;
                 self.gpu_error = Some(error.clone());
                 self.gpu_enabled = false;
                 self.gpu_mesh_dirty = false;
                 self.gpu_mesh_due = None;
+                self.status = format!("GPU désactivé : {error}");
                 self.mark_dirty();
                 self.gpu_mesh_dirty = false;
                 self.gpu_mesh_due = None;
-                self.status = format!("GPU désactivé : {error}");
             }
-            None => {}
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(40));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.gpu_mesh_task = None;
+                self.gpu_mesh_dirty = false;
+                self.gpu_mesh_due = None;
+                self.status = "Maillage GPU : thread interrompu".into();
+            }
         }
     }
 
     fn new_project(&mut self, ctx: egui::Context) {
+        if self.task.is_some() {
+            self.status =
+                "Attendez la fin de l'opération en cours avant de créer un projet.".into();
+            return;
+        }
         let (project, heightfield) = default_scene();
         self.project = project;
-        self.heightfield = heightfield;
+        self.heightfield = Arc::new(heightfield);
+        self.history.clear(&self.project, &self.heightfield);
         self.project_path = None;
         self.path_input = "landscape.vfproj".into();
         self.status = "New project".into();
@@ -917,8 +1076,6 @@ impl VistaForgeApp {
         self.last_image = None;
         self.sculpt_texture = None;
         self.sculpt_texture_dirty = true;
-        self.sculpt_undo.clear();
-        self.sculpt_redo.clear();
         self.anim_track = None;
         self.anim_track_error = None;
         self.anim_live_sample = None;
@@ -933,59 +1090,172 @@ impl VistaForgeApp {
             self.status = format!("Open failed: {} does not exist", path.display());
             return;
         }
-        match vf_io::load_project(&path) {
-            Ok(loaded) => {
-                self.project = loaded.project;
-                self.heightfield = loaded.heightfield;
-                self.project_path = Some(path.clone());
-                self.path_input = path.display().to_string();
-                self.status = format!("Loaded {}", path.display());
-                self.texture = None;
-                self.last_image = loaded.preview;
-                self.sculpt_texture = None;
-                self.sculpt_texture_dirty = true;
-                self.sculpt_undo.clear();
-                self.sculpt_redo.clear();
-                self.anim_track = None;
-                self.anim_track_error = None;
-                self.anim_live_sample = None;
-                self.sync_from_project();
-                self.sync_orbit_from_camera();
-                self.refresh_preview(ctx);
-            }
-            Err(error) => self.status = format!("Open failed: {error}"),
+        let title = format!(
+            "Chargement de {}…",
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        );
+        if self.start_task(
+            &ctx,
+            jobs::TaskKind::LoadProject,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Lecture de l'archive du projet…");
+                progress.set_indeterminate();
+                match vf_io::load_project(&path) {
+                    Ok(loaded) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::ProjectLoaded { loaded }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(error.to_string()),
+                }
+            },
+        ) {
+            self.status = format!("{title} (l'interface reste utilisable)");
         }
     }
 
-    fn save_project(&mut self) {
+    /// Apply one undo step and refresh every cache that depends on the scene.
+    fn undo_history(&mut self, ctx: &egui::Context) {
+        if self.task.is_some() {
+            self.status = "Attendez la fin de l'opération en cours avant d'annuler.".into();
+            return;
+        }
+        if self.sculpt_stroke.is_some() {
+            self.status = "Terminez le trait de pinceau avant d'annuler.".into();
+            return;
+        }
+        // Drop the cached stats Arc before a sculpt-region undo: otherwise it
+        // keeps the heightfield shared and `Arc::make_mut` clones the whole
+        // terrain just to patch a small rectangle.
+        self.invalidate_terrain_stats();
+        let Some(label) = self.history.undo(&mut self.project, &mut self.heightfield) else {
+            self.status = "Rien à annuler".into();
+            return;
+        };
+        self.after_history_change(ctx, format!("Annulé : {label}"));
+    }
+
+    /// Apply one redo step.
+    fn redo_history(&mut self, ctx: &egui::Context) {
+        if self.task.is_some() {
+            self.status = "Attendez la fin de l'opération en cours avant de rétablir.".into();
+            return;
+        }
+        if self.sculpt_stroke.is_some() {
+            self.status = "Terminez le trait de pinceau avant de rétablir.".into();
+            return;
+        }
+        self.invalidate_terrain_stats();
+        let Some(label) = self.history.redo(&mut self.project, &mut self.heightfield) else {
+            self.status = "Rien à rétablir".into();
+            return;
+        };
+        self.after_history_change(ctx, format!("Rétabli : {label}"));
+    }
+
+    fn after_history_change(&mut self, ctx: &egui::Context, status: String) {
+        self.anim_playing = false;
+        self.anim_editor.trace = false;
+        self.anim_editor.selection = None;
+        self.anim_edit_target = false;
+        self.anim_framed = false;
+        self.rig_time = self
+            .rig_time
+            .clamp(0.0, self.project.rig.duration_s.max(0.1));
+        self.sculpt_stroke = None;
+        self.texture = None;
+        self.last_image = None;
+        self.sculpt_texture = None;
+        self.sculpt_texture_dirty = true;
+        self.invalidate_terrain_stats();
+        self.anim_track = None;
+        self.anim_track_error = None;
+        self.anim_live_sample = None;
+        self.anim_trail_cache = None;
+        self.anim_compare_cache = None;
+        self.anim_profile_cache = None;
+        self.anim_curve_cache = None;
+        self.anim_camera_dirty = true;
+        self.sync_from_project();
+        self.sync_orbit_from_camera();
+        self.status = status.clone();
+        self.rig_status = status;
+        self.refresh_preview(ctx.clone());
+    }
+
+    fn save_project(&mut self, ctx: &egui::Context) {
         let path = normalized_project_path(&self.path_input);
         if path.as_os_str().is_empty() {
             self.status = "Save failed: empty path".into();
             return;
         }
-        match vf_io::save_project(
-            &self.project,
-            &self.heightfield,
-            &path,
-            self.last_image.as_ref(),
+        let project = self.project.clone();
+        let heightfield = Arc::clone(&self.heightfield);
+        let preview = self.last_image.clone();
+        let result_path = path.clone();
+        let title = format!(
+            "Enregistrement de {}…",
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        );
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::SaveProject,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Préparation du manifeste…");
+                progress.set_indeterminate();
+                progress.set_phase("Compression du heightfield et écriture de l'archive…");
+                progress.set_indeterminate();
+                match vf_io::save_project(&project, &heightfield, &path, preview.as_ref()) {
+                    Ok(()) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::ProjectSaved { path: result_path }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(error.to_string()),
+                }
+            },
         ) {
-            Ok(()) => {
-                self.project_path = Some(path.clone());
-                self.path_input = path.display().to_string();
-                self.status = format!("Saved {}", path.display());
-            }
-            Err(error) => self.status = format!("Save failed: {error}"),
+            self.status = format!("{title} (l'interface reste utilisable)");
         }
     }
 
-    fn save_render(&mut self) {
-        let Some(image) = &self.last_image else {
+    fn save_render(&mut self, ctx: &egui::Context) {
+        let Some(image) = self.last_image.clone() else {
             self.status = "Nothing to save: render first".into();
             return;
         };
-        match image.save_png(Path::new(self.render_path.trim())) {
-            Ok(()) => self.status = format!("Wrote {}", self.render_path),
-            Err(error) => self.status = format!("PNG save failed: {error}"),
+        let path = PathBuf::from(self.render_path.trim());
+        let result_path = path.clone();
+        let title = format!(
+            "Écriture de l'image {}…",
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        );
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::SaveRender,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Encodage PNG…");
+                progress.set_indeterminate();
+                match image.save_png(&path) {
+                    Ok(()) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::RenderSaved { path: result_path }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(format!("PNG save failed: {error}")),
+                }
+            },
+        ) {
+            self.status = format!("{title} (l'interface reste utilisable)");
         }
     }
 
@@ -1027,36 +1297,40 @@ impl VistaForgeApp {
         } else {
             None
         };
-        let started = Instant::now();
-        let generated =
-            vf_geology::build(&project.source, erosion.as_ref(), &project.geology, seed);
-        match generated {
-            Ok(heightfield) => {
-                project.sync_terrain(&heightfield);
-                project.camera = vf_scene::auto_frame(
-                    &heightfield,
-                    f64::from(self.render_width) / f64::from(self.render_height.max(1)),
-                );
-                self.project = project;
-                self.heightfield = heightfield;
-                self.texture = None;
-                self.last_image = None;
-                self.sculpt_texture = None;
-                self.sculpt_texture_dirty = true;
-                self.sculpt_undo.clear();
-                self.sculpt_redo.clear();
-                self.status = format!(
-                    "Generated {} {}x{} seed {} in {} ms",
-                    self.mode.label(),
-                    size,
-                    size,
-                    self.seed,
-                    started.elapsed().as_millis()
-                );
-                self.sync_orbit_from_camera();
-                self.refresh_preview(ctx);
-            }
-            Err(error) => self.status = format!("Generation failed: {error}"),
+        let aspect = f64::from(self.render_width) / f64::from(self.render_height.max(1));
+        let task_seed = self.seed;
+        let title = format!("Génération du terrain {size}²…");
+        let started = self.start_task(
+            &ctx,
+            jobs::TaskKind::Generate,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Génération du relief fractal…");
+                progress.set_indeterminate();
+                let begin = Instant::now();
+                match vf_geology::build(&project.source, erosion.as_ref(), &project.geology, seed) {
+                    Ok(heightfield) => {
+                        progress
+                            .set_phase("Érosion et géologie terminées, préparation de la caméra…");
+                        progress.set(0.92);
+                        let mut project = project;
+                        project.sync_terrain(&heightfield);
+                        project.camera = vf_scene::auto_frame(&heightfield, aspect);
+                        progress.set(1.0);
+                        jobs::TaskResult::TerrainGenerated {
+                            project,
+                            heightfield,
+                            size,
+                            seed: task_seed,
+                            elapsed_ms: begin.elapsed().as_millis(),
+                        }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(error.to_string()),
+                }
+            },
+        );
+        if started {
+            self.status = format!("{title} (l'interface reste utilisable)");
         }
     }
 
@@ -1136,7 +1410,7 @@ impl VistaForgeApp {
             self.pending_full = false;
         }
         let project = self.project.clone();
-        let heightfield = self.heightfield.clone();
+        let heightfield = Arc::clone(&self.heightfield);
         let width = options.width;
         let height = options.height;
         let (sender, receiver) = mpsc::channel();
@@ -1212,6 +1486,305 @@ impl VistaForgeApp {
                 }
             } else {
                 ctx.request_repaint_after(Duration::from_millis(40));
+            }
+        }
+    }
+
+    /// Queue a heavy operation on a worker thread. Only one generic task runs
+    /// at a time so two operations cannot fight over the same output file.
+    fn start_task<F>(
+        &mut self,
+        ctx: &egui::Context,
+        kind: jobs::TaskKind,
+        title: impl Into<String>,
+        work: F,
+    ) -> bool
+    where
+        F: FnOnce(Arc<jobs::Progress>) -> jobs::TaskResult + Send + 'static,
+    {
+        if self.task.is_some() {
+            self.status = "Une opération est déjà en cours : attendez la fin ou annulez-la.".into();
+            return false;
+        }
+        // A discrete operation starts a new history step: commit whatever the
+        // user was adjusting before it.
+        self.history.flush(&self.project, &self.heightfield);
+        self.task = Some(jobs::Task::spawn(ctx, kind, title, work));
+        ctx.request_repaint();
+        true
+    }
+
+    fn poll_task(&mut self, ctx: &egui::Context) {
+        let Some((kind, poll)) = self.task.as_ref().map(|task| (task.kind, task.poll(ctx))) else {
+            return;
+        };
+        match poll {
+            jobs::Poll::Pending => {}
+            jobs::Poll::Finished(result) => {
+                self.task = None;
+                self.apply_task_result(ctx, kind, *result);
+            }
+            jobs::Poll::Disconnected => {
+                self.task = None;
+                self.status = "Opération interrompue (le thread de travail s'est arrêté).".into();
+            }
+        }
+    }
+
+    fn apply_task_result(
+        &mut self,
+        ctx: &egui::Context,
+        kind: jobs::TaskKind,
+        result: jobs::TaskResult,
+    ) {
+        match result {
+            jobs::TaskResult::Failed(error) => {
+                let message = format!("Échec : {error}");
+                self.status = message.clone();
+                if matches!(
+                    kind,
+                    jobs::TaskKind::ImportTerrain
+                        | jobs::TaskKind::ExportTerrain
+                        | jobs::TaskKind::Blender
+                        | jobs::TaskKind::AnimationExport
+                        | jobs::TaskKind::AnimationImport
+                ) {
+                    self.files_status = message;
+                }
+            }
+            jobs::TaskResult::ProjectLoaded { loaded } => {
+                let path = loaded.path.clone();
+                self.project = loaded.project;
+                self.heightfield = Arc::new(loaded.heightfield);
+                self.project_path = Some(path.clone());
+                self.path_input = path.display().to_string();
+                self.status = format!("Chargé {}", path.display());
+                self.texture = None;
+                self.last_image = loaded.preview;
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.anim_track = None;
+                self.anim_track_error = None;
+                self.anim_live_sample = None;
+                self.anim_trail_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_profile_cache = None;
+                self.anim_curve_cache = None;
+                self.history.clear(&self.project, &self.heightfield);
+                self.sync_from_project();
+                self.sync_orbit_from_camera();
+                self.refresh_preview(ctx.clone());
+            }
+            jobs::TaskResult::ProjectSaved { path } => {
+                self.project_path = Some(path.clone());
+                self.path_input = path.display().to_string();
+                self.status = format!("Enregistré {}", path.display());
+            }
+            jobs::TaskResult::RenderSaved { path } => {
+                self.status = format!("Image écrite : {}", path.display());
+            }
+            jobs::TaskResult::TerrainGenerated {
+                project,
+                heightfield,
+                size,
+                seed,
+                elapsed_ms,
+            } => {
+                self.history
+                    .label(format!("Génération {size}² seed {seed}"));
+                self.project = project;
+                self.heightfield = Arc::new(heightfield);
+                self.texture = None;
+                self.last_image = None;
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.status = format!(
+                    "Généré {} {size}x{size} seed {seed} en {elapsed_ms} ms",
+                    match self.mode {
+                        TerrainMode::Classic => "Classic",
+                        TerrainMode::Modern => "Modern",
+                    }
+                );
+                self.sync_from_project();
+                self.sync_orbit_from_camera();
+                self.refresh_preview(ctx.clone());
+            }
+            jobs::TaskResult::TerrainImported { path, imported } => {
+                let (sx, sy) = imported.heightfield.spacing();
+                let stem = path
+                    .file_stem()
+                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                self.history.label("Import du terrain");
+                self.project.source = imported.source;
+                self.project.meta.name = if stem.is_empty() {
+                    "Terrain importé".into()
+                } else {
+                    stem.clone()
+                };
+                self.project.legacy = Some(LegacyMeta {
+                    dem_title: stem,
+                    dem_comment: imported.description.clone(),
+                    ..LegacyMeta::default()
+                });
+                self.heightfield = Arc::new(imported.heightfield);
+                self.project.sync_terrain(&self.heightfield);
+                self.project.camera = vf_scene::auto_frame(
+                    &self.heightfield,
+                    f64::from(self.project.render.width)
+                        / f64::from(self.project.render.height.max(1)),
+                );
+                self.project_path = None;
+                self.path_input = path.with_extension("vfproj").display().to_string();
+                self.anim_framed = false;
+                self.anim_editor.selection = None;
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.anim_track = None;
+                self.anim_live_sample = None;
+                self.anim_trail_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_profile_cache = None;
+                self.anim_curve_cache = None;
+                self.sync_from_project();
+                self.sync_orbit_from_camera();
+                self.mark_dirty();
+                self.start_render(ctx.clone(), false);
+                self.files_status = format!(
+                    "Importé {}×{} · {:.2} m/cellule · {}",
+                    self.heightfield.width(),
+                    self.heightfield.height(),
+                    (sx + sy) * 0.5,
+                    imported.description
+                );
+                self.status = self.files_status.clone();
+            }
+            jobs::TaskResult::TerrainExported { report } => {
+                self.files_status = format!(
+                    "Exporté {}×{} en {} ({}){}",
+                    report.width,
+                    report.height,
+                    report.path.display(),
+                    report.format,
+                    if report.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", report.warnings.join(" "))
+                    }
+                );
+                self.status = self.files_status.clone();
+            }
+            jobs::TaskResult::TerrainComposed { heightfield } => {
+                self.history.label("Composition du monde");
+                self.heightfield = Arc::new(heightfield);
+                self.project.sync_terrain(&self.heightfield);
+                self.project.camera = vf_scene::auto_frame(
+                    &self.heightfield,
+                    f64::from(self.render_width.max(1)) / f64::from(self.render_height.max(1)),
+                );
+                self.texture = None;
+                self.last_image = None;
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.status = format!(
+                    "Monde composé : {}×{}",
+                    self.heightfield.width(),
+                    self.heightfield.height()
+                );
+                self.sync_from_project();
+                self.sync_orbit_from_camera();
+                self.mark_dirty();
+                self.start_render(ctx.clone(), false);
+            }
+            jobs::TaskResult::ModifiersBaked { heightfield } => {
+                self.history.label("Cuisson des modificateurs");
+                self.heightfield = Arc::new(heightfield);
+                self.project.modifiers.clear();
+                self.selected_modifier = 0;
+                self.project.sync_terrain(&self.heightfield);
+                self.texture = None;
+                self.last_image = None;
+                self.status = "Modificateurs cuits dans le heightfield".into();
+                self.mark_dirty();
+                self.start_render(ctx.clone(), false);
+            }
+            jobs::TaskResult::TerrainDensified {
+                heightfield,
+                old_width,
+                new_width,
+            } => {
+                self.history.label("Densification du terrain");
+                self.heightfield = Arc::new(heightfield);
+                let new_cell = self
+                    .heightfield
+                    .spacing()
+                    .0
+                    .max(self.heightfield.spacing().1);
+                self.project.sync_terrain(&self.heightfield);
+                self.size = new_width as u32;
+                self.sculpt_texture = None;
+                self.sculpt_texture_dirty = true;
+                self.mark_dirty();
+                self.refresh_preview(ctx.clone());
+                self.sculpt_status = format!(
+                    "Terrain densifié : {old_width}² → {new_width}², cellule {new_cell:.2} m."
+                );
+            }
+            jobs::TaskResult::BlenderExported { report, note } => {
+                self.files_status = format!(
+                    "Blender : {} sommets, {} triangles, {} matériaux → {}{}",
+                    report.vertices,
+                    report.triangles,
+                    report.materials,
+                    report.glb.display(),
+                    note.map_or_else(String::new, |note| format!(" · {note}"))
+                );
+                self.status = self.files_status.clone();
+            }
+            jobs::TaskResult::AnimationExported { report } => {
+                self.files_status = format!(
+                    "Animation exportée : {} images, {:.2}s, {} → {}",
+                    report.frames,
+                    report.duration_s,
+                    report.format,
+                    report.path.display()
+                );
+                self.anim_io_path = report.path.display().to_string();
+                self.rig_status = self.files_status.clone();
+                self.status = self.files_status.clone();
+            }
+            jobs::TaskResult::AnimationImported { imported } => {
+                let keys = imported.rig.eye.keys.len();
+                let duration = imported.rig.duration_s;
+                let terrain_note = imported
+                    .terrain
+                    .as_ref()
+                    .map_or_else(String::new, |terrain| {
+                        format!(
+                            " · terrain d'origine {}×{} à {:.2} m/cellule",
+                            terrain.width, terrain.height, terrain.spacing_x
+                        )
+                    });
+                self.history.label("Import de l'animation");
+                self.project.rig = imported.rig;
+                self.project.rig.enabled = true;
+                self.rig_time = 0.0;
+                self.anim_editor.selection = None;
+                self.anim_editor.trace = false;
+                self.anim_edit_target = self.project.rig.target.mode == TargetMode::Path;
+                self.anim_track = None;
+                self.anim_live_sample = None;
+                self.anim_trail_cache = None;
+                self.anim_compare_cache = None;
+                self.anim_profile_cache = None;
+                self.anim_curve_cache = None;
+                self.anim_camera_dirty = true;
+                self.mark_animation_changed();
+                self.files_status = format!(
+                    "Animation importée : {keys} clés, {duration:.2}s, {}{terrain_note}",
+                    imported.format
+                );
+                self.rig_status = self.files_status.clone();
+                self.status = self.files_status.clone();
             }
         }
     }
@@ -1492,32 +2065,29 @@ impl VistaForgeApp {
                     )
                     .clicked()
                 {
-                    match vf_terrain::world::compose(
-                        &self.heightfield,
-                        &self.project.world,
-                        self.project.seed,
+                    let heightfield = Arc::clone(&self.heightfield);
+                    let world = self.project.world.clone();
+                    let seed = self.project.seed;
+                    let title = "Composition du monde…".to_string();
+                    if self.start_task(
+                        ctx,
+                        jobs::TaskKind::ComposeWorld,
+                        title.clone(),
+                        move |progress| {
+                            progress.set_phase("Assemblage des tuiles et raccords…");
+                            progress.set_indeterminate();
+                            match vf_terrain::world::compose(&heightfield, &world, seed) {
+                                Ok(heightfield) => {
+                                    progress.set(1.0);
+                                    jobs::TaskResult::TerrainComposed { heightfield }
+                                }
+                                Err(error) => {
+                                    jobs::TaskResult::Failed(format!("Monde : {error}"))
+                                }
+                            }
+                        },
                     ) {
-                        Ok(composed) => {
-                            self.heightfield = composed;
-                            self.project.sync_terrain(&self.heightfield);
-                            self.project.camera = vf_scene::auto_frame(
-                                &self.heightfield,
-                                f64::from(self.render_width.max(1))
-                                    / f64::from(self.render_height.max(1)),
-                            );
-                            self.texture = None;
-                            self.last_image = None;
-                            self.sculpt_texture = None;
-                            self.sculpt_texture_dirty = true;
-                            self.status = format!(
-                                "Monde composé : {}×{}",
-                                self.heightfield.width(),
-                                self.heightfield.height()
-                            );
-                            self.mark_dirty();
-                            self.start_render(ctx.clone(), false);
-                        }
-                        Err(error) => self.status = format!("Monde : {error}"),
+                        self.status = format!("{title} (l'interface reste utilisable)");
                     }
                 }
                 ui.label(
@@ -1539,24 +2109,32 @@ impl VistaForgeApp {
         );
     }
 
-    fn bake_modifiers(&mut self) {
+    fn bake_modifiers(&mut self, ctx: &egui::Context) {
         if self.project.modifiers.is_empty() {
             self.status = "Modifier stack is empty".into();
             return;
         }
         let stack = self.project.modifiers.clone();
-        match vf_modifiers::apply(&self.heightfield, &stack, self.project.seed) {
-            Ok(heightfield) => {
-                self.heightfield = heightfield;
-                self.project.modifiers.clear();
-                self.selected_modifier = 0;
-                self.project.sync_terrain(&self.heightfield);
-                self.texture = None;
-                self.last_image = None;
-                self.status = "Modifiers baked into the heightfield".into();
-                self.mark_dirty();
-            }
-            Err(error) => self.status = format!("Bake failed: {error}"),
+        let heightfield = Arc::clone(&self.heightfield);
+        let seed = self.project.seed;
+        let title = "Cuisson des modificateurs…".to_string();
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::BakeModifiers,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Application de la pile au heightfield…");
+                progress.set_indeterminate();
+                match vf_modifiers::apply(&heightfield, &stack, seed) {
+                    Ok(heightfield) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::ModifiersBaked { heightfield }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(format!("Bake failed: {error}")),
+                }
+            },
+        ) {
+            self.status = format!("{title} (l'interface reste utilisable)");
         }
     }
 
@@ -1613,7 +2191,7 @@ impl VistaForgeApp {
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Cuire dans le terrain").clicked() {
-                        self.bake_modifiers();
+                        self.bake_modifiers(ctx);
                     }
                     if ui.button("Vider").clicked() {
                         self.project.modifiers.clear();
@@ -2467,7 +3045,8 @@ impl VistaForgeApp {
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.water.enabled, "Eau activée");
-                let (min, max) = self.heightfield.min_max();
+                let stats = self.terrain_stats();
+                let (min, max) = (stats.min, stats.max);
                 let mut changed = false;
                 changed |= param_f32(
                     ui,
@@ -2569,7 +3148,8 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Étagement")
             .default_open(false)
             .show(ui, |ui| {
-                let (min, max) = self.heightfield.min_max();
+                let stats = self.terrain_stats();
+                let (min, max) = (stats.min, stats.max);
                 let mut changed = false;
                 changed |= param_f32(
                     ui,
@@ -2746,6 +3326,7 @@ impl VistaForgeApp {
     }
 
     fn mark_animation_changed(&mut self) {
+        self.history.label("Animation");
         self.anim_revision = self.anim_revision.wrapping_add(1);
         self.anim_profile_cache = None;
         self.anim_compare_cache = None;
@@ -3169,7 +3750,12 @@ impl VistaForgeApp {
         if let Some(cap) = self.capture.as_mut() {
             cap.frame += 1;
         }
-        if frame < 28 || self.render_task.is_some() {
+        if frame < 28
+            || self.render_task.is_some()
+            || self.task.is_some()
+            || self.hillshade_task.is_some()
+            || self.gpu_mesh_task.is_some()
+        {
             return;
         }
         let step = self.capture.as_ref().map(|cap| cap.steps[cap.index]);
@@ -3187,6 +3773,7 @@ impl VistaForgeApp {
 
     fn capture_apply_step(&mut self, step: CaptureStep, ctx: &egui::Context) {
         self.workspace = step.workspace;
+        self.preferences_open = step.preferences;
         self.anim_tab = step.anim_tab;
         self.anim_compare = step.compare;
         self.anim_compare_cache = None;
@@ -5259,7 +5846,7 @@ impl VistaForgeApp {
         let animation_io = egui::CollapsingHeader::new("Trajectoire seule (sans géométrie)")
             .default_open(false)
             .show(ui, |ui| {
-                self.animation_io_ui(ui);
+                self.animation_io_ui(ui, ctx);
             });
         self.help.register(
             animation_io.header_response.rect.union(
@@ -5288,7 +5875,7 @@ impl VistaForgeApp {
         let rig = self.project.rig.clone();
         let total = rig.frame_count();
         let mut project = self.project.clone();
-        let heightfield = self.heightfield.clone();
+        let heightfield = Arc::clone(&self.heightfield);
         let options = self.full_options();
         let seed = self.project.seed;
         let fps = rig.fps.max(1);
@@ -5424,13 +6011,49 @@ impl VistaForgeApp {
         }
     }
 
+    fn help_workspace_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(
+            egui::RichText::new(
+                "Toute la documentation est ici. Le survol n'est pas nécessaire : choisissez une fiche à gauche, lisez-la dans le panneau central, puis revenez au terrain quand vous voulez.",
+            )
+            .size(11.0)
+            .color(egui::Color32::from_rgb(188, 202, 220)),
+        );
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Retour au terrain")
+                .on_hover_text("Revenir à l'espace Terrain sans perdre la fiche choisie")
+                .clicked()
+            {
+                self.workspace = Workspace::Terrain;
+            }
+            if ui.button("Préférences").clicked() {
+                self.preferences_open = true;
+            }
+            ui.label(
+                egui::RichText::new("Aide flottante : bouton de la barre d'outils ou F1")
+                    .small()
+                    .weak(),
+            );
+        });
+        ui.separator();
+        self.help.browse_index_ui(ui);
+        let _ = ctx;
+    }
+
     fn workspace_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.workspace == Workspace::Help {
+            self.help_workspace_panel(ui, ctx);
+            return;
+        }
         self.help.register_front(
             ui.available_rect_before_wrap(),
             help_topic_for_workspace(self.workspace),
         );
         egui::ScrollArea::vertical().show(ui, |ui| {
             match self.workspace {
+                Workspace::Help => {}
                 Workspace::Terrain => self.terrain_ui(ui, ctx),
                 Workspace::Modifiers => self.modifiers_ui(ui, ctx),
                 Workspace::Rock => self.rock_ui(ui, ctx),
@@ -5446,7 +6069,7 @@ impl VistaForgeApp {
                 Workspace::Files => self.files_ui(ui, ctx),
             }
             ui.add_space(12.0);
-            let stats = self.heightfield.stats();
+            let stats = self.terrain_stats();
             ui.label(
                 egui::RichText::new(format!(
                     "{}×{} · relief {:.0} m · {} échantillons",
@@ -5508,7 +6131,7 @@ impl VistaForgeApp {
                         self.open_project(ctx.clone());
                     }
                     if ui.button("Enregistrer").clicked() {
-                        self.save_project();
+                        self.save_project(ctx);
                     }
                     if let Some(path) = &self.project_path {
                         ui.label(
@@ -5645,7 +6268,7 @@ impl VistaForgeApp {
                     )
                     .clicked()
                 {
-                    self.files_export_terrain();
+                    self.files_export_terrain(ctx);
                 }
             });
         self.help.register(
@@ -5697,7 +6320,11 @@ impl VistaForgeApp {
                             .weak(),
                     );
                 });
-                if self.blender_export_task.is_some() {
+                if self
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| task.kind == jobs::TaskKind::Blender)
+                {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Export Blender en cours…");
@@ -5709,7 +6336,7 @@ impl VistaForgeApp {
                     )
                     .clicked()
                 {
-                    self.files_export_blender();
+                    self.files_export_blender(ctx);
                 }
                 ui.label(
                     egui::RichText::new(
@@ -5732,7 +6359,7 @@ impl VistaForgeApp {
         let animation_header = egui::CollapsingHeader::new("Animation caméra / cible")
             .default_open(true)
             .show(ui, |ui| {
-                self.animation_io_ui(ui);
+                self.animation_io_ui(ui, ctx);
             });
         self.help.register(
             animation_header.header_response.rect.union(
@@ -5772,173 +6399,136 @@ impl VistaForgeApp {
                 30.0
             },
         };
-        match vf_io::import_terrain(&path, options) {
-            Ok(imported) => {
-                let (sx, sy) = imported.heightfield.spacing();
-                let stem = path
-                    .file_stem()
-                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-                self.project.source = imported.source;
-                self.project.meta.name = if stem.is_empty() {
-                    "Terrain importé".into()
-                } else {
-                    stem.clone()
-                };
-                self.project.legacy = Some(LegacyMeta {
-                    dem_title: stem,
-                    dem_comment: imported.description.clone(),
-                    ..LegacyMeta::default()
-                });
-                self.heightfield = imported.heightfield;
-                self.project.sync_terrain(&self.heightfield);
-                self.project.camera = vf_scene::auto_frame(
-                    &self.heightfield,
-                    f64::from(self.project.render.width)
-                        / f64::from(self.project.render.height.max(1)),
-                );
-                self.project_path = None;
-                self.path_input = path.with_extension("vfproj").display().to_string();
-                self.anim_framed = false;
-                self.anim_editor.selection = None;
-                self.sculpt_undo.clear();
-                self.sculpt_redo.clear();
-                self.sculpt_texture = None;
-                self.sculpt_texture_dirty = true;
-                self.anim_track = None;
-                self.anim_live_sample = None;
-                self.anim_trail_cache = None;
-                self.anim_compare_cache = None;
-                self.anim_profile_cache = None;
-                self.anim_curve_cache = None;
-                self.sync_from_project();
-                self.sync_orbit_from_camera();
-                self.mark_dirty();
-                self.start_render(ctx.clone(), false);
-                self.files_status = format!(
-                    "Importé {}×{} · {:.2} m/cellule · {}",
-                    self.heightfield.width(),
-                    self.heightfield.height(),
-                    (sx + sy) * 0.5,
-                    imported.description
-                );
-                self.status = self.files_status.clone();
-            }
-            Err(error) => {
-                self.files_status = format!("Import impossible : {error}");
-                self.status = self.files_status.clone();
-            }
+        let result_path = path.clone();
+        let title = format!(
+            "Import du terrain {}…",
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        );
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::ImportTerrain,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Lecture du fichier et conversion des altitudes…");
+                progress.set_indeterminate();
+                match vf_io::import_terrain(&path, options) {
+                    Ok(imported) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::TerrainImported {
+                            path: result_path,
+                            imported,
+                        }
+                    }
+                    Err(error) => jobs::TaskResult::Failed(format!("Import impossible : {error}")),
+                }
+            },
+        ) {
+            self.files_status = format!("{title} (l'interface reste utilisable)");
+            self.status = self.files_status.clone();
         }
     }
 
-    fn files_export_terrain(&mut self) {
+    fn files_export_terrain(&mut self, ctx: &egui::Context) {
         let path = PathBuf::from(self.files_export_path.trim());
         if path.as_os_str().is_empty() {
             self.files_status = "Export : chemin vide".into();
             return;
         }
-        match vf_io::export_terrain(
-            &path,
-            &self.heightfield,
-            &self.project.meta.name,
-            Some(self.files_nodata),
-        ) {
-            Ok(report) => {
-                self.files_status = format!(
-                    "Exporté {}×{} en {} ({}){}",
-                    report.width,
-                    report.height,
-                    report.path.display(),
-                    report.format,
-                    if report.warnings.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {}", report.warnings.join(" "))
+        let heightfield = Arc::clone(&self.heightfield);
+        let name = self.project.meta.name.clone();
+        let nodata = self.files_nodata;
+        let title = format!(
+            "Export du terrain vers {}…",
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        );
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::ExportTerrain,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Conversion et écriture du fichier…");
+                progress.set_indeterminate();
+                match vf_io::export_terrain(&path, &heightfield, &name, Some(nodata)) {
+                    Ok(report) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::TerrainExported { report }
                     }
-                );
-            }
-            Err(error) => self.files_status = format!("Export impossible : {error}"),
+                    Err(error) => jobs::TaskResult::Failed(format!("Export impossible : {error}")),
+                }
+            },
+        ) {
+            self.files_status = format!("{title} (l'interface reste utilisable)");
+            self.status = self.files_status.clone();
         }
-        self.status = self.files_status.clone();
     }
 
-    fn files_export_blender(&mut self) {
+    fn files_export_blender(&mut self, ctx: &egui::Context) {
         let out_dir = PathBuf::from(self.blender_export_dir.trim());
         if out_dir.as_os_str().is_empty() {
             self.files_status = "Blender : dossier vide".into();
             return;
         }
-        let (sender, receiver) = mpsc::channel();
         let project = self.project.clone();
-        let heightfield = self.heightfield.clone();
+        let heightfield = Arc::clone(&self.heightfield);
         let subdivision = self.blender_subdivision;
         let include_animation = self.blender_export_animation;
         let status_dir = out_dir.display().to_string();
-        std::thread::spawn(move || {
-            let options = vf_export::ExportOptions {
-                subdivision,
-                ..vf_export::ExportOptions::default()
-            };
-            let result = vf_export::export_project(&project, &heightfield, &out_dir, &options)
-                .map_err(|error| error.to_string())
-                .map(|report| {
-                    let mut note = None;
-                    if include_animation && project.rig.enabled {
-                        match vf_export::export_animation(
-                            &out_dir.join("camera_animation.glb"),
-                            &project.rig,
-                            &heightfield,
-                            project.seed,
-                        ) {
-                            Ok(animation) => {
-                                note = Some(format!(
-                                    "trajectoire {} images → camera_animation.glb",
-                                    animation.frames
-                                ));
-                            }
-                            Err(error) => {
-                                note = Some(format!("trajectoire non exportée : {error}"));
-                            }
+        let title = format!("Export Blender vers {status_dir}…");
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::Blender,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Construction du maillage et des textures…");
+                progress.set_indeterminate();
+                let options = vf_export::ExportOptions {
+                    subdivision,
+                    ..vf_export::ExportOptions::default()
+                };
+                let report =
+                    match vf_export::export_project(&project, &heightfield, &out_dir, &options) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            return jobs::TaskResult::Failed(format!("Blender : échec — {error}"));
+                        }
+                    };
+                let mut note = None;
+                if include_animation && project.rig.enabled {
+                    progress.set_phase("Export de la trajectoire caméra…");
+                    progress.set(0.85);
+                    match vf_export::export_animation(
+                        &out_dir.join("camera_animation.glb"),
+                        &project.rig,
+                        &heightfield,
+                        project.seed,
+                    ) {
+                        Ok(animation) => {
+                            note = Some(format!(
+                                "trajectoire {} images → camera_animation.glb",
+                                animation.frames
+                            ));
+                        }
+                        Err(error) => {
+                            note = Some(format!("trajectoire non exportée : {error}"));
                         }
                     }
-                    (report, note)
-                });
-            let _ = sender.send(result);
-        });
-        self.blender_export_task = Some(receiver);
-        self.files_status = format!("Export Blender vers {status_dir}…");
-    }
-
-    fn poll_blender_export(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = &self.blender_export_task else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(Ok((report, note))) => {
-                self.files_status = format!(
-                    "Blender : {} sommets, {} triangles, {} matériaux → {}{}",
-                    report.vertices,
-                    report.triangles,
-                    report.materials,
-                    report.glb.display(),
-                    note.map_or_else(String::new, |note| format!(" · {note}"))
-                );
-                self.blender_export_task = None;
-            }
-            Ok(Err(error)) => {
-                self.files_status = format!("Blender : échec — {error}");
-                self.blender_export_task = None;
-            }
-            Err(TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(120));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.files_status = "Blender : export interrompu".into();
-                self.blender_export_task = None;
-            }
+                }
+                progress.set(1.0);
+                jobs::TaskResult::BlenderExported { report, note }
+            },
+        ) {
+            self.files_status = format!("{title} (l'interface reste utilisable)");
+            self.status = self.files_status.clone();
         }
     }
 
-    fn animation_io_ui(&mut self, ui: &mut egui::Ui) {
+    fn animation_io_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Fichier");
             ui.add(
@@ -5962,28 +6552,28 @@ impl VistaForgeApp {
                 .on_hover_text("Caméra + cible animées, pour Blender ou tout outil glTF")
                 .clicked()
             {
-                self.export_animation_with_extension("glb");
+                self.export_animation_with_extension(ctx, "glb");
             }
             if ui
                 .button("Exporter .vfcam")
                 .on_hover_text("Rig complet VistaForge, sans géométrie")
                 .clicked()
             {
-                self.export_animation_with_extension("vfcam");
+                self.export_animation_with_extension(ctx, "vfcam");
             }
             if ui
                 .button("Exporter CSV")
                 .on_hover_text("Une ligne par image, lisible par tableur")
                 .clicked()
             {
-                self.export_animation_with_extension("csv");
+                self.export_animation_with_extension(ctx, "csv");
             }
             if ui
                 .button("Importer une trajectoire")
                 .on_hover_text("Remplace le rig courant, conserve le terrain")
                 .clicked()
             {
-                self.import_animation_file();
+                self.import_animation_file(ctx);
             }
         });
         ui.label(
@@ -5995,83 +6585,69 @@ impl VistaForgeApp {
         );
     }
 
-    fn export_animation_with_extension(&mut self, extension: &str) {
+    fn export_animation_with_extension(&mut self, ctx: &egui::Context, extension: &str) {
         let mut path = PathBuf::from(self.anim_io_path.trim());
         if path.as_os_str().is_empty() {
             self.files_status = "Animation : chemin vide".into();
             return;
         }
         path.set_extension(extension);
-        match vf_export::export_animation(
-            &path,
-            &self.project.rig,
-            &self.heightfield,
-            self.project.seed,
+        let rig = self.project.rig.clone();
+        let heightfield = Arc::clone(&self.heightfield);
+        let seed = self.project.seed;
+        let title = format!("Export de la trajectoire .{extension}…");
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::AnimationExport,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Échantillonnage des images et écriture du fichier…");
+                progress.set_indeterminate();
+                match vf_export::export_animation(&path, &rig, &heightfield, seed) {
+                    Ok(report) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::AnimationExported { report }
+                    }
+                    Err(error) => {
+                        jobs::TaskResult::Failed(format!("Animation : export impossible — {error}"))
+                    }
+                }
+            },
         ) {
-            Ok(report) => {
-                self.files_status = format!(
-                    "Animation exportée : {} images, {:.2}s, {} → {}",
-                    report.frames,
-                    report.duration_s,
-                    report.format,
-                    report.path.display()
-                );
-                self.anim_io_path = path.display().to_string();
-                self.rig_status = self.files_status.clone();
-            }
-            Err(error) => {
-                self.files_status = format!("Animation : export impossible — {error}");
-                self.rig_status = self.files_status.clone();
-            }
+            self.files_status = format!("{title} (l'interface reste utilisable)");
+            self.rig_status = self.files_status.clone();
+            self.status = self.files_status.clone();
         }
-        self.status = self.files_status.clone();
     }
 
-    fn import_animation_file(&mut self) {
+    fn import_animation_file(&mut self, ctx: &egui::Context) {
         let path = PathBuf::from(self.anim_io_path.trim());
         if path.as_os_str().is_empty() {
             self.files_status = "Animation : chemin vide".into();
             return;
         }
-        match vf_export::import_animation(&path) {
-            Ok(imported) => {
-                let terrain_note = imported
-                    .terrain
-                    .as_ref()
-                    .map_or_else(String::new, |terrain| {
-                        format!(
-                            " · terrain d'origine {}×{} à {:.2} m/cellule",
-                            terrain.width, terrain.height, terrain.spacing_x
-                        )
-                    });
-                let keys = imported.rig.eye.keys.len();
-                let duration = imported.rig.duration_s;
-                self.project.rig = imported.rig;
-                self.project.rig.enabled = true;
-                self.rig_time = 0.0;
-                self.anim_editor.selection = None;
-                self.anim_editor.trace = false;
-                self.anim_edit_target = self.project.rig.target.mode == TargetMode::Path;
-                self.anim_track = None;
-                self.anim_live_sample = None;
-                self.anim_trail_cache = None;
-                self.anim_compare_cache = None;
-                self.anim_profile_cache = None;
-                self.anim_curve_cache = None;
-                self.anim_camera_dirty = true;
-                self.mark_animation_changed();
-                self.files_status = format!(
-                    "Animation importée : {} clés, {:.2}s, {}{}",
-                    keys, duration, imported.format, terrain_note
-                );
-                self.rig_status = self.files_status.clone();
-                self.status = self.files_status.clone();
-            }
-            Err(error) => {
-                self.files_status = format!("Animation : import impossible — {error}");
-                self.rig_status = self.files_status.clone();
-                self.status = self.files_status.clone();
-            }
+        let title = "Import de la trajectoire…".to_string();
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::AnimationImport,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Lecture du fichier et reconstruction du rig…");
+                progress.set_indeterminate();
+                match vf_export::import_animation(&path) {
+                    Ok(imported) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::AnimationImported { imported }
+                    }
+                    Err(error) => {
+                        jobs::TaskResult::Failed(format!("Animation : import impossible — {error}"))
+                    }
+                }
+            },
+        ) {
+            self.files_status = format!("{title} (l'interface reste utilisable)");
+            self.rig_status = self.files_status.clone();
+            self.status = self.files_status.clone();
         }
     }
 
@@ -6186,20 +6762,30 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Output")
             .default_open(true)
             .show(ui, |ui| {
+                let mut size_changed = false;
                 ui.horizontal(|ui| {
                     ui.label("Size");
-                    ui.add(
-                        egui::DragValue::new(&mut self.render_width)
-                            .speed(8.0)
-                            .range(64..=8192),
-                    );
+                    size_changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.render_width)
+                                .speed(8.0)
+                                .range(64..=8192),
+                        )
+                        .changed();
                     ui.label("x");
-                    ui.add(
-                        egui::DragValue::new(&mut self.render_height)
-                            .speed(8.0)
-                            .range(64..=8192),
-                    );
+                    size_changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.render_height)
+                                .speed(8.0)
+                                .range(64..=8192),
+                        )
+                        .changed();
                 });
+                if size_changed {
+                    self.project.render.width = self.render_width;
+                    self.project.render.height = self.render_height;
+                    self.mark_dirty();
+                }
                 ui.horizontal(|ui| {
                     ui.label("Quality");
                     let mut selected = self.quality;
@@ -6217,6 +6803,10 @@ impl VistaForgeApp {
                         let (_, _, shadows, ao, _, _) = selected.presets();
                         self.shadows = shadows;
                         self.ao = ao;
+                        self.project.render.quality = selected;
+                        self.project.render.shadows = shadows;
+                        self.project.render.ao = ao;
+                        self.project.render.ssaa = selected.presets().4;
                         self.project.render.shadow_resolution = selected.presets().5;
                         self.mark_dirty();
                     }
@@ -6240,14 +6830,21 @@ impl VistaForgeApp {
                     if mode != self.project.render.render_mode {
                         mode.apply(&mut self.project.render);
                         self.quality = Quality::Custom;
+                        self.project.render.quality = Quality::Custom;
                         self.shadows = self.project.render.shadows;
                         self.ao = self.project.render.ao;
                         self.mark_dirty();
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.shadows, "Shadows");
-                    ui.checkbox(&mut self.ao, "AO");
+                    let mut lighting_changed = false;
+                    lighting_changed |= ui.checkbox(&mut self.shadows, "Shadows").changed();
+                    lighting_changed |= ui.checkbox(&mut self.ao, "AO").changed();
+                    if lighting_changed {
+                        self.project.render.shadows = self.shadows;
+                        self.project.render.ao = self.ao;
+                        self.mark_dirty();
+                    }
                     let adaptive = ui.checkbox(&mut self.adaptive_preview, "Aperçu adaptatif");
                     if adaptive.hovered() {
                         self.help
@@ -6276,6 +6873,8 @@ impl VistaForgeApp {
                     scene_changed |= ui.checkbox(&mut self.clouds, "Clouds").changed();
                     scene_changed |= ui.checkbox(&mut self.water, "Water").changed();
                     if scene_changed {
+                        self.project.render.clouds = self.clouds;
+                        self.project.render.water = self.water;
                         self.mark_dirty();
                     }
                 });
@@ -6372,7 +6971,7 @@ impl VistaForgeApp {
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.render_path).desired_width(180.0));
                     if ui.button("Save PNG").clicked() {
-                        self.save_render();
+                        self.save_render(ctx);
                     }
                 });
             });
@@ -6393,13 +6992,14 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Définition")
             .default_open(true)
             .show(ui, |ui| {
+                let relief = self.terrain_stats().relief();
                 ui.label(
                     egui::RichText::new(format!(
                         "{}×{} · cellule {:.1} m · relief {:.0} m",
                         self.heightfield.width(),
                         self.heightfield.height(),
                         cell_m,
-                        self.heightfield.stats().relief()
+                        relief
                     ))
                     .small(),
                 );
@@ -6951,35 +7551,33 @@ impl VistaForgeApp {
         let header = egui::CollapsingHeader::new("Historique")
             .default_open(true)
             .show(ui, |ui| {
+                let stats = self.history.stats();
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.sculpt_undo.is_empty(), egui::Button::new("↶ Annuler"))
+                        .add_enabled(self.history.can_undo(), egui::Button::new("Annuler"))
                         .clicked()
                     {
-                        self.sculpt_undo_action();
+                        self.undo_history(ctx);
                     }
                     if ui
-                        .add_enabled(
-                            !self.sculpt_redo.is_empty(),
-                            egui::Button::new("↷ Rétablir"),
-                        )
+                        .add_enabled(self.history.can_redo(), egui::Button::new("Rétablir"))
                         .clicked()
                     {
-                        self.sculpt_redo_action();
+                        self.redo_history(ctx);
                     }
                 });
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} action(s) · {} Mo d'historique",
-                        self.sculpt_undo.len(),
-                        self.sculpt_undo.iter().map(|u| u.bytes()).sum::<usize>() / 1_048_576
+                        "{} action(s) à annuler · {} à rétablir · {} Mo",
+                        stats.undo_steps,
+                        stats.redo_steps,
+                        stats.bytes / 1_048_576
                     ))
                     .small()
                     .weak(),
                 );
                 if ui.button("Vider l'historique").clicked() {
-                    self.sculpt_undo.clear();
-                    self.sculpt_redo.clear();
+                    self.history.clear(&self.project, &self.heightfield);
                 }
                 ui.label(egui::RichText::new(&self.sculpt_status).small().weak());
                 ui.separator();
@@ -7020,6 +7618,10 @@ impl VistaForgeApp {
         if self.sculpt_texture.is_some() && !self.sculpt_texture_dirty {
             return;
         }
+        if self.hillshade_task.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(40));
+            return;
+        }
         let params = HillshadeParams {
             azimuth_deg_from_south: self.project.sun.azimuth_deg_from_south,
             declination_deg: self.project.sun.declination_deg,
@@ -7027,17 +7629,60 @@ impl VistaForgeApp {
             ambient: 0.22,
         };
         let factor = self.sculpt_preview_factor();
-        let shaded =
-            vf_terrain::hillshade_sculpt(&self.heightfield, params, factor, self.sculpt_contours_m);
-        let image = egui::ColorImage::from_gray([shaded.width, shaded.height], &shaded.pixels);
-        self.sculpt_texture =
-            Some(ctx.load_texture("sculpt-hillshade", image, egui::TextureOptions::LINEAR));
+        let contours = self.sculpt_contours_m;
+        let heightfield = Arc::clone(&self.heightfield);
+        let revision = self.hillshade_revision;
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let shaded = vf_terrain::hillshade_sculpt(&heightfield, params, factor, contours);
+            let _ = sender.send(shaded);
+            repaint.request_repaint();
+        });
+        self.hillshade_task = Some(HillshadeTask { receiver, revision });
         self.sculpt_texture_dirty = false;
+        self.sculpt_status = "Calcul de l'ombrage en arrière-plan…".into();
+    }
+
+    fn poll_hillshade(&mut self, ctx: &egui::Context) {
+        let Some(task) = &self.hillshade_task else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(shaded) => {
+                let revision = task.revision;
+                self.hillshade_task = None;
+                if revision == self.hillshade_revision {
+                    let image =
+                        egui::ColorImage::from_gray([shaded.width, shaded.height], &shaded.pixels);
+                    self.sculpt_texture = Some(ctx.load_texture(
+                        "sculpt-hillshade",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.sculpt_texture_dirty = false;
+                    if self.sculpt_status == "Calcul de l'ombrage en arrière-plan…" {
+                        self.sculpt_status = "Ombrage à jour.".into();
+                    }
+                } else {
+                    // The terrain or the light changed while the worker was
+                    // busy: compute a fresh pass instead of showing stale shade.
+                    self.sculpt_texture_dirty = true;
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(40));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.hillshade_task = None;
+                self.sculpt_texture_dirty = true;
+            }
+        }
     }
 
     /// Double the working resolution so finer terraces can be carved. The
-    /// heightfield is bicubically resampled, the undo history is cleared and
-    /// the preview / GPU mesh are refreshed.
+    /// heightfield is bicubically resampled on a worker thread; the history
+    /// keeps the operation undoable.
     fn densify_sculpt_terrain(&mut self, ctx: &egui::Context) {
         let width = self.heightfield.width();
         let height = self.heightfield.height();
@@ -7047,38 +7692,37 @@ impl VistaForgeApp {
             self.sculpt_status = "Définition maximale atteinte (4096²).".into();
             return;
         }
-        match vf_terrain::resample(
-            &self.heightfield,
-            new_width,
-            new_height,
-            ResampleFilter::Bicubic,
+        let heightfield = Arc::clone(&self.heightfield);
+        let title = format!("Densification {width}² → {new_width}²…");
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::Densify,
+            title.clone(),
+            move |progress| {
+                progress.set_phase("Ré-échantillonnage bicubique du terrain…");
+                progress.set_indeterminate();
+                match vf_terrain::resample(
+                    &heightfield,
+                    new_width,
+                    new_height,
+                    ResampleFilter::Bicubic,
+                ) {
+                    Ok(heightfield) => {
+                        progress.set(1.0);
+                        jobs::TaskResult::TerrainDensified {
+                            heightfield,
+                            old_width: width,
+                            new_width,
+                        }
+                    }
+                    Err(error) => {
+                        jobs::TaskResult::Failed(format!("Densification impossible : {error}"))
+                    }
+                }
+            },
         ) {
-            Ok(hf) => {
-                let old_cell = self
-                    .heightfield
-                    .spacing()
-                    .0
-                    .max(self.heightfield.spacing().1);
-                self.heightfield = hf;
-                let new_cell = self
-                    .heightfield
-                    .spacing()
-                    .0
-                    .max(self.heightfield.spacing().1);
-                self.project.sync_terrain(&self.heightfield);
-                self.size = new_width as u32;
-                self.sculpt_undo.clear();
-                self.sculpt_redo.clear();
-                self.sculpt_texture = None;
-                self.sculpt_texture_dirty = true;
-                self.mark_dirty();
-                self.refresh_preview(ctx.clone());
-                self.sculpt_status = format!(
-                    "Terrain densifié : {}² → {}², cellule {:.1} m → {:.2} m.",
-                    width, new_width, old_cell, new_cell
-                );
-            }
-            Err(error) => self.sculpt_status = format!("Densification impossible : {error}"),
+            self.sculpt_status = format!("{title} (l'interface reste utilisable)");
+            self.status = self.sculpt_status.clone();
         }
     }
 
@@ -7090,9 +7734,15 @@ impl VistaForgeApp {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 15, 19));
 
-        let bounds = self.heightfield.bounds();
-        let world_w = (bounds.max[0] - bounds.min[0]).max(1.0);
-        let world_h = (bounds.max[1] - bounds.min[1]).max(1.0);
+        // Do not call `bounds()` here: it scans the whole heightfield and this
+        // canvas is redrawn every frame. Origin and spacing give the exact
+        // same rectangle without touching the samples.
+        let (origin_x, origin_y) = self.heightfield.origin();
+        let (spacing_x, spacing_y) = self.heightfield.spacing();
+        let min_x = origin_x;
+        let max_y = origin_y + (self.heightfield.height() - 1) as f64 * spacing_y;
+        let world_w = ((self.heightfield.width() - 1) as f64 * spacing_x).max(1.0);
+        let world_h = ((self.heightfield.height() - 1) as f64 * spacing_y).max(1.0);
         let fit = ((rect.width() as f64 / world_w).min(rect.height() as f64 / world_h) * 0.92)
             as f32
             * self.sculpt_zoom;
@@ -7119,13 +7769,13 @@ impl VistaForgeApp {
             let u = ((screen.x - image_rect.left()) / image_size.x.max(1.0)).clamp(0.0, 1.0);
             let v = ((screen.y - image_rect.top()) / image_size.y.max(1.0)).clamp(0.0, 1.0);
             (
-                bounds.min[0] + f64::from(u) * world_w,
-                bounds.max[1] - f64::from(v) * world_h,
+                min_x + f64::from(u) * world_w,
+                max_y - f64::from(v) * world_h,
             )
         };
         let to_screen = |world: (f64, f64)| -> egui::Pos2 {
-            let u = ((world.0 - bounds.min[0]) / world_w) as f32;
-            let v = ((bounds.max[1] - world.1) / world_h) as f32;
+            let u = ((world.0 - min_x) / world_w) as f32;
+            let v = ((max_y - world.1) / world_h) as f32;
             egui::pos2(
                 image_rect.left() + u * image_size.x,
                 image_rect.top() + v * image_size.y,
@@ -7158,16 +7808,26 @@ impl VistaForgeApp {
         let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
         let primary_released = ui.input(|input| input.pointer.primary_released());
         if primary_pressed
+            && self.task.is_none()
             && response.contains_pointer()
             && let Some(pointer) = response.hover_pos()
         {
             let world = to_world(pointer);
+            // `terrain_stats_hf` keeps one Arc alive; drop it so the first
+            // brush stamp mutates the terrain in place instead of cloning it.
+            self.invalidate_terrain_stats();
+            self.history.begin_sculpt(&self.project, &self.heightfield);
             let mut stroke = Stroke::begin(
                 &self.heightfield,
                 self.project.seed.derive("sculpt"),
                 "Sculpter",
             );
-            stroke.stamp_to(&mut self.heightfield, &self.sculpt_brush, world.0, world.1);
+            stroke.stamp_to(
+                Arc::make_mut(&mut self.heightfield),
+                &self.sculpt_brush,
+                world.0,
+                world.1,
+            );
             self.sculpt_stroke = Some(stroke);
             self.sculpt_status = format!(
                 "Trait en cours · {} · rayon {:.0} m",
@@ -7180,25 +7840,35 @@ impl VistaForgeApp {
             && let Some(mut stroke) = self.sculpt_stroke.take()
         {
             let world = to_world(pointer);
-            stroke.stamp_to(&mut self.heightfield, &self.sculpt_brush, world.0, world.1);
+            stroke.stamp_to(
+                Arc::make_mut(&mut self.heightfield),
+                &self.sculpt_brush,
+                world.0,
+                world.1,
+            );
             self.sculpt_stroke = Some(stroke);
         }
-        if primary_released
-            && let Some(stroke) = self.sculpt_stroke.take()
-            && let Some(undo) = stroke.finish(&self.heightfield)
-        {
-            let bytes = undo.bytes();
-            self.sculpt_undo.push(undo);
-            self.sculpt_redo.clear();
-            self.sculpt_texture_dirty = true;
-            self.project.mark_modified();
-            self.mark_dirty();
-            self.sculpt_status = format!(
-                "Trait appliqué · {} action(s) · {} Ko",
-                self.sculpt_undo.len(),
-                bytes / 1024
-            );
-            self.start_render(ctx.clone(), false);
+        if primary_released && let Some(stroke) = self.sculpt_stroke.take() {
+            if let Some(undo) = stroke.finish(&self.heightfield) {
+                let bytes = undo.bytes();
+                self.project.mark_modified();
+                self.history
+                    .push_sculpt(undo, &self.project, &self.heightfield);
+                self.sculpt_texture_dirty = true;
+                self.invalidate_terrain_stats();
+                self.mark_dirty();
+                self.sculpt_status = format!(
+                    "Trait appliqué · {} action(s) · {} Ko",
+                    self.history.stats().undo_steps,
+                    bytes / 1024
+                );
+                self.start_render(ctx.clone(), false);
+            } else {
+                // The stroke did not touch a valid sample: close the gesture
+                // so the global history keeps observing later edits.
+                self.history.end_sculpt(&self.project, &self.heightfield);
+                self.sculpt_status = "Trait hors du terrain : rien à annuler.".into();
+            }
         }
 
         if let Some(world) = self.sculpt_cursor {
@@ -7248,28 +7918,6 @@ impl VistaForgeApp {
             egui::FontId::proportional(13.0),
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190),
         );
-    }
-
-    fn sculpt_undo_action(&mut self) {
-        if let Some(undo) = self.sculpt_undo.pop() {
-            undo.undo(&mut self.heightfield);
-            self.sculpt_redo.push(undo);
-            self.sculpt_texture_dirty = true;
-            self.project.mark_modified();
-            self.mark_dirty();
-            self.status = "Sculpter : annulé".into();
-        }
-    }
-
-    fn sculpt_redo_action(&mut self) {
-        if let Some(undo) = self.sculpt_redo.pop() {
-            undo.redo(&mut self.heightfield);
-            self.sculpt_undo.push(undo);
-            self.sculpt_texture_dirty = true;
-            self.project.mark_modified();
-            self.mark_dirty();
-            self.status = "Sculpter : rétabli".into();
-        }
     }
 
     fn leave_animation_shot_for_orbit(&mut self) {
@@ -7534,15 +8182,230 @@ impl VistaForgeApp {
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170),
         );
     }
+
+    fn busy(&self) -> bool {
+        self.task.is_some()
+            || self.anim_export_task.is_some()
+            // A quick adaptive preview is shorter than a frame budget; only
+            // give it a gauge once it is actually noticeable, otherwise the
+            // bottom panel would flash on every mouse move.
+            || self.render_task.as_ref().is_some_and(|task| {
+                task.full || task.started.elapsed() >= Duration::from_millis(350)
+            })
+    }
+
+    /// One persistent gauge for every long-running operation. It is a normal
+    /// bottom panel, never a modal dialog: the window keeps pumping messages
+    /// and the user can continue to orbit, read help or adjust the scene.
+    fn progress_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if let Some(task) = &self.task {
+                ui.label(egui::RichText::new(task.title.clone()).strong());
+                let fraction = task.progress.display_fraction();
+                let known = task.progress.fraction().is_some();
+                let bar = egui::ProgressBar::new(fraction)
+                    .desired_width(240.0)
+                    .animate(!known);
+                if known {
+                    ui.add(bar.show_percentage());
+                } else {
+                    ui.add(bar.text("en cours"));
+                }
+                ui.label(egui::RichText::new(task.progress.phase()).small());
+                ui.label(
+                    egui::RichText::new(format!("{:.1} s", task.elapsed().as_secs_f32()))
+                        .small()
+                        .weak(),
+                );
+            } else if let Some(task) = &self.anim_export_task {
+                let fraction = if task.total == 0 {
+                    0.0
+                } else {
+                    task.done as f32 / task.total as f32
+                };
+                ui.label(egui::RichText::new("Rendu de la séquence d'animation").strong());
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(240.0)
+                        .text(format!("{}/{} images", task.done, task.total)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{:.1} s", task.started.elapsed().as_secs_f32()))
+                        .small()
+                        .weak(),
+                );
+                if ui.button("Annuler").clicked() {
+                    task.cancel.store(true, Ordering::Relaxed);
+                }
+            } else if let Some(task) = &self.render_task {
+                let elapsed = task.started.elapsed().as_secs_f32();
+                let expected = (self.last_render_ms as f32 / 1000.0).max(0.6);
+                let fraction = (elapsed / expected).clamp(0.02, 0.95);
+                ui.label(
+                    egui::RichText::new(if task.full {
+                        "Rendu final CPU"
+                    } else {
+                        "Aperçu CPU"
+                    })
+                    .strong(),
+                );
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(240.0)
+                        .animate(elapsed > expected),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{elapsed:.1} s · la scène reste manipulable"))
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+    }
+
+    /// Preferences window: help behaviour and configurable undo/redo limits.
+    fn preferences_window(&mut self, ctx: &egui::Context) {
+        if !self.preferences_open {
+            return;
+        }
+        let mut open = self.preferences_open;
+        let mut help_enabled = self.help.enabled;
+        let mut history_settings = self.history.settings().clone();
+        let stats = self.history.stats();
+        let mut clear_history = false;
+        let mut reset_history = false;
+        let mut open_help_workspace = false;
+        egui::Window::new("Préférences")
+            .open(&mut open)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(430.0)
+            .show(ctx, |ui| {
+                ui.heading("Aide");
+                ui.label(
+                    egui::RichText::new(
+                        "L'aide contextuelle est désactivée au démarrage. Une fois activée, la carte reste ouverte sur le dernier réglage survolé : vous pouvez la déplacer, la faire défiler et cliquer dans son sommaire. L'espace Aide reste toujours accessible sans l'activer.",
+                    )
+                    .small(),
+                );
+                ui.checkbox(&mut help_enabled, "Activer l'aide flottante");
+                if ui.button("Ouvrir la rubrique Aide").clicked() {
+                    open_help_workspace = true;
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.heading("Historique");
+                ui.label(
+                    egui::RichText::new(
+                        "Chaque geste (un glisser de curseur, une génération, un trait de pinceau…) devient une étape une fois la souris au repos. Les mouvements de caméra ne sont pas enregistrés.",
+                    )
+                    .small(),
+                );
+                ui.checkbox(&mut history_settings.enabled, "Activer Annuler/Rétablir");
+                ui.add_enabled_ui(history_settings.enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Profondeur");
+                        ui.add(
+                            egui::Slider::new(&mut history_settings.max_steps, 1..=200)
+                                .text("étapes"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Mémoire max");
+                        ui.add(
+                            egui::Slider::new(&mut history_settings.memory_limit_mb, 16..=8192)
+                                .logarithmic(true)
+                                .text("Mo"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Regrouper après");
+                        ui.add(
+                            egui::Slider::new(&mut history_settings.merge_delay_ms, 0..=2000)
+                                .text("ms"),
+                        );
+                    });
+                    ui.checkbox(
+                        &mut history_settings.include_sculpt,
+                        "Historiser chaque trait de pinceau",
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} étape(s) à annuler · {} à rétablir · {} / {} Mo",
+                        stats.undo_steps,
+                        stats.redo_steps,
+                        stats.bytes / 1_048_576,
+                        stats.limit_bytes / 1_048_576
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            stats.undo_steps + stats.redo_steps > 0,
+                            egui::Button::new("Vider l'historique"),
+                        )
+                        .clicked()
+                    {
+                        clear_history = true;
+                    }
+                    if ui
+                        .button("Réinitialiser les réglages")
+                        .on_hover_text("Profondeur 30, mémoire 512 Mo, regroupement 400 ms")
+                        .clicked()
+                    {
+                        reset_history = true;
+                    }
+                });
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(
+                        "Raccourcis : Ctrl+Z annuler · Ctrl+Y ou Ctrl+Maj+Z rétablir · F1 aide flottante · Échap ferme la carte.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+        self.preferences_open = open;
+        if help_enabled != self.help.enabled {
+            if help_enabled {
+                self.help.enabled = true;
+            } else {
+                self.help.close();
+            }
+        }
+        if open_help_workspace {
+            self.workspace = Workspace::Help;
+        }
+        if reset_history {
+            history_settings = history::HistorySettings::default();
+        }
+        if clear_history {
+            self.history.clear(&self.project, &self.heightfield);
+        }
+        if history_settings != *self.history.settings() {
+            let persisted = history_settings.clone();
+            self.history
+                .set_settings(history_settings, &self.project, &self.heightfield);
+            history::save_settings(&persisted);
+        }
+    }
 }
 
 impl eframe::App for VistaForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.help.begin_frame();
+        // Commit the previous interaction once it has settled. A slider drag
+        // is therefore a single undo step, not one step per mouse move.
+        self.history.tick(&self.project, &self.heightfield);
+        self.poll_task(&ctx);
+        self.poll_hillshade(&ctx);
+        self.poll_gpu_mesh(&ctx);
         self.poll_render(&ctx);
         self.poll_animation_export(&ctx);
-        self.poll_blender_export(&ctx);
         if let Some(pick) = self.file_picker.show(&ctx) {
             self.apply_file_pick(pick);
         }
@@ -7555,30 +8418,47 @@ impl eframe::App for VistaForgeApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("VistaForge");
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.separator();
-                if ui.button("New").clicked() {
-                    self.new_project(ctx.clone());
+                // The project path and Open/Save now live only in the Fichiers
+                // workspace: the toolbar keeps a read-only reminder of the
+                // current document instead of duplicating the file menu.
+                let project_name = self.project_path.as_ref().map_or_else(
+                    || "Projet non enregistré".to_string(),
+                    |path| {
+                        path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |name| name.to_string_lossy().into_owned(),
+                        )
+                    },
+                );
+                let project_label = ui
+                    .label(egui::RichText::new(project_name).small().weak())
+                    .on_hover_text(self.project_path.as_ref().map_or_else(
+                        || "Utilisez l'espace Fichiers pour choisir un chemin".to_string(),
+                        |path| path.display().to_string(),
+                    ));
+                if project_label.clicked() {
+                    self.workspace = Workspace::Files;
                 }
-                ui.add(egui::TextEdit::singleline(&mut self.path_input).desired_width(280.0));
-                if ui
-                    .small_button("…")
-                    .on_hover_text("Parcourir les fichiers .vfproj")
-                    .clicked()
-                {
-                    let current = self.path_input.clone();
-                    self.file_picker.open(
-                        file_picker::PickTarget::Project,
-                        file_picker::PickMode::OpenFile,
-                        &current,
-                        &["vfproj"],
-                    );
+                ui.separator();
+                let undo = ui
+                    .add_enabled(self.history.can_undo(), egui::Button::new("Annuler"))
+                    .on_hover_text(self.history.undo_label().map_or_else(
+                        || "Annuler (Ctrl+Z)".to_string(),
+                        |label| format!("Annuler « {label} » (Ctrl+Z)"),
+                    ));
+                if undo.clicked() {
+                    self.undo_history(&ctx);
                 }
-                if ui.button("Open").clicked() {
-                    self.open_project(ctx.clone());
-                }
-                if ui.button("Save").clicked() {
-                    self.save_project();
+                let redo = ui
+                    .add_enabled(self.history.can_redo(), egui::Button::new("Rétablir"))
+                    .on_hover_text(self.history.redo_label().map_or_else(
+                        || "Rétablir (Ctrl+Y)".to_string(),
+                        |label| format!("Rétablir « {label} » (Ctrl+Y)"),
+                    ));
+                if redo.clicked() {
+                    self.redo_history(&ctx);
                 }
                 ui.separator();
                 let render_button = ui.button("Render");
@@ -7593,11 +8473,28 @@ impl eframe::App for VistaForgeApp {
                     ui.spinner();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let help_button = ui
-                        .selectable_label(self.help.enabled, "?")
-                        .on_hover_text("Aide contextuelle et tutoriels (F1)");
-                    if help_button.clicked() {
+                    if ui
+                        .button("Préférences")
+                        .on_hover_text("Aide, historique, limites de mémoire")
+                        .clicked()
+                    {
+                        self.preferences_open = true;
+                    }
+                    if ui
+                        .selectable_label(self.help.enabled, "Aide flottante")
+                        .on_hover_text(
+                            "Aide contextuelle (F1) : la carte reste ouverte pour être lue",
+                        )
+                        .clicked()
+                    {
                         self.help.toggle(help_topic_for_workspace(self.workspace));
+                    }
+                    if ui
+                        .button("Aide")
+                        .on_hover_text("Ouvrir la rubrique d'aide complète")
+                        .clicked()
+                    {
+                        self.workspace = Workspace::Help;
                     }
                     ui.label(egui::RichText::new(&self.status).small());
                 });
@@ -7656,6 +8553,15 @@ impl eframe::App for VistaForgeApp {
                 });
         }
 
+        if self.busy() {
+            egui::Panel::bottom("progress")
+                .resizable(false)
+                .exact_size(34.0)
+                .show(ui, |ui| {
+                    self.progress_panel(ui);
+                });
+        }
+
         // Register the overlays that are drawn inside the viewport. Their
         // rectangles are stored from the previous frame because the actual
         // transport/gizmo widgets are created after the help resolution (the
@@ -7688,29 +8594,52 @@ impl eframe::App for VistaForgeApp {
                 animation_ui::AnimViewMode::Camera => "caméra",
             },
         };
-        self.help.show(
-            &ctx,
-            help_viewport,
-            &help_context,
-            &help::HelpTopic::ALL,
-            if self.workspace == Workspace::Animation {
-                (self.anim_transport_rect.height() + 16.0).max(78.0)
-            } else {
-                0.0
-            },
-        );
+        if self.workspace != Workspace::Help {
+            self.help.show(
+                &ctx,
+                help_viewport,
+                &help_context,
+                &help::HelpTopic::ALL,
+                if self.workspace == Workspace::Animation {
+                    (self.anim_transport_rect.height() + 16.0).max(78.0)
+                } else {
+                    0.0
+                },
+            );
+        }
+        // "Aide" in the floating card opens the dedicated workspace on the
+        // same topic, where the full article and a searchable index live.
+        if let Some(topic) = self.help.take_browse_request() {
+            self.help.set_browse_topic(topic);
+            self.workspace = Workspace::Help;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_rgb(16, 18, 22)))
             .show(ui, |ui| {
-                if self.workspace == Workspace::Sculpt {
+                if self.workspace == Workspace::Help {
+                    let context = help::HelpContext {
+                        rig: &self.project.rig,
+                        playing: self.anim_playing,
+                        time_s: self.rig_time,
+                        view_mode: match self.anim_view {
+                            animation_ui::AnimViewMode::Design => "design",
+                            animation_ui::AnimViewMode::Camera => "caméra",
+                        },
+                    };
+                    self.help.browse_page_ui(ui, &ctx, &context);
+                } else if self.workspace == Workspace::Sculpt {
                     self.sculpt_canvas_ui(ui, &ctx);
                 } else {
                     self.viewport_ui(ui);
                 }
             });
 
+        self.preferences_window(&ctx);
         self.pump_capture(&ctx);
+        // Detect edits made during this pass (widgets mutate the project and
+        // the heightfield directly), then commit them after the idle delay.
+        self.history.tick(&self.project, &self.heightfield);
     }
 }
 
@@ -8020,6 +8949,7 @@ fn help_topic_for_workspace(workspace: Workspace) -> help::HelpTopic {
         Workspace::Camera => help::HelpTopic::Camera,
         Workspace::Render => help::HelpTopic::RenderFinal,
         Workspace::Files => help::HelpTopic::Export,
+        Workspace::Help => help::HelpTopic::Help,
     }
 }
 

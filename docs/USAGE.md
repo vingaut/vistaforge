@@ -21,6 +21,39 @@ cargo run --release -p vf-app
 Sans `--seed`, un seed aléatoire est tiré puis affiché : conservez-le pour
 reproduire exactement le paysage.
 
+## Annuler, rétablir et opérations longues
+
+Dans l'interface, **Annuler** et **Rétablir** sont dans la barre d'outils et
+dans l'espace **Sculpter** ; raccourcis `Ctrl+Z`, `Ctrl+Y` et `Ctrl+Maj+Z`.
+L'historique couvre les réglages, les générations, les imports/exports, les
+modifications du sculpteur et de la pile de modificateurs. Les mouvements de
+caméra ne sont pas enregistrés : ils restent de la navigation.
+
+Le regroupement évite un pas d'historique par pixel pendant un glisser : une
+interaction devient une étape quand la souris se repose. Les limites se règlent
+dans **Préférences** (bouton dans la barre d'outils) :
+
+- profondeur, de 1 à 200 étapes ;
+- budget mémoire, de 16 Mo à 8 Go (les heightfields partagent leurs échantillons
+  tant qu'ils n'ont pas changé) ;
+- délai de regroupement, de 0 à 2000 ms ;
+- historisation des traits de pinceau, activée par défaut.
+
+Ces réglages sont conservés entre les sessions dans le fichier de préférences
+utilisateur (`ui.ron`, sous `XDG_CONFIG_HOME`/`~/.config/vistaforge` sous
+Linux, `APPDATA` sous Windows). L'aide flottante, elle, reste désactivée à
+chaque démarrage.
+
+![Préférences : aide et historique](screenshots/preferences.png)
+
+Les opérations lourdes (génération, ouverture/enregistrement, import/export
+DEM, export Blender ou trajectoire, rendu CPU, maillage GPU, ombrage du
+sculpteur) tournent en arrière-plan. Une **jauge de progression** apparaît en
+bas de la fenêtre avec la phase et le temps écoulé. La fenêtre continue de
+répondre : on peut bouger la caméra, consulter l'aide ou préparer la suite
+pendant le calcul. Une seule opération de fichier ou de terrain est acceptée à
+la fois ; le bouton ou le raccourci suivant attend la fin de la précédente.
+
 ## Génération de terrain
 
 | Mode | Paramètres principaux | Style |
@@ -353,16 +386,19 @@ Détails, contenu du dossier et limites : [`BLENDER.md`](BLENDER.md).
 
 - un **viewport** 3D avec orbite à la souris, zoom à la molette et gizmo CAO ;
 - une **barre de fonctions** : Terrain, Modificateurs, Roche, Détail, Sculpter,
-  Animation, Érosion, Eau, Matières, Lumière, Caméra, Rendu. Chaque famille
-  ouvre un panneau latéral ; **Animation** contient le tracé, la caméra et le
-  vol, sans onglet Vol séparé ;
+  Animation, Érosion, Eau, Matières, Lumière, Caméra, Rendu, Fichiers et Aide.
+  Chaque famille ouvre un panneau latéral ; **Animation** contient le tracé, la
+  caméra et le vol, sans onglet Vol séparé ; **Aide** ouvre la documentation
+  complète sans dépendre du survol ;
 - des lignes de réglage uniformes : libellé, slider, valeur numérique éditable
   (double-clic pour revenir au défaut) ;
 - le panneau **Modificateurs** (pile, paramètres générés, cuisson) ;
 - l'espace **Animation** avec ses quatre onglets Tracé / Réglages / Profil /
   Lecture, le gizmo de tracé, le viseur du point de vue et la barre de lecture ;
-- l'**aide contextuelle** dans le viewport : survolez un espace, une section ou
-  un réglage, la fiche correspondante s'ouvre avec une capture annotée ;
+- l'**aide flottante** dans le viewport : activez-la par `F1` ou le bouton
+  **Aide flottante**, puis survolez un espace, une section ou un réglage. La
+  fiche s'ouvre avec une capture annotée et **reste affichée** pour être lue,
+  déplacée et parcourue ;
 - le panneau **Rendu** avec la bascule viewport GPU, les contrôles d'aperçu
   adaptatif et le rendu final.
 
@@ -415,8 +451,10 @@ les limites.
 
 En cas d'absence de pilote wgpu, lancer l'interface avec
 `VISTAFORGE_RENDERER=glow` : le rendu CPU et l'aperçu adaptatif restent
-disponibles. **Open/Save** utilisent le chemin affiché. La séquence de vol
-complète se rend en CLI (`anim render`).
+disponibles. L'espace **Fichiers** regroupe Nouveau/Ouvrir/Enregistrer, les
+imports/exports DEM et les exports Blender/trajectoire ; la barre d'outils ne
+duplique plus ces actions. La séquence de vol complète se rend en CLI
+(`anim render`).
 
 ## Serveur MCP
 

@@ -21,8 +21,9 @@ donc la première opération, avant de sculpter.
 
 Le panneau **Définition** affiche la cellule courante, un avertissement au-delà
 de 8 m et un bouton **Densifier ×2** (rééchantillonnage bicubique jusqu'à
-4 096²). La densification vide l'historique de sculpture : les régions d'undo
-ne correspondent plus à la grille.
+4 096²). La densification est une étape de l'historique global : `Ctrl+Z`
+restaure la grille précédente, avec les traits antérieurs qui redeviennent
+cohérents. Les traits suivants sont enregistrés sur la nouvelle grille.
 
 ## Aperçu
 

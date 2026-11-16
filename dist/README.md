@@ -9,9 +9,11 @@ depuis la source de ce dépôt avec `cargo build --release --workspace`.
 | `vistaforge-app` | Interface graphique `egui` + viewport GPU wgpu (Vulkan) et aperçu CPU. |
 | `vistaforge-mcp` | Serveur MCP stdio (29 outils). |
 
-Tailles : CLI 5,8 Mo, interface 24 Mo, serveur MCP 4,6 Mo. Binaires
-`strip`és, construits depuis la source au commit `2e021b2` avec
-`cargo build --release --workspace` (Rust 1.99.1).
+Tailles : CLI 5,8 Mo, interface 25 Mo, serveur MCP 4,6 Mo. Binaires
+`strip`és. L'interface a été reconstruite le 17 novembre 2026 depuis l'arbre de
+travail courant (aide consultable, historique global, opérations en
+arrière-plan) ; le CLI et le serveur MCP datent du commit `2e021b2`.
+Construits avec `cargo build --release --workspace` (Rust 1.99.1).
 
 ## Utilisation
 

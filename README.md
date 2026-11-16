@@ -64,9 +64,17 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   (`.vfcam`, GLB caméra, CSV) réimportable dans Blender et VistaForge. Voir
   [`docs/ANIMATION.md`](docs/ANIMATION.md), [`docs/RIG.md`](docs/RIG.md) et
   [`docs/FICHIERS.md`](docs/FICHIERS.md).
-- **Aide contextuelle** : une fiche tutorielle s'ouvre dans le viewport au survol d'un
-  espace, d'un panneau ou d'un réglage, avec une capture annotée et l'effet attendu sur la
-  scène d'exemple. 25 fiches, sommaire, épinglage, `F1`. Voir [`docs/AIDE.md`](docs/AIDE.md).
+- **Aide contextuelle et rubrique Aide** : désactivée par défaut. L'onglet **Aide** donne
+  un sommaire filtrable et les 26 fiches en pleine largeur ; l'**Aide flottante** (`F1`)
+  s'ouvre sur le réglage survolé, reste affichée pour être lue, se déplace et propose un
+  sommaire, l'épinglage et un accès direct à la rubrique. Voir [`docs/AIDE.md`](docs/AIDE.md).
+- **Annuler/Rétablir** : `Ctrl+Z`, `Ctrl+Y`/`Ctrl+Maj+Z`, boutons dans la barre d'outils.
+  Historique global des réglages, générations, imports/exports et traits de pinceau ;
+  profondeur, budget mémoire et délai de regroupement réglables dans **Préférences**.
+- **Opérations longues non bloquantes** : génération, ouverture/enregistrement, import/export
+  DEM, Blender, trajectoires, maillage GPU et ombrage du sculpteur s'exécutent en
+  arrière-plan avec une jauge de progression persistante ; la fenêtre ne passe plus par
+  « ne répond pas ».
 - **Formats** : `.vfproj` (ZIP + RON + heightmap f32, schéma **v6**), GeoTIFF, ESRI ASCII
   Grid, PNG/JPEG, DEM legacy, GLB, `.vfcam`, CSV.
 - **Bridge Blender** : export GLB (maillage détaillé, UV0 planaire + UV1 atlas de boîte,
@@ -79,11 +87,12 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 233 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 248 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|
 | Bureau `egui`, tracé, barre de lecture et aide contextuelle | ![Interface VistaForge](docs/screenshots/gui.png) |
+| Rubrique Aide intégrée et fiches en pleine largeur | ![Rubrique Aide](docs/screenshots/help_workspace.png) |
 | Tracé éditable, cible et gizmo X/Y/Z | ![Tracé](docs/screenshots/animation_path.png) |
 | Comparaison des profils de vol sur le même tracé | ![Profils](docs/screenshots/animation_profile.png) |
 | Canyon, falaises et strates | ![Canyon](docs/screenshots/canyon_cliffs.png) |

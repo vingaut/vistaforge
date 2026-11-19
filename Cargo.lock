@@ -2927,6 +2927,7 @@ dependencies = [
  "vf-detail",
  "vf-flight",
  "vf-geology",
+ "vf-material",
  "vf-mesh",
  "vf-modifiers",
  "vf-procgen",
@@ -2962,6 +2963,18 @@ dependencies = [
  "tiff",
  "vf-core",
  "zip",
+]
+
+[[package]]
+name = "vf-material"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "image",
+ "vf-core",
+ "vf-detail",
+ "vf-mesh",
+ "vf-procgen",
 ]
 
 [[package]]
@@ -3024,6 +3037,7 @@ dependencies = [
  "vf-detail",
  "vf-geology",
  "vf-io",
+ "vf-material",
  "vf-mesh",
  "vf-modifiers",
  "vf-procgen",
@@ -3058,10 +3072,12 @@ dependencies = [
  "ron",
  "serde",
  "vf-core",
+ "vf-detail",
  "vf-export",
  "vf-flight",
  "vf-geology",
  "vf-io",
+ "vf-material",
  "vf-modifiers",
  "vf-procgen",
  "vf-render",

@@ -13,6 +13,7 @@ thiserror.workspace = true
 vf-core = { path = "../vf-core" }
 vf-detail = { path = "../vf-detail" }
 vf-mesh = { path = "../vf-mesh" }
+vf-material = { path = "../vf-material" }
 vf-geology = { path = "../vf-geology" }
 vf-io = { path = "../vf-io" }
 vf-modifiers = { path = "../vf-modifiers" }

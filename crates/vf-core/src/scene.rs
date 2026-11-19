@@ -633,6 +633,18 @@ impl TerrainStyle {
     }
 }
 
+/// Procedural rock presets exposed by the material panel and the CLI.
+pub const ROCK_PRESETS: &[&str] = &[
+    "generic",
+    "granite",
+    "basalt",
+    "limestone",
+    "sandstone",
+    "schist",
+    "chalk",
+    "volcanic",
+];
+
 /// Surface material mix used by the renderer. Masks are procedural; the
 /// palette supplies the base colours.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -657,6 +669,27 @@ pub struct Materials {
     pub vegetation: f32,
     /// Wetness darkening near water and in gullies, 0..1.
     pub wetness: f32,
+    /// Named procedural rock (granite, basalt, limestone, sandstone, schist,
+    /// chalk, volcanic or generic). The preset drives the procedural grain,
+    /// bedding, crack and lichen layers evaluated by the CPU shader.
+    pub rock_preset: String,
+    /// Strength of the procedural bump normal, 0..2.
+    pub bump_strength: f32,
+    /// Wavelength of the procedural bump, metres.
+    pub bump_scale_m: f32,
+    /// Additional geometric displacement from the material layer, metres.
+    /// 0 keeps the geometry from the detail menu only.
+    pub displacement_m: f32,
+    /// Optional custom texture (PNG/JPG/TIFF) projected in world space.
+    pub texture_path: String,
+    /// World-space size of one texture tile, metres.
+    pub texture_scale_m: f32,
+    /// Bump strength read from the custom texture luminance, 0..2.
+    pub texture_bump: f32,
+    /// Displacement strength read from the custom texture luminance, metres.
+    pub texture_displacement_m: f32,
+    /// Mix between the geological rock colour and the custom texture, 0..1.
+    pub texture_mix: f32,
 }
 
 impl Default for Materials {
@@ -672,6 +705,15 @@ impl Default for Materials {
             snow_slope: 0.62,
             vegetation: 0.74,
             wetness: 0.3,
+            rock_preset: "generic".into(),
+            bump_strength: 0.6,
+            bump_scale_m: 7.0,
+            displacement_m: 0.0,
+            texture_path: String::new(),
+            texture_scale_m: 80.0,
+            texture_bump: 0.5,
+            texture_displacement_m: 0.0,
+            texture_mix: 0.8,
         }
     }
 }
@@ -688,6 +730,18 @@ impl Materials {
             ("snow_slope", self.snow_slope, 0.0, 1.0),
             ("vegetation", self.vegetation, 0.0, 1.0),
             ("wetness", self.wetness, 0.0, 1.0),
+            ("bump_strength", self.bump_strength, 0.0, 2.0),
+            ("bump_scale_m", self.bump_scale_m, 0.05, 500.0),
+            ("displacement_m", self.displacement_m, 0.0, 100.0),
+            ("texture_scale_m", self.texture_scale_m, 0.1, 10_000.0),
+            ("texture_bump", self.texture_bump, 0.0, 2.0),
+            (
+                "texture_displacement_m",
+                self.texture_displacement_m,
+                0.0,
+                100.0,
+            ),
+            ("texture_mix", self.texture_mix, 0.0, 1.0),
         ] {
             if !value.is_finite() || !(lo..=hi).contains(&value) {
                 return Err(format!(

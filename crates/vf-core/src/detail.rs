@@ -202,6 +202,14 @@ pub struct DetailSettings {
     pub focus_spacing_m: f32,
     /// Extra seed mixed with the project seed.
     pub seed: u64,
+    /// Shape-adaptive mesh: subdivide a block only where the local relief
+    /// exceeds the tolerance. This is the geometry counterpart of adaptive
+    /// layer height in a slicer.
+    pub adaptive: bool,
+    /// Maximum geometric error of the adaptive mesh, metres.
+    pub adaptive_tolerance_m: f32,
+    /// Write quad faces (OBJ/n-gon) instead of only triangles.
+    pub quad_mesh: bool,
 }
 
 impl Default for DetailSettings {
@@ -230,6 +238,9 @@ impl Default for DetailSettings {
             focus_size_m: 240.0,
             focus_spacing_m: 0.35,
             seed: 0,
+            adaptive: true,
+            adaptive_tolerance_m: 2.5,
+            quad_mesh: false,
         }
     }
 }
@@ -558,6 +569,9 @@ impl DetailSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if !(0.02..=100.0).contains(&self.adaptive_tolerance_m) {
+            return Err("detail adaptive tolerance must be in 0.02..=100 m".into());
+        }
         if !self.strength.is_finite() || !(0.0..=2.0).contains(&self.strength) {
             return Err("detail strength must be in 0..=2".into());
         }

@@ -402,21 +402,37 @@ fn build_scene(
     // Adaptive LOD pays for its block/skirt bookkeeping on large grids; on a
     // small tile the uniform mesh is both simpler and faster.
     let use_adaptive = options.adaptive && hf.sample_count() >= 2_000_000;
-    let mesh = if use_adaptive {
-        vf_mesh::build_adaptive(
+    let subdivision = u32::from(options.subdivision.max(1));
+    let mut mesh = if detail_settings.adaptive {
+        // Shape-adaptive path: spend vertices where the surface bends, keep
+        // large quads on flats. This follows the same recipe as adaptive layer
+        // height in a slicer, applied to the 2.5D terrain.
+        vf_mesh::build_shape_adaptive(
             &sampler,
-            u32::from(options.subdivision.max(1)),
+            subdivision,
+            detail_settings.adaptive_tolerance_m,
             MAX_MESH_VERTICES,
-            mesh_view,
         )
+    } else if use_adaptive {
+        vf_mesh::build_adaptive(&sampler, subdivision, MAX_MESH_VERTICES, mesh_view)
     } else {
-        vf_mesh::build(
-            &sampler,
-            u32::from(options.subdivision.max(1)),
-            MAX_MESH_VERTICES,
-            Some(mesh_view),
-        )
+        vf_mesh::build(&sampler, subdivision, MAX_MESH_VERTICES, Some(mesh_view))
     };
+    // Material displacement is applied to the render mesh, after the detail
+    // surface and before normals/lighting. The same helper is used by the
+    // Blender exporter, so the preview and the exported geometry agree.
+    if project.materials.enabled
+        && (project.materials.displacement_m > 0.0
+            || project.materials.texture_displacement_m > 0.0)
+    {
+        let texture = vf_material::RockTexture::load(&project.materials.texture_path);
+        vf_material::displace(
+            &mut mesh,
+            &project.materials,
+            project.seed,
+            texture.as_ref(),
+        );
+    }
 
     let mut vertices = Vec::with_capacity(mesh.vertex_count() + 4);
     for (index, position) in mesh.positions.iter().enumerate() {
@@ -429,7 +445,12 @@ fn build_scene(
         vertices.push(Vertex {
             pos,
             normal: Vec3::new(normal[0], normal[1], normal[2]),
-            ao: sample_grid_value(hf, &ao_values, f64::from(position[0]), f64::from(position[1])),
+            ao: sample_grid_value(
+                hf,
+                &ao_values,
+                f64::from(position[0]),
+                f64::from(position[1]),
+            ),
             clip: vp * pos.extend(1.0),
         });
     }
@@ -441,8 +462,7 @@ fn build_scene(
     // a hatch pattern. The hole is slightly smaller than the patch so the
     // faded patch border overlaps solid coarse mesh.
     let focus_hole = if detail_settings.enabled && detail_settings.focus_enabled {
-        let half = (detail_settings.focus_size_m * 0.5
-            - detail_settings.focus_size_m * 0.12)
+        let half = (detail_settings.focus_size_m * 0.5 - detail_settings.focus_size_m * 0.12)
             .max(4.0) as f64;
         Some((
             detail_settings.focus_center[0],
@@ -572,12 +592,7 @@ fn build_scene(
         vertices.push(Vertex {
             pos: top_pos,
             normal: outward,
-            ao: sample_grid_value(
-                hf,
-                &ao_values,
-                ox + x as f64 * sx,
-                oy + y as f64 * sy,
-            ),
+            ao: sample_grid_value(hf, &ao_values, ox + x as f64 * sx, oy + y as f64 * sy),
             clip: vp * top_pos.extend(1.0),
         });
         let thickness = (relief * 0.02 + 10.0).max(8.0);
@@ -840,6 +855,62 @@ mod tests {
             vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(33, 3)).unwrap();
         project.sync_terrain(&hf);
         (project, hf)
+    }
+
+    #[test]
+    fn rock_presets_change_the_render() {
+        let (mut project, hf) = test_project();
+        project.camera = vf_scene::auto_frame(&hf, 4.0 / 3.0);
+        project.detail.enabled = false;
+        project.materials.enabled = true;
+        let options = RenderOptions {
+            width: 96,
+            height: 72,
+            ssaa: 1,
+            shadows: false,
+            shadow_resolution: 256,
+            ao: false,
+            cliffs: false,
+            clouds: false,
+            water: false,
+            exposure: 1.0,
+            contrast: 0.0,
+            saturation: 1.0,
+            gamma: 2.2,
+            tonemap: Tonemap::Aces,
+            subdivision: 1,
+            detail_geometry: false,
+            adaptive: false,
+        };
+        let mean = |pixels: &[u8]| -> f64 {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0)
+                .sum::<f64>()
+                / (pixels.len() / 4) as f64
+        };
+        project.materials.rock_preset = "granite".into();
+        let granite = render_with_options(&project, &hf, &options)
+            .unwrap()
+            .image
+            .pixels;
+        project.materials.rock_preset = "basalt".into();
+        let basalt = render_with_options(&project, &hf, &options)
+            .unwrap()
+            .image
+            .pixels;
+        project.materials.rock_preset = "sandstone".into();
+        let sandstone = render_with_options(&project, &hf, &options)
+            .unwrap()
+            .image
+            .pixels;
+        let g = mean(&granite);
+        let b = mean(&basalt);
+        let s = mean(&sandstone);
+        assert!((g - b).abs() > 0.5, "granite {g} vs basalt {b}");
+        assert!((g - s).abs() > 0.5, "granite {g} vs sandstone {s}");
     }
 
     #[test]

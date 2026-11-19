@@ -102,6 +102,9 @@ pub struct HeightmapOptions {
     pub origin: [f64; 2],
     /// Image row 0 is north; VistaForge row 0 is south. Flip by default.
     pub flip_y: bool,
+    /// Treat dark pixels as high ground (`value -> min + max - value`).
+    /// Some heightmaps, bump maps and scans use this convention.
+    pub invert_height: bool,
 }
 
 impl Default for HeightmapOptions {
@@ -112,6 +115,7 @@ impl Default for HeightmapOptions {
             spacing_m: 0.0,
             origin: [0.0, 0.0],
             flip_y: true,
+            invert_height: false,
         }
     }
 }
@@ -201,11 +205,14 @@ impl HeightmapImport {
                     }
                     continue;
                 }
-                let value = if self.normalized {
+                let mut value = if self.normalized {
                     min + raw.clamp(0.0, 1.0) * range
                 } else {
                     raw
                 };
+                if options.invert_height {
+                    value = min + max - value;
+                }
                 heights[index] = value;
                 valid_sum += f64::from(value);
                 valid_count += 1;
@@ -582,6 +589,64 @@ mod tests {
         let (ox, oy) = back.origin();
         assert!((ox - 500.0).abs() < 1e-6);
         assert!((oy - 700.0).abs() < 1e-6);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json"));
+        let _ = std::fs::remove_file(path.with_extension("pgw"));
+    }
+
+    #[test]
+    fn png_is_north_up_and_white_high() {
+        // Heights increase north (heightfield row 0 is south), so the first
+        // image row (north) must be the brightest. This is the check that
+        // catches an accidental vertical inversion of the relief.
+        let hf = sample_field();
+        let path = temp_path("heightmap-orientation", "png");
+        write_heightmap_png(&path, &hf).unwrap();
+        let image = image::open(&path).unwrap().to_luma16();
+        let top = image.get_pixel(2, 0)[0];
+        let bottom = image.get_pixel(2, hf.height() as u32 - 1)[0];
+        assert!(
+            top > bottom,
+            "bright pixels must be high ground: top={top} bottom={bottom}"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json"));
+        let _ = std::fs::remove_file(path.with_extension("pgw"));
+    }
+
+    #[test]
+    fn invert_height_mirrors_the_elevation_range() {
+        let hf = sample_field();
+        let path = temp_path("heightmap-invert", "png");
+        write_heightmap_png(&path, &hf).unwrap();
+        let import = read_heightmap(&path).unwrap();
+        let (min, max) = import.suggested_range();
+        let normal = import
+            .into_heightfield(HeightmapOptions {
+                min_height: min,
+                max_height: max,
+                ..HeightmapOptions::default()
+            })
+            .unwrap();
+        let import = read_heightmap(&path).unwrap();
+        let inverted = import
+            .into_heightfield(HeightmapOptions {
+                min_height: min,
+                max_height: max,
+                invert_height: true,
+                ..HeightmapOptions::default()
+            })
+            .unwrap();
+        for y in 0..hf.height() {
+            for x in 0..hf.width() {
+                let sum = normal.get(x, y) + inverted.get(x, y);
+                assert!(
+                    (sum - (min + max)).abs() < 12.0,
+                    "({x},{y}): {sum} vs {}",
+                    min + max
+                );
+            }
+        }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("json"));
         let _ = std::fs::remove_file(path.with_extension("pgw"));

@@ -45,13 +45,23 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   multi-échelle à courbe HBAO, ombres 4096 en qualité High, parois verticales (`cliffs`), ciel
   dégradé + soleil + nuages 2.5D, eau avec Fresnel et écume, brume, tone mapping ACES,
   supersampling et dithering ordonné.
-- **Matériaux** : éboulis, neige en plaques, végétation, humidité, normales de détail.
+- **Matériaux** : roches procédurales (granite, basalte, calcaire, grès, schiste,
+  craie, volcanique), bump et displacement, textures personnelles et pinceau
+  intégré ; éboulis, neige en plaques, végétation, humidité.
+- **Détail adaptatif** : maillage qui se densifie localement selon la forme
+  (comme les couches adaptatives d'un slicer), tolérance en mètres, UV monde
+  continues, export OBJ à quads pour Blender.
+- **Navigation** : orbite, zoom et **pan** (clic droit, molette ou Maj+glisser) ;
+  vue CPU complète et **comparateur avant/après** à ligne déplaçable.
+  ![Comparateur avant/après](docs/screenshots/compare.png)
 - **Grands mondes** : heightfield jusqu'à 16 384², tuilage N×M avec flips/rotations,
   mode **seamless** (correction des quatre bords + variation macro), et modes de rendu
   `fast` / `refined` / `photoreal`. Voir [`docs/MONDE.md`](docs/MONDE.md).
 - **Falaises** : pass `cliffs` (ladder de hauteurs à poids lissé) et modificateur `recast_cliff`
   (Poisson/SOR) pour des parois verticales continues.
 - **Animation de caméra (Vol et Animation fusionnés)** : un seul espace, quatre étapes —
+  cible optionnelle, keyframing caméra/cible séparé, **avance exacte sur la courbe**,
+  **altitude relative au sol (AGL)** avec amortissements distincts,
   tracé Bézier éditable au clic, au gizmo X/Y/Z, par **glisser libre** ou au numérique,
   point de vue matérialisé dans le viewport, **timeline + graph editor** avec barres de
   segment (distance · durée · vitesse), édition des clés en **secondes ou en images**,
@@ -189,6 +199,7 @@ le CLI et le MCP partagent le même noyau que l'interface.
 | [`docs/MODIFICATEURS.md`](docs/MODIFICATEURS.md) | les 27 modificateurs, paramètres, CLI/UI/MCP |
 | [`docs/QUALITE_ECARTS.md`](docs/QUALITE_ECARTS.md) | analyse des écarts, plan qualité, essais négatifs |
 | [`docs/ETAT_ET_REPRISE.md`](docs/ETAT_ET_REPRISE.md) | état du projet et reprise |
+| [`docs/PLAN_ACTIF.md`](docs/PLAN_ACTIF.md) | plan de la session en cours et journal d'avancement |
 | [`docs/SPEC_REALISME.md`](docs/SPEC_REALISME.md) | contrat et faisabilité de la session réalisme |
 | [`docs/RIG.md`](docs/RIG.md) | rig caméra, presets de dynamique, contraintes, CLI |
 | [`docs/MONDE.md`](docs/MONDE.md) | tailles, tuilage, seamless, modes de rendu, évitement |

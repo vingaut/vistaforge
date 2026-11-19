@@ -5,6 +5,7 @@ members = [
     "crates/vf-terrain",
     "crates/vf-detail",
     "crates/vf-mesh",
+    "crates/vf-material",
     "crates/vf-export",
     "crates/vf-geology",
     "crates/vf-flight",

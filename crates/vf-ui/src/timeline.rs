@@ -65,9 +65,9 @@ impl Channel {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::EyeX => "Œil X (m)",
-            Self::EyeY => "Œil Y (m)",
-            Self::EyeZ => "Œil Z (m)",
+            Self::EyeX => "Caméra X (m)",
+            Self::EyeY => "Caméra Y (m)",
+            Self::EyeZ => "Caméra Z (m)",
             Self::TargetX => "Cible X (m)",
             Self::TargetY => "Cible Y (m)",
             Self::TargetZ => "Cible Z (m)",
@@ -424,7 +424,7 @@ pub fn show(
             if drag.target {
                 "Clé cible"
             } else {
-                "Clé œil"
+                "Clé caméra"
             },
             drag.last_time
         ));
@@ -784,13 +784,14 @@ fn draw_timeline(
             match rig.target.mode {
                 TargetMode::Path => "Cible",
                 TargetMode::Fixed => "Cible fixe",
-                TargetMode::EyeAhead => "Cible avance",
+                TargetMode::EyeAhead => "Cible avance (courbe)",
                 TargetMode::Offset => "Cible décalée",
                 TargetMode::Trail => "Cible retard",
                 TargetMode::Manual => "Cible manuelle",
+                TargetMode::None => "Sans cible",
             }
         } else {
-            "Œil"
+            "Caméra"
         };
         painter.text(
             Pos2::new(rect.left() + 8.0, row.center().y),
@@ -1131,7 +1132,8 @@ fn channel_value(
                 TargetMode::EyeAhead
                 | TargetMode::Offset
                 | TargetMode::Trail
-                | TargetMode::Manual => return None,
+                | TargetMode::Manual
+                | TargetMode::None => return None,
             };
             Some(match channel {
                 Channel::TargetX => point.x as f32,

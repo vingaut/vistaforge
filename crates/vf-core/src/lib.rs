@@ -41,8 +41,8 @@ pub use rig::{
     TargetMode, TargetRig,
 };
 pub use scene::{
-    Atmosphere, Camera, CloudSettings, Materials, Palette, Quality, RenderMode, RenderSettings,
-    Sun, TerrainStyle, Tonemap, WaterSettings,
+    Atmosphere, Camera, CloudSettings, Materials, Palette, Quality, ROCK_PRESETS, RenderMode,
+    RenderSettings, Sun, TerrainStyle, Tonemap, WaterSettings,
 };
 pub use seed::{Rng, Seed};
 pub use stats::TerrainStats;

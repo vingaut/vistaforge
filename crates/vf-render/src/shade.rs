@@ -7,6 +7,7 @@ use crate::RenderOptions;
 use crate::SceneData;
 use crate::shadow::ShadowMap;
 use crate::smoothstep;
+use vf_material::{RockStyle, RockTexture};
 
 pub struct ShadeCtx<'a> {
     project: &'a Project,
@@ -18,6 +19,8 @@ pub struct ShadeCtx<'a> {
     cloud_altitude: f32,
     stats: TerrainStats,
     palette: Palette,
+    /// Custom rock texture loaded once per render.
+    texture: Option<RockTexture>,
 }
 
 impl<'a> ShadeCtx<'a> {
@@ -40,6 +43,7 @@ impl<'a> ShadeCtx<'a> {
             cloud_altitude: project.clouds.altitude_m.max(camera_altitude + 900.0),
             stats: hf.stats(),
             palette: project.palette.clone(),
+            texture: RockTexture::load(&project.materials.texture_path),
         }
     }
 
@@ -220,7 +224,7 @@ impl<'a> ShadeCtx<'a> {
         let slope = (1.0 - n.z).clamp(0.0, 1.0);
         let steep = smoothstep(0.30, 0.65, slope);
         fade *= 1.0 - 0.95 * steep;
-        let scale = mats.detail_scale_m.max(1.0) * (1.0 + 1.5 * steep);
+        let scale = mats.bump_scale_m.max(0.05) * (1.0 + 1.5 * steep);
         let eps = scale * 0.75;
         let noise = &self.scene.noise;
         // Tangent frame on the surface: the detail follows the face instead of
@@ -234,8 +238,24 @@ impl<'a> ShadeCtx<'a> {
         let h0 = f(u, v);
         let hu = f(u + eps, v);
         let hv = f(u, v + eps);
-        let k = mats.detail_normal * 2.0 * fade;
-        (n - tangent * ((hu - h0) * k) - bitangent * ((hv - h0) * k)).normalize_or_zero()
+        let k = mats.bump_strength.max(mats.detail_normal) * 2.0 * fade;
+        let mut perturbed = n - tangent * ((hu - h0) * k) - bitangent * ((hv - h0) * k);
+        // Custom texture bump: luminance gradient in tile space. The texture
+        // is sampled in world XY so it stays stable while the camera moves.
+        if let Some(texture) = &self.texture
+            && mats.texture_bump > 0.0
+        {
+            let tile = mats.texture_scale_m.max(0.1);
+            let u = p.x / tile;
+            let v = p.y / tile;
+            let e = 1.0 / 512.0;
+            let h0 = texture.luminance(u, v);
+            let hu = texture.luminance(u + e, v);
+            let hv = texture.luminance(u, v + e);
+            let t = mats.texture_bump * 2.2 * fade;
+            perturbed -= tangent * ((hu - h0) * t) + bitangent * ((hv - h0) * t);
+        }
+        perturbed.normalize_or_zero()
     }
 
     pub fn ground(&self, pos_rel: Vec3, normal: Vec3) -> [f32; 3] {
@@ -402,6 +422,19 @@ impl<'a> ShadeCtx<'a> {
         );
         let patches = noise.fbm01(pos_abs.x * 0.012, pos_abs.y * 0.012, 2, 2.0, 0.5);
         rock = rock.scale(0.78 + 0.34 * grain + 0.12 * patches);
+        if mats.enabled {
+            let style = RockStyle::preset(&mats.rock_preset);
+            let seed_offset = (self.project.seed.0 % 4096) as f32 * 0.37;
+            rock = style.shade(rock, pos_abs, slope, noise, seed_offset);
+            if let Some(texture) = &self.texture {
+                let tile = mats.texture_scale_m.max(0.1);
+                let sampled = texture.sample(pos_abs.x / tile, pos_abs.y / tile);
+                let sampled = Rgb::new(sampled[0], sampled[1], sampled[2]);
+                // Keep the texture on rock faces; snow, grass and beach are
+                // applied afterwards and keep their palette.
+                rock = rock.lerp(sampled, mats.texture_mix.clamp(0.0, 1.0));
+            }
+        }
         let geology = &self.project.geology;
         if geology.enabled && geology.strata.enabled && geology.strata.color_contrast > 0.0 {
             let sample = vf_geology::strata_sample(
@@ -441,7 +474,7 @@ impl<'a> ShadeCtx<'a> {
             let band = smoothstep(mats.scree_slope - 0.08, mats.scree_slope + 0.12, slope)
                 * (1.0 - smoothstep(0.62, 0.82, slope));
             let amount = mats.scree * band * (0.25 + 0.75 * fine) * 0.8;
-            rock = rock.lerp(self.palette.rock.scale(1.30), amount.clamp(0.0, 1.0));
+            rock = rock.lerp(rock.scale(1.30), amount.clamp(0.0, 1.0));
         }
         color = color.lerp(rock, (1.0 - veg_mask).clamp(0.0, 1.0));
 

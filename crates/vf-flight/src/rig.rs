@@ -59,6 +59,11 @@ pub struct RigSimulation<'a> {
     shake: Noise,
     clearance: ClearanceField,
     safety: SafetyState,
+    /// Smoothed terrain offset used by the relative-altitude mode. The
+    /// authored Z is an AGL height; this is the ground part that is added to
+    /// it, smoothed over time so the camera does not follow every facet.
+    eye_ground_offset: f64,
+    target_ground_offset: f64,
 }
 
 impl<'a> RigSimulation<'a> {
@@ -94,7 +99,18 @@ impl<'a> RigSimulation<'a> {
             shake: Noise::new(seed.derive("rig-shake")),
             clearance,
             safety,
+            eye_ground_offset: 0.0,
+            target_ground_offset: 0.0,
         };
+        if rig.constraints.relative_altitude {
+            simulation.eye_ground_offset =
+                simulation.ground_envelope(simulation.eye_pos, initial_velocity);
+            simulation.target_ground_offset =
+                simulation.ground_envelope(simulation.target_pos, initial_velocity);
+            if target_uses_relative_ground(rig) {
+                simulation.target_pos.z += simulation.target_ground_offset;
+            }
+        }
         simulation.prime_safety();
         Ok(simulation)
     }
@@ -102,8 +118,12 @@ impl<'a> RigSimulation<'a> {
     /// Apply the safety layer to the initial pose so `sample_at(0)` is already
     /// collision-free.
     fn prime_safety(&mut self) {
-        let desired = sample_path(&self.rig.eye, 0.0);
+        let mut desired = sample_path(&self.rig.eye, 0.0);
         let velocity = path_derivative(&self.rig.eye, 0.0);
+        if self.rig.constraints.relative_altitude {
+            self.eye_ground_offset = self.ground_envelope(desired, velocity);
+            desired.z += self.eye_ground_offset;
+        }
         let (safe, velocity) = if self.rig.constraints.apply_eye {
             self.safety.apply(
                 self.hf,
@@ -124,6 +144,10 @@ impl<'a> RigSimulation<'a> {
         self.cam_pos = safe + DVec3::from_array(self.rig.optics.offset);
         self.cam_vel = velocity;
         self.target_pos = initial_target(self.rig, safe);
+        if self.rig.constraints.relative_altitude && target_uses_relative_ground(self.rig) {
+            self.target_ground_offset = self.ground_envelope(self.target_pos, velocity);
+            self.target_pos.z += self.target_ground_offset;
+        }
         self.prev_vel = velocity;
     }
 
@@ -157,12 +181,23 @@ impl<'a> RigSimulation<'a> {
         self.time = 0.0;
         self.eye_pos = sample_path(&self.rig.eye, 0.0);
         let initial_velocity = initial_velocity(self.rig, &self.rig.eye);
+        if self.rig.constraints.relative_altitude {
+            self.eye_ground_offset = self.ground_envelope(self.eye_pos, initial_velocity);
+            self.eye_pos.z += self.eye_ground_offset;
+        } else {
+            self.eye_ground_offset = 0.0;
+            self.target_ground_offset = 0.0;
+        }
         self.eye_vel = initial_velocity;
         self.eye_acc = DVec3::ZERO;
         self.cam_pos = self.eye_pos + DVec3::from_array(self.rig.optics.offset);
         self.cam_vel = initial_velocity;
         self.roll = 0.0;
         self.target_pos = initial_target(self.rig, self.eye_pos);
+        if self.rig.constraints.relative_altitude && target_uses_relative_ground(self.rig) {
+            self.target_ground_offset = self.ground_envelope(self.target_pos, initial_velocity);
+            self.target_pos.z += self.target_ground_offset;
+        }
         self.bank_target = 0.0;
         self.safety.reset(self.rig, self.hf);
         self.prime_safety();
@@ -171,8 +206,21 @@ impl<'a> RigSimulation<'a> {
     fn step(&mut self, dt: f32) {
         let t = (self.time + dt).min(self.rig.duration_s);
         let dt64 = f64::from(dt);
-        let desired = sample_path(&self.rig.eye, t);
+        let mut desired = sample_path(&self.rig.eye, t);
         let path_velocity = path_derivative(&self.rig.eye, t);
+        if self.rig.constraints.relative_altitude {
+            // Authored Z is AGL in this mode: add the local ground envelope.
+            // Only the ground offset is filtered; the authored vertical
+            // intent (climb, dive) is preserved exactly.
+            let raw = self.ground_envelope(desired, path_velocity);
+            self.eye_ground_offset = smooth_offset(
+                self.eye_ground_offset,
+                raw,
+                dt64,
+                self.rig.constraints.camera_altitude_damping_s,
+            );
+            desired.z += self.eye_ground_offset;
+        }
         // Safety runs before the exact/profile split: ground clearance and wall
         // avoidance must also work when the path is time-authoritative.
         let (desired, path_velocity) = if self.rig.constraints.apply_eye {
@@ -275,7 +323,26 @@ impl<'a> RigSimulation<'a> {
         // constant combines the user smoothing, the body look lag and a small
         // floor. This is what stops the aim (and therefore the horizon) from
         // snapping when the avoidance vector changes.
-        let desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
+        let mut desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
+        if self.rig.constraints.relative_altitude
+            && matches!(
+                self.rig.target.mode,
+                TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Path
+            )
+        {
+            // Keep the target on the same AGL curve as the camera: its X/Y
+            // still follows the exact authored trajectory and its Z gets the
+            // same terrain offset, smoothed independently.
+            let target_velocity = path_derivative(&self.rig.eye, t);
+            let raw = self.ground_envelope(desired_target, target_velocity);
+            self.target_ground_offset = smooth_offset(
+                self.target_ground_offset,
+                raw,
+                dt64,
+                self.rig.constraints.target_altitude_damping_s,
+            );
+            desired_target.z += self.target_ground_offset;
+        }
         let target_tau = if exact_path {
             0.0
         } else {
@@ -284,7 +351,10 @@ impl<'a> RigSimulation<'a> {
                 // A rigid offset link must not lag, otherwise it is a second
                 // spring target and the offset is not what the user authored.
                 TargetMode::Offset => f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2,
-                TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Manual => {
+                TargetMode::EyeAhead
+                | TargetMode::Trail
+                | TargetMode::Manual
+                | TargetMode::None => {
                     0.06 + f64::from(self.rig.target.smoothing.clamp(0.0, 1.0)) * 1.2
                         + f64::from(self.rig.body.look_lag.clamp(0.0, 2.0)) * 0.5
                 }
@@ -361,6 +431,52 @@ impl<'a> RigSimulation<'a> {
         self.hf.sample_bilinear(gx, gy)
     }
 
+    /// Highest ground around `point`, plus a short look-ahead along the
+    /// horizontal velocity. This is the envelope the relative-altitude mode
+    /// flies above; using the raw cell would make the camera follow every
+    /// noise bump and every grid facet.
+    fn ground_envelope(&self, point: DVec3, velocity: DVec3) -> f64 {
+        let (sx, sy) = self.hf.spacing();
+        let radius = f64::from(self.rig.constraints.altitude_footprint_m)
+            .max(sx.max(sy) * 1.2)
+            .max(f64::from(self.rig.constraints.wall_margin_m));
+        let mut height = self.terrain_footprint(point.x, point.y, radius);
+        let horizontal = glam::DVec2::new(velocity.x, velocity.y);
+        let speed = horizontal.length();
+        if speed > 1.0 {
+            let direction = horizontal / speed;
+            let look = f64::from(self.rig.constraints.altitude_look_ahead_s.max(0.0));
+            for step in 1..=4 {
+                let distance = speed * look * f64::from(step) / 4.0;
+                height = height.max(self.terrain_footprint(
+                    point.x + direction.x * distance,
+                    point.y + direction.y * distance,
+                    radius,
+                ));
+            }
+        }
+        height
+    }
+
+    fn terrain_footprint(&self, x: f64, y: f64, radius: f64) -> f64 {
+        let mut height = f64::from(self.terrain_height(x, y));
+        for (dx, dy) in [
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (0.707, 0.707),
+            (-0.707, 0.707),
+            (0.707, -0.707),
+            (-0.707, -0.707),
+        ] {
+            height = height.max(f64::from(
+                self.terrain_height(x + dx * radius, y + dy * radius),
+            ));
+        }
+        height
+    }
+
     fn current_sample(&self) -> RigSample {
         // A fixed target is an absolute point; `offset` is a link parameter
         // for the moving-target modes and would silently shift it otherwise.
@@ -391,18 +507,19 @@ impl<'a> RigSimulation<'a> {
             );
             let (s, c) = yaw.sin_cos();
             let yaw_rot = DVec3::new(
-                c * forward.x - s * forward.z,
-                forward.y,
-                s * forward.x + c * forward.z,
-            );
+                c * forward.x - s * forward.y,
+                s * forward.x + c * forward.y,
+                forward.z,
+            )
+            .normalize_or_zero();
             forward = yaw_rot;
+            // Pitch about the camera's right axis, not the world X axis: a
+            // world-X rotation tilts a north-facing shot sideways instead of
+            // pitching it up or down.
+            let right_axis = forward.cross(UP).normalize_or_zero();
+            let up_axis = right_axis.cross(forward).normalize_or_zero();
             let (s, c) = pitch.sin_cos();
-            let pitch_rot = DVec3::new(
-                forward.x,
-                c * forward.y - s * forward.z,
-                s * forward.y + c * forward.z,
-            );
-            forward = pitch_rot;
+            forward = (forward * c + up_axis * s).normalize_or_zero();
             right = forward.cross(UP).normalize_or_zero();
             up = right.cross(forward).normalize_or_zero();
         }
@@ -640,6 +757,25 @@ fn response_omega(preset: AircraftPreset) -> f64 {
     1.0 / response_s
 }
 
+/// First-order vertical filter. `damping_s` is the time constant; 0 keeps the
+/// raw ground offset. Rising ground is followed a little faster than falling
+/// ground, which is the asymmetric behaviour that avoids both tunnelling and
+/// a camera that sinks when the ridge ends.
+fn smooth_offset(current: f64, target: f64, dt: f64, damping_s: f32) -> f64 {
+    let damping = f64::from(damping_s.clamp(0.0, 10.0));
+    if damping <= 1e-4 {
+        return target;
+    }
+    let tau = if target > current {
+        damping * 0.65
+    } else {
+        damping
+    }
+    .max(1e-3);
+    let alpha = 1.0 - (-dt / tau).exp();
+    current + (target - current) * alpha
+}
+
 fn initial_velocity(rig: &CameraRig, path: &Path3D) -> DVec3 {
     let velocity = path_derivative(path, 0.0);
     if rig.exact_path || rig.body.manual_orientation {
@@ -652,6 +788,13 @@ fn initial_velocity(rig: &CameraRig, path: &Path3D) -> DVec3 {
     } else {
         velocity
     }
+}
+
+fn target_uses_relative_ground(rig: &CameraRig) -> bool {
+    matches!(
+        rig.target.mode,
+        TargetMode::EyeAhead | TargetMode::Trail | TargetMode::Path
+    )
 }
 
 fn initial_target(rig: &CameraRig, eye: DVec3) -> DVec3 {
@@ -671,24 +814,30 @@ pub fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DV
             sample_path(&rig.eye, (f64::from(t) - delay).max(0.0) as f32)
         }
         TargetMode::EyeAhead => {
-            let speed = velocity.length();
-            let direction = if speed > 0.05 {
-                velocity / speed
+            // The target is a point *on the authored camera curve*, sampled at
+            // t + lead. The old implementation took eye + velocity * lead,
+            // which leaves the curve in every bend and does not match the
+            // timing shown in the timeline. Sampling the curve keeps the
+            // target exactly on the planned trajectory with the requested
+            // relative temporal advance (negative lead trails on the curve).
+            let lead = f64::from(rig.target.lead_s.clamp(-5.0, 5.0));
+            let sample_t =
+                (f64::from(t) + lead).clamp(0.0, f64::from(rig.duration_s.max(0.0))) as f32;
+            let point = sample_path(&rig.eye, sample_t);
+            if (point - eye).length() > 0.5 {
+                point
             } else {
-                path_derivative(&rig.eye, t).normalize_or_zero()
-            };
-            let direction = if direction.length_squared() < 0.5 {
-                DVec3::Y
-            } else {
-                direction
-            };
-            // A pure velocity*time lead collapses to a few metres at low
-            // speed and makes the camera stare at its own nose. Keep a
-            // readable minimum look-ahead distance.
-            let distance = (speed * f64::from(rig.target.lead_s)).max(55.0);
-            eye + direction * distance
+                // Degenerate lead (zero duration or lead): keep a readable
+                // direction instead of a zero-length look vector.
+                let direction = if velocity.length_squared() > 0.0025 {
+                    velocity.normalize()
+                } else {
+                    path_derivative(&rig.eye, t).normalize_or_zero()
+                };
+                eye + direction * 500.0
+            }
         }
-        TargetMode::Manual => {
+        TargetMode::Manual | TargetMode::None => {
             let speed = velocity.length();
             let direction = if speed > 0.05 {
                 velocity / speed
@@ -1488,6 +1637,131 @@ mod tests {
         }
         // 120°/s at 60 Hz is 2° per stored sample; never a frame-to-frame flip.
         assert!(max_step < 6.0, "roll jump of {max_step}° between samples");
+    }
+
+    #[test]
+    fn ahead_target_stays_exactly_on_the_camera_curve() {
+        let hf = HeightField::filled(129, 129, 10.0, 0.0).unwrap();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 300.0]),
+            vf_core::PathKey::new(5.0, [400.0, 300.0, 300.0]),
+            vf_core::PathKey::new(10.0, [800.0, 0.0, 300.0]),
+        ];
+        rig.duration_s = 10.0;
+        rig.constraints.enabled = false;
+        rig.target.mode = TargetMode::EyeAhead;
+        rig.target.lead_s = 1.5;
+        rig.target.smoothing = 0.0;
+        rig.target.offset = [0.0; 3];
+        let mut sim = RigSimulation::new(&rig, &hf, Seed::new(2)).unwrap();
+        for t in [0.0f32, 2.0, 5.0, 8.0] {
+            let sample = sim.sample_at(t);
+            // The simulation advances in fixed steps, so its internal clock is
+            // at most one step behind the requested scrub time; compare with
+            // the curve at the state time to test the mode, not the step grid.
+            let expected = sample_path(&rig.eye, (sim.time() + 1.5).min(10.0));
+            assert!(
+                (sample.target - expected).length() < 0.05,
+                "t={t}: target={:?} expected={:?}",
+                sample.target,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn no_target_mode_has_no_second_authored_point() {
+        assert!(!TargetMode::None.uses_target());
+        let hf = HeightField::filled(129, 129, 10.0, 0.0).unwrap();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 300.0]),
+            vf_core::PathKey::new(8.0, [800.0, 0.0, 300.0]),
+        ];
+        rig.duration_s = 8.0;
+        rig.constraints.enabled = false;
+        rig.target.mode = TargetMode::None;
+        let sample = sample_rig(&rig, &hf, Seed::new(3), 4.0).unwrap();
+        assert!((sample.target - sample.eye).length() > 100.0);
+        assert!(sample.camera.target.x.is_finite());
+    }
+
+    fn step_terrain() -> HeightField {
+        let mut heights = vec![0.0f32; 129 * 129];
+        for y in 0..129 {
+            for x in 0..129 {
+                heights[y * 129 + x] = if x >= 50 { 200.0 } else { 0.0 };
+            }
+        }
+        HeightField::new(129, 129, 10.0, 10.0, heights).unwrap()
+    }
+
+    #[test]
+    fn relative_altitude_follows_the_ground_with_damping() {
+        let hf = step_terrain();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        // Author 100 m AGL; the terrain rises from 0 to 200 m at x=500.
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [100.0, 640.0, 100.0]),
+            vf_core::PathKey::new(20.0, [1200.0, 640.0, 100.0]),
+        ];
+        rig.duration_s = 20.0;
+        rig.exact_path = true;
+        rig.target.mode = TargetMode::Fixed;
+        rig.target.fixed = [600.0, 640.0, 100.0];
+        rig.constraints.enabled = true;
+        rig.constraints.ground_clearance_m = 20.0;
+        rig.constraints.relative_altitude = true;
+        rig.constraints.camera_altitude_damping_s = 1.0;
+        rig.constraints.altitude_footprint_m = 10.0;
+        rig.constraints.altitude_look_ahead_s = 3.0;
+        let mut sim = RigSimulation::new(&rig, &hf, Seed::new(4)).unwrap();
+        let start = sim.sample_at(0.0);
+        assert!(start.eye.z < 130.0, "start z={}", start.eye.z);
+        let mut previous = start.eye.z;
+        let mut climbed_smoothly = true;
+        for index in 1..=200 {
+            let t = 20.0 * index as f32 / 200.0;
+            let sample = sim.sample_at(t);
+            // Never far below the 100 m AGL intent once the ground is high,
+            // and never an instant jump of hundreds of metres.
+            assert!(sample.eye.z >= 99.0);
+            if (sample.eye.z - previous).abs() > 40.0 {
+                climbed_smoothly = false;
+            }
+            previous = sample.eye.z;
+        }
+        assert!(climbed_smoothly, "vertical motion was not damped");
+        let end = sim.sample_at(20.0);
+        assert!(
+            (end.eye.z - 300.0).abs() < 25.0,
+            "end z={} should be near 300 m (200 ground + 100 AGL)",
+            end.eye.z
+        );
+        // The damping must not leave the camera inside the rising terrain.
+        assert!(end.eye.z >= 200.0 + 20.0);
+    }
+
+    #[test]
+    fn relative_altitude_keeps_the_ahead_target_on_the_agl_curve() {
+        let hf = HeightField::filled(129, 129, 10.0, 0.0).unwrap();
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 80.0]),
+            vf_core::PathKey::new(10.0, [900.0, 0.0, 80.0]),
+        ];
+        rig.duration_s = 10.0;
+        rig.constraints.enabled = true;
+        rig.constraints.relative_altitude = true;
+        rig.constraints.camera_altitude_damping_s = 0.0;
+        rig.constraints.target_altitude_damping_s = 0.0;
+        rig.target.mode = TargetMode::EyeAhead;
+        rig.target.lead_s = 2.0;
+        let sample = sample_rig(&rig, &hf, Seed::new(9), 3.0).unwrap();
+        assert!((sample.eye.z - 80.0).abs() < 1.0);
+        assert!((sample.target.z - 80.0).abs() < 1.0);
+        assert!((sample.target.x - sample.eye.x).abs() > 50.0);
     }
 
     #[test]

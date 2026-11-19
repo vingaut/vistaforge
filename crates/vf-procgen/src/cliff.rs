@@ -34,12 +34,7 @@ const LADDER_MAX_M: f32 = 250.0;
 /// massif. `warp_scale_m` is the wavelength of that undulation. The ladder is
 /// evaluated in warped altitude and the warp is removed afterwards, so the
 /// terrain itself is not shifted, only the bed boundaries.
-pub fn sharpen(
-    hf: &HeightField,
-    seed: Seed,
-    warp: f32,
-    warp_scale_m: f32,
-) -> Result<HeightField> {
+pub fn sharpen(hf: &HeightField, seed: Seed, warp: f32, warp_scale_m: f32) -> Result<HeightField> {
     let (sx, sy) = hf.spacing();
     let cell = sx.max(sy) as f32;
     let mut out = hf.clone();
@@ -86,8 +81,7 @@ pub fn sharpen(
             let (gx, gy) = hf.gradient_at(x, y);
             let slope = (gx * gx + gy * gy).sqrt();
             let feature = (hf.get(x, y) - local_mean.get(x, y)).abs();
-            weight[y * width + x] =
-                smoothstep(1.05, 1.50, slope) * smoothstep(12.0, 40.0, feature);
+            weight[y * width + x] = smoothstep(1.05, 1.50, slope) * smoothstep(12.0, 40.0, feature);
         }
     }
     // Smooth the weight so neighbouring cells do not make opposite decisions.

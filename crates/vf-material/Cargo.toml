@@ -1,0 +1,18 @@
+[package]
+name = "vf-material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Procedural rock presets, custom textures, bump and displacement"
+
+[dependencies]
+glam.workspace = true
+image.workspace = true
+vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
+vf-mesh = { path = "../vf-mesh" }
+vf-procgen = { path = "../vf-procgen" }
+
+[lints]
+workspace = true

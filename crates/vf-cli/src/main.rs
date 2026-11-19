@@ -610,6 +610,9 @@ struct ImportArgs {
     /// Keep image rows north-first instead of flipping to VistaForge.
     #[arg(long)]
     no_flip_y: bool,
+    /// Invert the height convention: dark pixels become high ground.
+    #[arg(long)]
+    invert_height: bool,
     /// Render a preview PNG immediately after import.
     #[arg(long)]
     render: Option<PathBuf>,
@@ -727,6 +730,43 @@ struct RenderArgs {
     /// Large-scale detail patchiness (0..1), breaks layer repetition.
     #[arg(long)]
     detail_heterogeneity: Option<f32>,
+    /// Procedural rock preset: granite, basalt, limestone, sandstone,
+    /// schist, chalk, volcanic or generic.
+    #[arg(long)]
+    rock_material: Option<String>,
+    /// Material bump strength (0..2).
+    #[arg(long)]
+    bump: Option<f32>,
+    /// Material bump wavelength, metres.
+    #[arg(long)]
+    bump_scale: Option<f32>,
+    /// Material displacement, metres.
+    #[arg(long)]
+    displacement: Option<f32>,
+    /// Custom texture path (PNG/JPG/TIFF) projected in world space.
+    #[arg(long)]
+    texture: Option<String>,
+    /// World-space texture tile size, metres.
+    #[arg(long)]
+    texture_scale: Option<f32>,
+    /// Texture bump strength (0..2).
+    #[arg(long)]
+    texture_bump: Option<f32>,
+    /// Texture displacement, metres.
+    #[arg(long)]
+    texture_displacement: Option<f32>,
+    /// Texture mix with the geological rock colour (0..1).
+    #[arg(long)]
+    texture_mix: Option<f32>,
+    /// Disable the shape-adaptive mesh (use the regular grid).
+    #[arg(long)]
+    no_shape_adaptive: bool,
+    /// Shape-adaptive geometric tolerance, metres.
+    #[arg(long)]
+    adaptive_tolerance: Option<f32>,
+    /// Write quads in the Blender OBJ export.
+    #[arg(long)]
+    quads: bool,
     /// Undulate the cliff ladder (0..1) to break horizontal repetition.
     #[arg(long)]
     cliff_warp: Option<f32>,
@@ -1598,6 +1638,10 @@ fn generate(args: GenerateArgs) -> Result<()> {
         .detail
         .validate()
         .map_err(|e| anyhow::anyhow!("detail: {e}"))?;
+    project
+        .materials
+        .validate()
+        .map_err(|e| anyhow::anyhow!("material: {e}"))?;
     project.erosion_enabled = erosion.is_some();
     if let Some(params) = &erosion {
         project.erosion = params.clone();
@@ -1671,6 +1715,7 @@ fn import(args: ImportArgs) -> Result<()> {
             spacing_m: args.spacing.map(f64::from).unwrap_or(0.0),
             origin: [0.0, 0.0],
             flip_y: !args.no_flip_y,
+            invert_height: args.invert_height,
         },
         dem_spacing_m: args.spacing.unwrap_or(30.0),
     };
@@ -2166,6 +2211,50 @@ fn run_render(args: RenderArgs) -> Result<()> {
     }
     if let Some(strength) = args.detail_normal {
         project.materials.detail_normal = strength;
+    }
+    if let Some(name) = &args.rock_material {
+        let key = name.trim().to_ascii_lowercase();
+        if !vf_core::ROCK_PRESETS.contains(&key.as_str()) {
+            anyhow::bail!(
+                "unknown rock material '{name}' (known: {})",
+                vf_core::ROCK_PRESETS.join(", ")
+            );
+        }
+        project.materials.rock_preset = key;
+    }
+    if let Some(value) = args.bump {
+        project.materials.bump_strength = value;
+    }
+    if let Some(value) = args.bump_scale {
+        project.materials.bump_scale_m = value;
+    }
+    if let Some(value) = args.displacement {
+        project.materials.displacement_m = value;
+    }
+    if let Some(value) = &args.texture {
+        project.materials.texture_path = value.clone();
+    }
+    if let Some(value) = args.texture_scale {
+        project.materials.texture_scale_m = value;
+    }
+    if let Some(value) = args.texture_bump {
+        project.materials.texture_bump = value;
+    }
+    if let Some(value) = args.texture_displacement {
+        project.materials.texture_displacement_m = value;
+    }
+    if let Some(value) = args.texture_mix {
+        project.materials.texture_mix = value;
+    }
+    if args.no_shape_adaptive {
+        project.detail.adaptive = false;
+    }
+    if let Some(value) = args.adaptive_tolerance {
+        project.detail.adaptive = true;
+        project.detail.adaptive_tolerance_m = value;
+    }
+    if args.quads {
+        project.detail.quad_mesh = true;
     }
     if let Some(value) = args.detail_heterogeneity {
         project.detail.heterogeneity = value;

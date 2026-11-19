@@ -42,12 +42,13 @@ Options utiles : `--no-water`, `--no-camera`, `--no-sun` à l'export ;
 
 | Fichier | Contenu |
 |---|---|
-| `scene.glb` | maillage réel (détail continu inclus), normales, UV0 plan et UV1 métrique, couleurs de sommets, 7 emplacements de matériaux, caméra, soleil. |
+| `scene.glb` | maillage réel (détail continu, matière et déplacement inclus), normales, UV0 plan et UV1 métrique, couleurs de sommets, 7 emplacements de matériaux, caméra, soleil. |
+| `scene.obj` | même surface en Wavefront OBJ. Si l'option **quads** du menu Détail est active, les faces sont des quads/n-gons (glTF reste triangulé). |
 | `scene.json` | palette, soleil, caméra, unités, CRS, stats du terrain, réglages de rendu, roche, détail, correspondance des matériaux. |
 | `albedo.png` | albédo cuit en UV0 (sRGB), à remplacer par les textures de l'artiste. |
 | `normal.png` | normale dérivée du heightfield détaillé (UV0, espace top-down). |
 | `masks.png` | R = neige, G = végétation, B = éboulis, pour mélanger des textures. |
-| `heightmap_16.png` | heightfield de la surface exportée, 16 bits, ligne 0 = sud. |
+| `heightmap_16.png` | heightfield de la surface exportée, 16 bits, **ligne 0 = nord, blanc = haut** (convention UV0). |
 | `README.txt` | rappel de la commande d'import. |
 | `camera_animation.glb` | optionnel : trajectoire caméra/cible exportée par l'espace Fichiers ou `rig export`. |
 
@@ -84,10 +85,33 @@ ses propres textures par matériau et utiliser les masques pour les mélanges.
   recousues dans Blender (Merge by Distance) ou remplacées par `--smart-uv`.
 - Le GLB importe bien **deux couches UV** (vérifié : `2 UV layer(s)`).
 
+### Maillage adaptatif et quads
+
+Le menu **Détail** propose **Adapter localement le maillage à la forme** et une
+**tolérance géométrique** en mètres. Les blocs plats deviennent de grandes
+faces, les crêtes et falaises reçoivent les sommets ; les raccords 2:1 sont
+cousus sans trous. Les UV restent la projection monde, donc la texture ne se
+casse pas aux transitions.
+
+Le même panneau propose **Exporter en quads / n-gons**. Le GLB reste triangulé
+(le format glTF ne connaît pas les quads), mais `scene.obj` conserve les faces
+à quatre côtés ou plus : c'est le fichier à importer dans Blender pour
+sélectionner les boucles, déplier et peindre confortablement. Les deux fichiers
+partagent les mêmes UV0.
+
 `--smart-uv` recalcule une projection dans Blender, au prix de la
 correspondance avec `albedo.png` et `normal.png`. `--remesh` applique un
 modifier Voxel Remesh destructif ; à réserver aux objets lourds ou aux tests.
 `--save-blend` écrit un `.blend` configuré avant le rendu.
+
+### Matières et textures
+
+Le menu **Matières** applique un preset de roche procédurale (granite, basalte,
+calcaire, grès, schiste, craie, volcanique), un bump et un déplacement. Une
+texture personnelle (PNG/JPEG/TIFF) peut être peinte dans le panneau, ou
+importée par chemin : sa luminance sert au bump et au déplacement. L'export
+Blender cuit les mêmes couleurs dans `albedo.png` et applique le déplacement
+au maillage, donc le rendu Cycles part du même état que l'aperçu CPU.
 
 ---
 
@@ -98,9 +122,10 @@ heightfield stocké
   → pile de modificateurs (si active)
   → pass falaises (cliff_warp inclus)
   → champ de détail continu (profil de roche)
-  → maillage subdivisé (1–8×, budget de sommets)
+  → maillage subdivisé (1–8×) ou adaptatif à la forme
+  → déplacement de matière (procédural + texture perso)
   → couleurs de sommets + classes de matériaux
-  → GLB + textures cuites + sidecar
+  → GLB + OBJ + textures cuites + sidecar
 ```
 
 C'est le même ordre que le rendu CPU. Un modificateur ou un réglage de falaise

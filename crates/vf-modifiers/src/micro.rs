@@ -27,10 +27,7 @@ fn slope_weight(slope: f32, slope_only: f32) -> f32 {
 fn world_cell(hf: &HeightField, x: usize, y: usize) -> (f32, f32) {
     let (ox, oy, _, _) = world_extent(hf);
     let (sx, sy) = hf.spacing();
-    (
-        (ox + x as f64 * sx) as f32,
-        (oy + y as f64 * sy) as f32,
-    )
+    ((ox + x as f64 * sx) as f32, (oy + y as f64 * sy) as f32)
 }
 
 /// Directional solution flutes / runnels.
@@ -59,13 +56,8 @@ pub fn grooves(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Heig
             }
             let (wx, wy) = world_cell(hf, x, y);
             let (u, v) = rotate(wx, wy, angle);
-            let wander_m = noise.fbm2(
-                u / (spacing * 6.0),
-                v / (spacing * 6.0),
-                3,
-                2.0,
-                0.5,
-            ) * wander
+            let wander_m = noise.fbm2(u / (spacing * 6.0), v / (spacing * 6.0), 3, 2.0, 0.5)
+                * wander
                 * spacing
                 * 0.8;
             let phase = (u + wander_m) / spacing * TAU;
@@ -143,10 +135,8 @@ pub fn crater_field(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result
                     if hash01(cx, cy, seed.0) > density {
                         continue;
                     }
-                    let px = (cx as f32 + 0.12 + 0.76 * hash01(cx + 17, cy - 9, seed.0))
-                        * spacing;
-                    let py = (cy as f32 + 0.12 + 0.76 * hash01(cx - 5, cy + 23, seed.0))
-                        * spacing;
+                    let px = (cx as f32 + 0.12 + 0.76 * hash01(cx + 17, cy - 9, seed.0)) * spacing;
+                    let py = (cy as f32 + 0.12 + 0.76 * hash01(cx - 5, cy + 23, seed.0)) * spacing;
                     let r = radius * (0.35 + 1.3 * hash01(cx + 3, cy + 7, seed.0));
                     let d = ((wx - px).powi(2) + (wy - py).powi(2)).sqrt() / r.max(0.2);
                     if d < 1.0 {
@@ -267,17 +257,11 @@ pub fn undercut(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Hei
             }
             let (wx, wy) = world_cell(hf, x, y);
             let (u, v) = rotate(wx, wy, angle);
-            let wander = noise.fbm2(
-                u / (spacing * 5.0),
-                v / (spacing * 5.0),
-                3,
-                2.0,
-                0.5,
-            ) * spacing
-                * 0.35;
-            let buttress =
-                (0.5 + 0.5 * ((u + wander) / spacing * TAU).cos()).powf(exponent);
-            let patch = 0.55 + 0.45 * noise.fbm01(wx / (spacing * 3.0), wy / (spacing * 3.0), 3, 2.0, 0.5);
+            let wander =
+                noise.fbm2(u / (spacing * 5.0), v / (spacing * 5.0), 3, 2.0, 0.5) * spacing * 0.35;
+            let buttress = (0.5 + 0.5 * ((u + wander) / spacing * TAU).cos()).powf(exponent);
+            let patch =
+                0.55 + 0.45 * noise.fbm01(wx / (spacing * 3.0), wy / (spacing * 3.0), 3, 2.0, 0.5);
             heights[y * hf.width() + x] -= depth * notch * wall * buttress * patch;
         }
     }

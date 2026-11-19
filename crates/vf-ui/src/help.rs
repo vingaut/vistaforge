@@ -144,10 +144,10 @@ impl HelpTopic {
                 "La barre de lecture reste ancrée en bas du viewport : elle permet de lancer l'animation depuis n'importe quel onglet, sans chercher un bouton dans le panneau."
             }
             Self::Path => {
-                "Le tracé cyan est la trajectoire de l'œil. Les clés E0, E1… portent chacune un temps et une position 3D ; la courbe passe par toutes."
+                "Le tracé cyan est la trajectoire de la caméra. Les clés C0, C1… portent chacune un temps et une position 3D ; la courbe passe par toutes."
             }
             Self::Target => {
-                "La cible orange matérialise ce que la caméra regarde. Elle n'existe que dans la vue design : fixe, en avance, en décalage rigide, en retard ou sur son propre tracé. Ces modes changent le lien caméra/cible, pas la trajectoire de l'œil."
+                "La cible orange matérialise ce que la caméra regarde. Elle n'existe que dans la vue design : fixe, en avance, en décalage rigide, en retard ou sur son propre tracé. Ces modes changent le lien caméra/cible, pas la trajectoire de la caméra."
             }
             Self::Timing => {
                 "La durée, les images/s et le nombre d'images déterminent la longueur du clip. La durée ne dilate pas le tracé : elle change la vitesse à laquelle on le parcourt."
@@ -156,7 +156,7 @@ impl HelpTopic {
                 "Le FOV, la profondeur de champ, le roulis et la liaison ressort changent ce que la caméra voit, sans modifier le tracé."
             }
             Self::Constraints => {
-                "Les contraintes corrigent automatiquement la trajectoire simulée : hauteur au-dessus du sol, plan de référence fixe et évitement des parois raides. Elles s'appliquent à l'œil, à la caméra ou à la cible."
+                "Les contraintes corrigent automatiquement la trajectoire simulée : hauteur au-dessus du sol, plan de référence fixe et évitement des parois raides. Elles s'appliquent au trajet caméra et à la cible."
             }
             Self::Profile => {
                 "Le profil ne change pas le tracé : il change la façon dont le corps suit ce tracé (inertie, accélérations, roulis, secousses). C'est là que se joue la différence drone / hélicoptère / dirigeable."
@@ -246,10 +246,11 @@ impl HelpTopic {
             ],
             Self::Target => &[
                 "Fixe : un point immobile, utile pour un plan large ou une orbite.",
-                "Avance : la caméra regarde devant elle (lead et lissage réglables).",
-                "Décalage : la cible reste à un offset monde constant de l'œil (liaison rigide, sans retard).",
-                "Retard : la cible vise l'œil tel qu'il était il y a N secondes (regard arrière).",
-                "Tracé animé : une seconde courbe, avec ses propres clés T0, T1… Copier l'œil ou synchroniser les temps crée un lien éditable.",
+                "Aucune cible : la caméra regarde devant elle, sans point cible ni clés cible.",
+                "Avance sur courbe : la cible reste exactement sur le tracé caméra à t + avance, sans extrapolation.",
+                "Décalage : la cible reste à un offset monde constant de la caméra (liaison rigide, sans retard).",
+                "Retard sur courbe : la cible vise la caméra telle qu'elle était il y a N secondes, sur le tracé.",
+                "Tracé animé : une seconde courbe, avec ses propres clés T0, T1… Copier le tracé caméra ou synchroniser les temps crée un lien éditable.",
                 "Manuel : la caméra suit son axe, sans cible matérialisée.",
             ],
             Self::Timing => &[
@@ -263,10 +264,11 @@ impl HelpTopic {
             Self::Optics => &[
                 "Un FOV large (70–90°) accélère la sensation de vitesse ; un FOV serré (25–40°) comprime la scène.",
                 "La profondeur de champ est calculée par le rig, mais rasterisée seulement par Blender/Cycles.",
-                "La liaison Ressort fait traîner la caméra derrière l'œil : utile pour un plan embarqué souple.",
+                "La liaison Ressort fait traîner la caméra optique derrière le trajet caméra : utile pour un plan embarqué souple.",
                 "Le roulis explicite s'ajoute au roulis automatique calculé depuis l'accélération latérale.",
             ],
             Self::Constraints => &[
+                "Altitude relative au sol (AGL) : la hauteur des clés devient une hauteur au-dessus du relief, avec un amortissement distinct pour la caméra et la cible, une anticipation et un plancher dur.",
                 "Garde au sol : hauteur réglable, correction verticale amortie et plancher dur ; fonctionne aussi en suivi exact.",
                 "Évitement des parois : anticipe la paroi, monte si l'accélération verticale le permet, sinon contourne latéralement puis revient sur le tracé.",
                 "Angle d'impact : ±20° par défaut autour de la normale pour déclencher un contournement ; les impacts obliques glissent le long de la paroi.",
@@ -317,9 +319,11 @@ impl HelpTopic {
             ],
             Self::Detail => &[
                 "Le profil de roche choisit les couches de détail (sillons, arêtes, cratères, exfoliation).",
-                "La densité du maillage subdivise la grille de rendu (1× à 8×) sans changer le heightfield.",
+                "Maillage adaptatif : les blocs plats deviennent de grandes faces, les crêtes reçoivent les sommets ; la tolérance borne l'erreur en mètres. Les raccords sont cousus et les UV monde restent continues.",
+                "Quads / n-gons : le GLB reste triangulé, mais scene.obj conserve les quads pour Blender.",
+                "La densité du maillage subdivise encore la grille (1× à 8×) sans changer le heightfield.",
                 "Le patch de gros plan ajoute un maillage fin à 2–50 cm de pas sous la caméra.",
-                "Trop de détail à distance produit du bruit : la montée en fréquence est limitée par l'empreinte pixel.",
+                "Le viewport GPU affiche le détail ; l'avant/après CPU montre le rendu exact. Trop de détail à distance produit du bruit : l'empreinte pixel limite la fréquence.",
             ],
             Self::Sculpt => &[
                 "Le module travaille à la résolution du heightfield : à 25 m/cellule, un banc de 8 m ne peut pas être sculpté. Densifiez ×2 avant les terrasses fines.",
@@ -341,9 +345,10 @@ impl HelpTopic {
                 "Désactiver l'eau est le moyen le plus rapide de vérifier une vallée.",
             ],
             Self::Materials => &[
-                "Neige et végétation sont des masques : couverture, pente et altitude se combinent.",
-                "L'éboulis apparaît sur les pentes intermédiaires, pas sur les parois ni les replats.",
-                "Le détail de normale ajoute du grain à la roche ; l'échelle est en mètres.",
+                "Les presets de roche (granite, basalte, calcaire, grès, schiste, craie, volcanique) changent la teinte, les bancs, les fissures et le grain.",
+                "Le bump perturbe la normale ; le déplacement ajoute de la géométrie au maillage CPU et Blender.",
+                "Une texture personnelle (chemin ou pinceau intégré) est projetée en XY monde : sa luminance sert au bump et au déplacement.",
+                "Neige et végétation restent des masques : couverture, pente et altitude se combinent.",
                 "L'étagement règle la ligne de neige, la limite des arbres et la plage.",
             ],
             Self::Light => &[
@@ -354,7 +359,7 @@ impl HelpTopic {
             ],
             Self::Camera => &[
                 "Le gizmo d'orientation et les vues CAO cadrent la scène sans toucher au projet.",
-                "La molette zoome, le glisser orbite, le double-clic recadre.",
+                "Le glisser orbite, la molette zoome, Maj + glisser (ou clic droit / molette) déplace la vue (pan), le double-clic recadre.",
                 "La caméra de conception est mémorisée quand vous passez en vue caméra animée.",
                 "Les raccourcis 1/2/3/0 fonctionnent même quand le viewport n'a pas le focus.",
             ],
@@ -424,7 +429,7 @@ impl HelpTopic {
                 "Effet attendu : la courbe se déforme sur l'axe tiré ; le viseur et la cible suivent la clé."
             }
             Self::Target => {
-                "Effet attendu : la ligne œil → cible et le cadre du viseur montrent exactement le plan filmé."
+                "Effet attendu : la ligne caméra → cible et le cadre du viseur montrent exactement le plan filmé."
             }
             Self::Timing => {
                 "Effet attendu : à durée courte le corps sature et coupe les virages ; à durée longue le vol est fluide."
@@ -1246,10 +1251,11 @@ fn target_mode_label(mode: TargetMode) -> &'static str {
     match mode {
         TargetMode::Fixed => "Fixe",
         TargetMode::Path => "Tracé animé",
-        TargetMode::EyeAhead => "Avance",
+        TargetMode::EyeAhead => "Avance sur courbe",
         TargetMode::Offset => "Décalage",
         TargetMode::Trail => "Retard",
         TargetMode::Manual => "Manuel",
+        TargetMode::None => "Aucune cible",
     }
 }
 

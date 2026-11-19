@@ -91,13 +91,7 @@ impl<'a> DetailSampler<'a> {
 
     /// Height with the detail scaled by `detail_scale` (0 = base surface).
     /// Used by the focus patch to fade its border into the coarse mesh.
-    pub fn height_scaled(
-        &self,
-        x: f64,
-        y: f64,
-        footprint_m: f32,
-        detail_scale: f32,
-    ) -> f32 {
+    pub fn height_scaled(&self, x: f64, y: f64, footprint_m: f32, detail_scale: f32) -> f32 {
         self.base_height(x, y) + self.detail(x, y, footprint_m) * detail_scale.clamp(0.0, 1.0)
     }
 
@@ -109,13 +103,7 @@ impl<'a> DetailSampler<'a> {
     }
 
     /// Normal of [`Self::height_scaled`].
-    pub fn normal_scaled(
-        &self,
-        x: f64,
-        y: f64,
-        footprint_m: f32,
-        detail_scale: f32,
-    ) -> [f32; 3] {
+    pub fn normal_scaled(&self, x: f64, y: f64, footprint_m: f32, detail_scale: f32) -> [f32; 3] {
         let eps = (footprint_m * 2.0).clamp(0.35, 80.0) as f64;
         let hx = self.height_scaled(x + eps, y, footprint_m, detail_scale)
             - self.height_scaled(x - eps, y, footprint_m, detail_scale);
@@ -332,11 +320,7 @@ impl<'a> DetailSampler<'a> {
         // Jitter the grid itself before hashing: hash cells alone still line
         // up along the axes and read as a lattice at grazing angles.
         let cell = c.spacing_m.max(2.0);
-        let warp_x = self
-            .crater_noise
-            .noise2(x / (cell * 3.0), y / (cell * 3.0))
-            * cell
-            * 0.35;
+        let warp_x = self.crater_noise.noise2(x / (cell * 3.0), y / (cell * 3.0)) * cell * 0.35;
         let warp_y = self
             .crater_noise
             .noise2(x / (cell * 3.0) + 9.1, y / (cell * 3.0) - 4.7)
@@ -400,8 +384,13 @@ impl<'a> DetailSampler<'a> {
         let patch = smoothstep(
             0.28,
             0.72,
-            self.exfoliation_noise
-                .fbm01(x / (e.scale_m * 6.0) + 41.0, y / (e.scale_m * 6.0) - 7.0, 2, 2.0, 0.5),
+            self.exfoliation_noise.fbm01(
+                x / (e.scale_m * 6.0) + 41.0,
+                y / (e.scale_m * 6.0) - 7.0,
+                2,
+                2.0,
+                0.5,
+            ),
         );
         if patch <= 0.0 {
             return 0.0;
@@ -431,10 +420,7 @@ impl<'a> DetailSampler<'a> {
         }
         // `1 - |noise|` creates rounded cells; a threshold turns the cell
         // centres into pits and leaves the cell walls intact.
-        let n = 1.0 - self
-            .vesicle_noise
-            .noise2(x / spacing, y / spacing)
-            .abs();
+        let n = 1.0 - self.vesicle_noise.noise2(x / spacing, y / spacing).abs();
         let density = (v.density * (0.45 + 1.10 * variation)).clamp(0.0, 1.0);
         let threshold = 1.0 - density * 0.75;
         let pit = smoothstep(threshold, 1.0, n);
@@ -494,10 +480,7 @@ mod tests {
         let b = DetailSampler::new(&hf, &settings, Seed::new(7));
         let x = 1234.5;
         let y = 678.9;
-        assert_eq!(
-            a.height(x, y, 1.0).to_bits(),
-            b.height(x, y, 1.0).to_bits()
-        );
+        assert_eq!(a.height(x, y, 1.0).to_bits(), b.height(x, y, 1.0).to_bits());
         let base = a.base_height(x, y);
         let detailed = a.height(x, y, 1.0);
         assert!((detailed - base).abs() > 1e-4, "detail is a no-op");

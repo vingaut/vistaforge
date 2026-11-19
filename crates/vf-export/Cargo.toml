@@ -19,6 +19,7 @@ vf-geology = { path = "../vf-geology" }
 vf-modifiers = { path = "../vf-modifiers" }
 vf-procgen = { path = "../vf-procgen" }
 vf-mesh = { path = "../vf-mesh" }
+vf-material = { path = "../vf-material" }
 
 [lints]
 workspace = true

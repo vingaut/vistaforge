@@ -14,10 +14,12 @@ image.workspace = true
 ron.workspace = true
 serde.workspace = true
 vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
 vf-export = { path = "../vf-export" }
 vf-geology = { path = "../vf-geology" }
 vf-flight = { path = "../vf-flight" }
 vf-io = { path = "../vf-io" }
+vf-material = { path = "../vf-material" }
 vf-modifiers = { path = "../vf-modifiers" }
 vf-procgen = { path = "../vf-procgen" }
 vf-render = { path = "../vf-render" }

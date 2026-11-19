@@ -18,9 +18,13 @@ use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
 use glam::{DVec3, Mat4, Vec3};
 use vf_core::{Camera, HeightField, Project};
+use vf_detail::DetailSampler;
 use wgpu::util::DeviceExt as _;
 
 const MAX_MESH_SEGMENTS: usize = 2049;
+/// The continuous detail sampler is much more expensive per vertex than the
+/// heightfield lookup; cap its preview resolution independently.
+const MAX_DETAIL_MESH_SEGMENTS: usize = 1025;
 const SCENE_SHADER: &str = include_str!("shaders/scene.wgsl");
 const BLIT_SHADER: &str = include_str!("shaders/blit.wgsl");
 
@@ -72,6 +76,9 @@ struct GpuUniforms {
     water_shallow: [f32; 4],
     params: [f32; 4],
     misc: [f32; 4],
+    material: [f32; 4],
+    material2: [f32; 4],
+    material3: [f32; 4],
 }
 
 /// A live GPU viewport. Dropping it releases all wgpu resources.
@@ -523,6 +530,12 @@ impl GpuRenderer {
         let palette = &project.palette;
         let fog_density = 0.18 / self.world_extent.max(1.0);
         let sea_rel = (self.sea_level - self.min_z) as f32;
+        let tint = vf_material::RockStyle::preset(&project.materials.rock_preset).tint;
+        let rock_tint = [
+            palette.rock.r * tint[0],
+            palette.rock.g * tint[1],
+            palette.rock.b * tint[2],
+        ];
         let encode_srgb = if self.target_format.is_srgb() {
             0.0
         } else {
@@ -553,6 +566,26 @@ impl GpuRenderer {
                 encode_srgb,
             ],
             misc: [sea_rel, self.relief as f32, fog_density as f32, 0.0],
+            material: [
+                if project.materials.enabled { 1.0 } else { 0.0 },
+                project.materials.bump_strength,
+                project.materials.scree,
+                project.materials.snow_coverage,
+            ],
+            material2: [
+                project.materials.vegetation,
+                project.materials.wetness,
+                ((project.style.snow_line_m - self.min_z as f32) / self.relief as f32)
+                    .clamp(0.0, 1.0),
+                ((project.style.beach_height_m - self.min_z as f32) / self.relief as f32)
+                    .clamp(0.0, 1.0),
+            ],
+            material3: [
+                rock_tint[0],
+                rock_tint[1],
+                rock_tint[2],
+                project.materials.bump_scale_m.max(0.05),
+            ],
         }
     }
 
@@ -724,6 +757,13 @@ pub fn build_terrain_mesh(
         None
     };
     let terrain = shaped.as_ref().unwrap_or(base);
+    // The GPU preview now evaluates the same continuous detail sampler as the
+    // CPU renderer. Without this, every Detail-menu change was invisible in
+    // the live 3D view even though the final render used it.
+    let detail_sampler = project
+        .detail
+        .enabled
+        .then(|| DetailSampler::new(terrain, &project.detail, project.seed));
 
     let width = terrain.width();
     let height = terrain.height();
@@ -742,7 +782,12 @@ pub fn build_terrain_mesh(
     let extent = bounds.size().iter().copied().fold(1.0, f64::max);
 
     let longest = width.max(height) - 1;
-    let step = longest.div_ceil(MAX_MESH_SEGMENTS).max(1);
+    let segment_cap = if detail_sampler.is_some() {
+        MAX_DETAIL_MESH_SEGMENTS
+    } else {
+        MAX_MESH_SEGMENTS
+    };
+    let step = longest.div_ceil(segment_cap).max(1);
     let cols = (width - 1).div_ceil(step) + 1;
     let rows = (height - 1).div_ceil(step) + 1;
     let sample = |x: usize, y: usize| f64::from(terrain.heights()[y * width + x]);
@@ -752,23 +797,34 @@ pub fn build_terrain_mesh(
         let y = (row * step).min(height - 1);
         for col in 0..cols {
             let x = (col * step).min(width - 1);
-            let z = sample(x, y);
-            let xm = x.saturating_sub(step);
-            let xp = (x + step).min(width - 1);
-            let ym = y.saturating_sub(step);
-            let yp = (y + step).min(height - 1);
-            let dx = ((xp - xm) as f64 * spacing_x).max(f64::EPSILON);
-            let dy = ((yp - ym) as f64 * spacing_y).max(f64::EPSILON);
-            let dzdx = (sample(xp, y) - sample(xm, y)) / dx;
-            let dzdy = (sample(x, yp) - sample(x, ym)) / dy;
-            let normal = Vec3::new(-dzdx as f32, -dzdy as f32, 1.0).normalize();
+            let world_x = origin_x + x as f64 * spacing_x;
+            let world_y = origin_y + y as f64 * spacing_y;
+            let footprint = ((step as f64) * spacing_x.max(spacing_y) * 2.0).max(0.1) as f32;
+            let (z, normal) = if let Some(sampler) = &detail_sampler {
+                (
+                    f64::from(sampler.height(world_x, world_y, footprint)),
+                    sampler.normal(world_x, world_y, footprint),
+                )
+            } else {
+                let z = sample(x, y);
+                let xm = x.saturating_sub(step);
+                let xp = (x + step).min(width - 1);
+                let ym = y.saturating_sub(step);
+                let yp = (y + step).min(height - 1);
+                let dx = ((xp - xm) as f64 * spacing_x).max(f64::EPSILON);
+                let dy = ((yp - ym) as f64 * spacing_y).max(f64::EPSILON);
+                let dzdx = (sample(xp, y) - sample(xm, y)) / dx;
+                let dzdy = (sample(x, yp) - sample(x, ym)) / dy;
+                let normal = Vec3::new(-dzdx as f32, -dzdy as f32, 1.0).normalize();
+                (z, normal.to_array())
+            };
             vertices.push(TerrainVertex {
                 position: [
-                    (origin_x + x as f64 * spacing_x - center_x) as f32,
-                    (origin_y + y as f64 * spacing_y - center_y) as f32,
+                    (world_x - center_x) as f32,
+                    (world_y - center_y) as f32,
                     (z - min_z) as f32,
                 ],
-                normal: normal.to_array(),
+                normal,
                 kind: 0.0,
                 height: (z - min_z) as f32,
             });

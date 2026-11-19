@@ -39,6 +39,10 @@ pub struct MeshData {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<[u32; 3]>,
+    /// Optional quad/n-gon topology from the shape-adaptive builder. `indices`
+    /// always carries a triangulation for the renderer; this list is what the
+    /// Blender OBJ export writes when the quad option is selected.
+    pub polygons: Vec<Vec<u32>>,
     /// Grid dimensions used by the builder (rows/columns of vertices).
     pub nx: usize,
     pub ny: usize,
@@ -179,6 +183,7 @@ pub fn build(
         normals,
         uvs,
         indices,
+        polygons: Vec::new(),
         nx,
         ny,
         spacing_m: sample_spacing,
@@ -267,6 +272,7 @@ pub fn build_focus_patch(
         normals,
         uvs,
         indices,
+        polygons: Vec::new(),
         nx: n,
         ny: n,
         spacing_m: sample_spacing,
@@ -311,8 +317,8 @@ mod tests {
 
     #[test]
     fn vertex_budget_is_respected() {
-        let hf =
-            vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(257, 4)).unwrap();
+        let hf = vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(257, 4))
+            .unwrap();
         let settings = DetailSettings::preset("basalt").unwrap();
         let s = sampler(&hf, &settings);
         let mesh = build(&s, 4, 50_000, None);
@@ -335,8 +341,8 @@ mod tests {
 
     #[test]
     fn adaptive_mesh_is_valid_and_deterministic() {
-        let hf =
-            vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(257, 4)).unwrap();
+        let hf = vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(257, 4))
+            .unwrap();
         let settings = DetailSettings::preset("granite").unwrap();
         let s = sampler(&hf, &settings);
         let view = View {
@@ -349,8 +355,17 @@ mod tests {
         assert_eq!(a.positions, b.positions);
         assert_eq!(a.indices, b.indices);
         assert!(a.vertex_count() <= 200_000);
-        assert!(a.indices.iter().flatten().all(|i| (*i as usize) < a.vertex_count()));
-        assert!(a.uvs.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite()));
+        assert!(
+            a.indices
+                .iter()
+                .flatten()
+                .all(|i| (*i as usize) < a.vertex_count())
+        );
+        assert!(
+            a.uvs
+                .iter()
+                .all(|uv| uv[0].is_finite() && uv[1].is_finite())
+        );
     }
 
     #[test]
@@ -393,10 +408,8 @@ pub fn build_adaptive(
     let mut levels = vec![1usize; blocks_x * blocks_y];
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
-            let cx = ox
-                + (bx * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2).min(cells_x) as f64 * sx;
-            let cy = oy
-                + (by * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2).min(cells_y) as f64 * sy;
+            let cx = ox + (bx * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2).min(cells_x) as f64 * sx;
+            let cy = oy + (by * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2).min(cells_y) as f64 * sy;
             let distance = ((cx - view.camera[0]).powi(2)
                 + (cy - view.camera[1]).powi(2)
                 + view.camera[2].powi(2))
@@ -436,9 +449,8 @@ pub fn build_adaptive(
                 }
                 let cx = ox + (bx * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2) as f64 * sx;
                 let cy = oy + (by * ADAPTIVE_BLOCK + ADAPTIVE_BLOCK / 2) as f64 * sy;
-                let distance = ((cx - view.camera[0]).powi(2)
-                    + (cy - view.camera[1]).powi(2))
-                .sqrt() as f32;
+                let distance =
+                    ((cx - view.camera[0]).powi(2) + (cy - view.camera[1]).powi(2)).sqrt() as f32;
                 if best.is_none_or(|(_, d)| distance > d) {
                     best = Some((index, distance));
                 }
@@ -480,18 +492,13 @@ pub fn build_adaptive(
                         let gx = x0 as f64 + ix as f64 / subdiv as f64;
                         let x = ox + gx * sx;
                         let base_z = sampler.base_height(x, y);
-                        let footprint = view.footprint(
-                            x,
-                            y,
-                            base_z,
-                            (sx.max(sy) / subdiv as f64) as f32,
-                        );
+                        let footprint =
+                            view.footprint(x, y, base_z, (sx.max(sy) / subdiv as f64) as f32);
                         let z = sampler.height(x, y, footprint);
                         let normal = sampler.normal(x, y, footprint);
                         row_pos[ix] = [x as f32, y as f32, z];
                         row_nrm[ix] = normal;
-                        row_uv[ix] =
-                            [(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32];
+                        row_uv[ix] = [(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32];
                     }
                 });
             positions.extend_from_slice(&local_pos);
@@ -523,16 +530,56 @@ pub fn build_adaptive(
             let ch = ADAPTIVE_BLOCK.min(cells_y - y0);
             let ny = ch * subdiv + 1;
             if bx + 1 < blocks_x && levels[by * blocks_x + bx + 1] != subdiv {
-                add_skirt(&mut positions, &mut normals, &mut uvs, &mut indices, base, nx, ny, Side::Right, skirt_depth);
+                add_skirt(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    base,
+                    nx,
+                    ny,
+                    Side::Right,
+                    skirt_depth,
+                );
             }
             if bx > 0 && levels[by * blocks_x + bx - 1] != subdiv {
-                add_skirt(&mut positions, &mut normals, &mut uvs, &mut indices, base, nx, ny, Side::Left, skirt_depth);
+                add_skirt(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    base,
+                    nx,
+                    ny,
+                    Side::Left,
+                    skirt_depth,
+                );
             }
             if by + 1 < blocks_y && levels[(by + 1) * blocks_x + bx] != subdiv {
-                add_skirt(&mut positions, &mut normals, &mut uvs, &mut indices, base, nx, ny, Side::Bottom, skirt_depth);
+                add_skirt(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    base,
+                    nx,
+                    ny,
+                    Side::Bottom,
+                    skirt_depth,
+                );
             }
             if by > 0 && levels[(by - 1) * blocks_x + bx] != subdiv {
-                add_skirt(&mut positions, &mut normals, &mut uvs, &mut indices, base, nx, ny, Side::Top, skirt_depth);
+                add_skirt(
+                    &mut positions,
+                    &mut normals,
+                    &mut uvs,
+                    &mut indices,
+                    base,
+                    nx,
+                    ny,
+                    Side::Top,
+                    skirt_depth,
+                );
             }
         }
     }
@@ -542,11 +589,303 @@ pub fn build_adaptive(
         normals,
         uvs,
         indices,
+        polygons: Vec::new(),
         nx: 0,
         ny: 0,
         spacing_m: sx.max(sy) as f32,
         density: levels.iter().copied().max().unwrap_or(1) as f32,
     }
+}
+
+/// Block size for the shape-adaptive mesh, in heightfield cells.
+const SHAPE_BLOCK: usize = 32;
+
+/// Build a mesh whose density follows the local geometry, like adaptive layer
+/// height in a slicer: each block gets a subdivision level from its relief and
+/// the requested tolerance. Flat ground becomes a few large quads; ridges and
+/// cliffs receive the vertices.
+///
+/// Neighbouring blocks are balanced to a 2:1 level ratio and their common
+/// edges receive the midpoints of the finer side, so the surface is watertight
+/// without skirts. UVs are the global planar world projection, which keeps the
+/// texture continuous across every transition.
+pub fn build_shape_adaptive(
+    sampler: &DetailSampler<'_>,
+    max_subdivision: u32,
+    tolerance_m: f32,
+    max_vertices: usize,
+) -> MeshData {
+    let hf = sampler.height_field();
+    let (width, height) = (hf.width(), hf.height());
+    let cells_x = width - 1;
+    let cells_y = height - 1;
+    let (sx, sy) = hf.spacing();
+    let (ox, oy) = hf.origin();
+    let blocks_x = cells_x.div_ceil(SHAPE_BLOCK);
+    let blocks_y = cells_y.div_ceil(SHAPE_BLOCK);
+    let max_level = ((SHAPE_BLOCK as f32 * max_subdivision.max(1) as f32)
+        .log2()
+        .floor() as usize)
+        .clamp(0, 9);
+    let tolerance = tolerance_m.clamp(0.02, 100.0);
+    let mut levels = vec![0u8; blocks_x * blocks_y];
+
+    // Local relief chooses the initial level. The 9x9 probe catches a ridge
+    // that crosses a block even when its four corners are flat.
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let x0 = bx * SHAPE_BLOCK;
+            let y0 = by * SHAPE_BLOCK;
+            let x1 = (x0 + SHAPE_BLOCK).min(cells_x);
+            let y1 = (y0 + SHAPE_BLOCK).min(cells_y);
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            for iy in 0..=8 {
+                let gy = y0 as f64 + (y1 - y0) as f64 * iy as f64 / 8.0;
+                let y = oy + gy * sy;
+                for ix in 0..=8 {
+                    let gx = x0 as f64 + (x1 - x0) as f64 * ix as f64 / 8.0;
+                    let x = ox + gx * sx;
+                    let z = sampler.height(x, y, (sx.max(sy) * 4.0) as f32);
+                    min = min.min(z);
+                    max = max.max(z);
+                }
+            }
+            let relief = (max - min).max(0.0);
+            let segments = (relief / tolerance).ceil().max(1.0);
+            let level = (segments.log2().ceil() as usize).clamp(0, max_level);
+            levels[by * blocks_x + bx] = level as u8;
+        }
+    }
+
+    // Vertex budget: coarsen the currently densest blocks.
+    let estimate = |levels: &[u8]| -> usize {
+        levels
+            .iter()
+            .map(|&level| {
+                let n = (1usize << level) + 1;
+                n * n
+            })
+            .sum()
+    };
+    while estimate(&levels) > max_vertices.max(1024) {
+        let mut best: Option<(usize, u8)> = None;
+        for (index, &level) in levels.iter().enumerate() {
+            if level == 0 {
+                continue;
+            }
+            if best.is_none_or(|(_, current)| level > current) {
+                best = Some((index, level));
+            }
+        }
+        let Some((index, _)) = best else { break };
+        levels[index] -= 1;
+    }
+
+    // 2:1 balance makes every block boundary need at most one midpoint per
+    // coarse edge segment.
+    loop {
+        let mut changed = false;
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                let index = by * blocks_x + bx;
+                let level = levels[index];
+                for (nx, ny) in [
+                    (bx.wrapping_sub(1), by),
+                    (bx + 1, by),
+                    (bx, by.wrapping_sub(1)),
+                    (bx, by + 1),
+                ] {
+                    if nx >= blocks_x || ny >= blocks_y {
+                        continue;
+                    }
+                    let neighbour = levels[ny * blocks_x + nx];
+                    if neighbour > level + 1 {
+                        levels[index] = neighbour - 1;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+    let mut polygons = Vec::new();
+
+    let mut block_origin = vec![0u32; blocks_x * blocks_y];
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let index = by * blocks_x + bx;
+            block_origin[index] = positions.len() as u32;
+            let level = levels[index] as usize;
+            let segments = 1usize << level;
+            let n = segments + 1;
+            let x0 = bx * SHAPE_BLOCK;
+            let y0 = by * SHAPE_BLOCK;
+            let x1 = (x0 + SHAPE_BLOCK).min(cells_x);
+            let y1 = (y0 + SHAPE_BLOCK).min(cells_y);
+            let mut grid = vec![0u32; n * n];
+
+            for iy in 0..n {
+                let gy = y0 as f64 + (y1 - y0) as f64 * iy as f64 / segments as f64;
+                let y = oy + gy * sy;
+                for ix in 0..n {
+                    let gx = x0 as f64 + (x1 - x0) as f64 * ix as f64 / segments as f64;
+                    let x = ox + gx * sx;
+                    let footprint = ((x1 - x0) as f64 * sx / segments as f64).max(0.05) as f32;
+                    let z = sampler.height(x, y, footprint);
+                    let normal = sampler.normal(x, y, footprint);
+                    grid[iy * n + ix] = positions.len() as u32;
+                    positions.push([x as f32, y as f32, z]);
+                    normals.push(normal);
+                    uvs.push([(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32]);
+                }
+            }
+
+            // Midpoints on edges shared with a finer neighbour. Only the
+            // edges of this block are decorated; the finer side already has
+            // the matching vertices.
+            let finer = |nx: usize, ny: usize| -> bool {
+                nx < blocks_x && ny < blocks_y && levels[ny * blocks_x + nx] as usize > level
+            };
+            let mut left_mid = Vec::new();
+            let mut right_mid = Vec::new();
+            let mut bottom_mid = Vec::new();
+            let mut top_mid = Vec::new();
+            if bx > 0 && finer(bx - 1, by) {
+                for j in 0..segments {
+                    let gy = y0 as f64 + (y1 - y0) as f64 * (j as f64 + 0.5) / segments as f64;
+                    left_mid.push(push_sample(
+                        sampler,
+                        (x0 as f64, gy),
+                        (ox, oy, sx, sy, cells_x, cells_y),
+                        &mut positions,
+                        &mut normals,
+                        &mut uvs,
+                        (x1 - x0) as f64 * sx,
+                        segments,
+                    ));
+                }
+            }
+            if bx + 1 < blocks_x && finer(bx + 1, by) {
+                for j in 0..segments {
+                    let gy = y0 as f64 + (y1 - y0) as f64 * (j as f64 + 0.5) / segments as f64;
+                    right_mid.push(push_sample(
+                        sampler,
+                        (x1 as f64, gy),
+                        (ox, oy, sx, sy, cells_x, cells_y),
+                        &mut positions,
+                        &mut normals,
+                        &mut uvs,
+                        (x1 - x0) as f64 * sx,
+                        segments,
+                    ));
+                }
+            }
+            if by > 0 && finer(bx, by - 1) {
+                for i in 0..segments {
+                    let gx = x0 as f64 + (x1 - x0) as f64 * (i as f64 + 0.5) / segments as f64;
+                    bottom_mid.push(push_sample(
+                        sampler,
+                        (gx, y0 as f64),
+                        (ox, oy, sx, sy, cells_x, cells_y),
+                        &mut positions,
+                        &mut normals,
+                        &mut uvs,
+                        (y1 - y0) as f64 * sy,
+                        segments,
+                    ));
+                }
+            }
+            if by + 1 < blocks_y && finer(bx, by + 1) {
+                for i in 0..segments {
+                    let gx = x0 as f64 + (x1 - x0) as f64 * (i as f64 + 0.5) / segments as f64;
+                    top_mid.push(push_sample(
+                        sampler,
+                        (gx, y1 as f64),
+                        (ox, oy, sx, sy, cells_x, cells_y),
+                        &mut positions,
+                        &mut normals,
+                        &mut uvs,
+                        (y1 - y0) as f64 * sy,
+                        segments,
+                    ));
+                }
+            }
+
+            for iy in 0..segments {
+                for ix in 0..segments {
+                    let i00 = grid[iy * n + ix];
+                    let i10 = grid[iy * n + ix + 1];
+                    let i11 = grid[(iy + 1) * n + ix + 1];
+                    let i01 = grid[(iy + 1) * n + ix];
+                    let mut polygon = Vec::with_capacity(6);
+                    polygon.push(i00);
+                    if iy == 0 && !bottom_mid.is_empty() {
+                        polygon.push(bottom_mid[ix]);
+                    }
+                    polygon.push(i10);
+                    if ix == segments - 1 && !right_mid.is_empty() {
+                        polygon.push(right_mid[iy]);
+                    }
+                    polygon.push(i11);
+                    if iy == segments - 1 && !top_mid.is_empty() {
+                        polygon.push(top_mid[ix]);
+                    }
+                    polygon.push(i01);
+                    if ix == 0 && !left_mid.is_empty() {
+                        polygon.push(left_mid[iy]);
+                    }
+                    for i in 1..polygon.len() - 1 {
+                        indices.push([polygon[0], polygon[i], polygon[i + 1]]);
+                    }
+                    polygons.push(polygon);
+                }
+            }
+        }
+    }
+
+    let _ = block_origin;
+    MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+        polygons,
+        nx: 0,
+        ny: 0,
+        spacing_m: sx.max(sy) as f32,
+        density: levels.iter().copied().max().unwrap_or(0) as f32,
+    }
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn push_sample(
+    sampler: &DetailSampler<'_>,
+    (gx, gy): (f64, f64),
+    (ox, oy, sx, sy, cells_x, cells_y): (f64, f64, f64, f64, usize, usize),
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    span_m: f64,
+    segments: usize,
+) -> u32 {
+    let x = ox + gx * sx;
+    let y = oy + gy * sy;
+    let footprint = (span_m / segments as f64).max(0.05) as f32;
+    let z = sampler.height(x, y, footprint);
+    let normal = sampler.normal(x, y, footprint);
+    let index = positions.len() as u32;
+    positions.push([x as f32, y as f32, z]);
+    normals.push(normal);
+    uvs.push([(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32]);
+    index
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -607,3 +946,109 @@ fn add_skirt(
     }
 }
 
+#[cfg(test)]
+mod shape_adaptive_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use vf_core::{DetailSettings, HeightField, Seed};
+
+    fn ridge_field() -> HeightField {
+        let width = 129;
+        let mut heights = vec![0.0f32; width * width];
+        for y in 0..width {
+            for x in 0..width {
+                let ramp = if x > 64 { (x - 64) as f32 * 4.0 } else { 0.0 };
+                heights[y * width + x] = ramp + (y as f32 * 0.05).sin() * 2.0;
+            }
+        }
+        HeightField::new(width, width, 10.0, 10.0, heights).unwrap()
+    }
+
+    #[test]
+    fn adaptive_mesh_spends_vertices_on_relief_and_is_watertight() {
+        let hf = ridge_field();
+        let settings = DetailSettings::default();
+        let sampler = DetailSampler::new(&hf, &settings, Seed::new(3));
+        let mesh = build_shape_adaptive(&sampler, 1, 4.0, 2_000_000);
+        assert!(!mesh.polygons.is_empty());
+        assert_eq!(
+            mesh.indices.len(),
+            mesh.polygons.iter().map(|p| p.len() - 2).sum()
+        );
+        // Every vertex is inside the UV unit square.
+        assert!(
+            mesh.uvs
+                .iter()
+                .all(|uv| uv[0] >= 0.0 && uv[0] <= 1.0 && uv[1] >= 0.0 && uv[1] <= 1.0)
+        );
+        // Geometric watertightness: merge coincident positions and check that
+        // every internal edge is used by exactly two faces, in opposite
+        // directions. T-junctions would leave a dangling edge.
+        let key = |p: [f32; 3]| -> Key {
+            (
+                (p[0] * 1000.0).round() as i64,
+                (p[1] * 1000.0).round() as i64,
+                (p[2] * 1000.0).round() as i64,
+            )
+        };
+        type Key = (i64, i64, i64);
+        let mut edges: HashMap<(Key, Key), i32> = HashMap::new();
+        for polygon in &mesh.polygons {
+            for i in 0..polygon.len() {
+                let a = key(mesh.positions[polygon[i] as usize]);
+                let b = key(mesh.positions[polygon[(i + 1) % polygon.len()] as usize]);
+                *edges.entry((a, b)).or_default() += 1;
+            }
+        }
+        let min_x = mesh
+            .positions
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = mesh
+            .positions
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = mesh
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = mesh
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let on_border = |p: (i64, i64, i64)| {
+            let x = p.0 as f32 / 1000.0;
+            let y = p.1 as f32 / 1000.0;
+            (x - min_x).abs() < 1e-3
+                || (x - max_x).abs() < 1e-3
+                || (y - min_y).abs() < 1e-3
+                || (y - max_y).abs() < 1e-3
+        };
+        for ((a, b), count) in &edges {
+            if on_border(*a) && on_border(*b) {
+                // The outer rim of the terrain is a legitimate open boundary.
+                continue;
+            }
+            let reverse = edges.get(&(*b, *a)).copied().unwrap_or(0);
+            assert_eq!(
+                *count, 1,
+                "directed edge used {count} times ({a:?} -> {b:?})"
+            );
+            assert_eq!(reverse, 1, "edge {a:?} <-> {b:?} is not shared");
+        }
+    }
+
+    #[test]
+    fn tighter_tolerance_creates_more_vertices() {
+        let hf = ridge_field();
+        let settings = DetailSettings::default();
+        let sampler = DetailSampler::new(&hf, &settings, Seed::new(3));
+        let coarse = build_shape_adaptive(&sampler, 1, 20.0, 2_000_000);
+        let fine = build_shape_adaptive(&sampler, 1, 1.0, 2_000_000);
+        assert!(fine.vertex_count() > coarse.vertex_count());
+    }
+}

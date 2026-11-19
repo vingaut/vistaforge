@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use vf_core::{HeightField, Palette, Project};
 use vf_detail::DetailSampler;
+use vf_material::{RockStyle, RockTexture};
 use vf_mesh::MeshData;
+use vf_procgen::Noise;
 
 pub use animation::{
     ANIMATION_FORMAT, AnimationReport, CameraAnimationFile, ImportedAnimation, TerrainReference,
@@ -59,6 +61,7 @@ pub struct ExportReport {
     pub albedo: PathBuf,
     pub normal: PathBuf,
     pub masks: PathBuf,
+    pub obj: PathBuf,
     pub vertices: usize,
     pub triangles: usize,
     pub materials: usize,
@@ -109,28 +112,44 @@ pub fn export_project(
     // are part of the scene, not a renderer-only trick.
     let export_hf = prepare_surface(project, hf)?;
     let sampler = DetailSampler::new(&export_hf, &project.detail, project.seed);
-    let mesh = vf_mesh::build(
-        &sampler,
-        options.subdivision.clamp(1, 8),
-        options.max_vertices.max(1024),
-        None,
-    );
+    let mut mesh = if project.detail.adaptive {
+        vf_mesh::build_shape_adaptive(
+            &sampler,
+            options.subdivision.clamp(1, 8),
+            project.detail.adaptive_tolerance_m,
+            options.max_vertices.max(1024),
+        )
+    } else {
+        vf_mesh::build(
+            &sampler,
+            options.subdivision.clamp(1, 8),
+            options.max_vertices.max(1024),
+            None,
+        )
+    };
+    if project.materials.enabled
+        && (project.materials.displacement_m > 0.0
+            || project.materials.texture_displacement_m > 0.0)
+    {
+        let texture = vf_material::RockTexture::load(&project.materials.texture_path);
+        vf_material::displace(
+            &mut mesh,
+            &project.materials,
+            project.seed,
+            texture.as_ref(),
+        );
+    }
     let built = build_scene(project, &export_hf, &mesh, options)?;
     let scene = &built.scene;
     let glb = scene.to_glb().map_err(ExportError::Gltf)?;
     let glb_path = out_dir.join("scene.glb");
     fs::write(&glb_path, glb)?;
 
+    let obj_path = out_dir.join("scene.obj");
+    write_obj(&obj_path, &mesh, project.detail.quad_mesh)?;
     let heightmap_path = out_dir.join("heightmap_16.png");
     write_heightmap(&export_hf, &heightmap_path)?;
-    let textures = write_texture_maps(
-        project,
-        &export_hf,
-        &mesh,
-        &built.albedo,
-        &built.masks,
-        out_dir,
-    )?;
+    let textures = write_texture_maps(project, &export_hf, &sampler, out_dir)?;
     let sidecar_path = out_dir.join("scene.json");
     let sidecar = build_sidecar(
         project,
@@ -145,7 +164,8 @@ pub fn export_project(
     let readme = format!(
         "VistaForge Blender export\n\
          =========================\n\n\
-         scene.glb   mesh, vertex colours, material slots, camera, sun\n\
+         scene.glb   mesh, vertex colours, material slots, camera, sun\n\n\
+         scene.obj   same surface as OBJ (quads if enabled in the Detail menu)\n\
          scene.json  palette, sun, camera, units, height map, render settings\n\
          albedo.png  baked albedo (sRGB, UV0)\n\
          normal.png  baked height-derived normal map (UV0)\n\
@@ -167,6 +187,7 @@ pub fn export_project(
         albedo: textures.albedo,
         normal: textures.normal,
         masks: textures.masks,
+        obj: obj_path,
         vertices: scene.vertex_count(),
         triangles: scene.triangle_count(),
         materials: scene.materials.len(),
@@ -195,8 +216,6 @@ fn prepare_surface(project: &Project, hf: &HeightField) -> Result<HeightField> {
 
 struct BuiltScene {
     scene: GltfScene,
-    albedo: Vec<[f32; 3]>,
-    masks: Vec<Masks>,
 }
 
 fn build_scene(
@@ -216,8 +235,11 @@ fn build_scene(
     let mut normals = mesh.normals.clone();
     let mut uv0 = mesh.uvs.clone();
     let mut colors = Vec::with_capacity(mesh.vertex_count());
-    let mut albedo = Vec::with_capacity(mesh.vertex_count());
     let mut vertex_masks = Vec::with_capacity(mesh.vertex_count());
+    let material_noise = Noise::new(project.seed.derive("material-export"));
+    let rock_style = RockStyle::preset(&project.materials.rock_preset);
+    let custom_texture = RockTexture::load(&project.materials.texture_path);
+    let seed_offset = (project.seed.0 % 4096) as f32 * 0.37;
     for (index, position) in mesh.positions.iter().enumerate() {
         let normal = mesh.normals[index];
         let masks = masks_at(
@@ -229,7 +251,16 @@ fn build_scene(
             stats.min,
             relief,
         );
-        let color = blend_albedo(&project.palette, masks, normal);
+        let color = material_albedo(
+            project,
+            masks,
+            normal,
+            *position,
+            &rock_style,
+            &material_noise,
+            custom_texture.as_ref(),
+            seed_offset,
+        );
         // glTF multiplies COLOR_0 by the material baseColorFactor. Export the
         // per-vertex colour as a *relative* multiplier around 1.0 so the
         // product recovers the rasteriser albedo instead of darkening it.
@@ -241,7 +272,6 @@ fn build_scene(
             (color[2] / base[2].max(0.02)).clamp(0.35, 1.8),
         ];
         colors.push([multiplier[0], multiplier[1], multiplier[2], 1.0]);
-        albedo.push(color);
         vertex_masks.push(masks);
     }
 
@@ -286,7 +316,6 @@ fn build_scene(
             });
             uv1.push([0.0, 0.0]);
             colors.push([1.0, 1.0, 1.0, 1.0]);
-            albedo.push(project.palette.water_deep.to_array());
         }
         primitives[MATERIAL_WATER].extend_from_slice(&[
             base,
@@ -342,8 +371,6 @@ fn build_scene(
             sun,
             generator: format!("VistaForge {}", vf_core::SCHEMA_VERSION),
         },
-        albedo,
-        masks: vertex_masks,
     })
 }
 
@@ -398,6 +425,47 @@ fn masks_at(
         scree,
         strata,
     }
+}
+
+/// Final albedo of one point, including the geological masks and the
+/// procedural/custom rock material. Shared by the GLB vertex colours and the
+/// UV0 texture bake so the two cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+fn material_albedo(
+    project: &Project,
+    masks: Masks,
+    normal: [f32; 3],
+    position: [f32; 3],
+    style: &RockStyle,
+    noise: &Noise,
+    texture: Option<&RockTexture>,
+    seed_offset: f32,
+) -> [f32; 3] {
+    let mut color = blend_albedo(&project.palette, masks, normal);
+    if project.materials.enabled {
+        let slope = (1.0 - normal[2]).clamp(0.0, 1.0);
+        let rock_weight =
+            ((1.0 - masks.snow) * (1.0 - masks.vegetation * 0.8) * (1.0 - masks.scree * 0.5))
+                .clamp(0.0, 1.0);
+        let base = vf_core::Rgb::new(color[0], color[1], color[2]);
+        let styled = style.shade(
+            base,
+            glam::Vec3::from_array(position),
+            slope,
+            noise,
+            seed_offset,
+        );
+        color = base.lerp(styled, rock_weight * 0.85).to_array();
+        if let Some(texture) = texture {
+            let tile = project.materials.texture_scale_m.max(0.1);
+            let sampled = texture.sample(position[0] / tile, position[1] / tile);
+            let mix = project.materials.texture_mix.clamp(0.0, 1.0) * rock_weight;
+            for channel in 0..3 {
+                color[channel] += (sampled[channel] - color[channel]) * mix;
+            }
+        }
+    }
+    color
 }
 
 fn blend_albedo(palette: &Palette, masks: Masks, normal: [f32; 3]) -> [f32; 3] {
@@ -568,68 +636,128 @@ struct TexturePaths {
     masks: PathBuf,
 }
 
+/// Wavefront OBJ writer. glTF only supports triangles; OBJ keeps the
+/// shape-adaptive n-gons/quads so the mesh stays easy to select, unwrap and
+/// paint in Blender. UVs are the global planar projection.
+fn write_obj(path: &Path, mesh: &MeshData, quads: bool) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(mesh.vertex_count() * 64);
+    text.push_str("# VistaForge — planar UV0, Z-up\n");
+    for p in &mesh.positions {
+        let _ = writeln!(text, "v {:.4} {:.4} {:.4}", p[0], p[1], p[2]);
+    }
+    for uv in &mesh.uvs {
+        let _ = writeln!(text, "vt {:.6} {:.6}", uv[0], uv[1]);
+    }
+    for n in &mesh.normals {
+        let _ = writeln!(text, "vn {:.5} {:.5} {:.5}", n[0], n[1], n[2]);
+    }
+    if quads && !mesh.polygons.is_empty() {
+        for polygon in &mesh.polygons {
+            text.push('f');
+            for index in polygon {
+                let index = *index as usize + 1;
+                let _ = write!(text, " {index}/{index}/{index}");
+            }
+            text.push('\n');
+        }
+    } else {
+        for [a, b, c] in &mesh.indices {
+            let _ = writeln!(
+                text,
+                "f {}/{}/{} {}/{}/{} {}/{}/{}",
+                a + 1,
+                a + 1,
+                a + 1,
+                b + 1,
+                b + 1,
+                b + 1,
+                c + 1,
+                c + 1,
+                c + 1
+            );
+        }
+    }
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
 fn write_texture_maps(
     project: &Project,
     hf: &HeightField,
-    mesh: &MeshData,
-    albedo: &[[f32; 3]],
-    masks: &[Masks],
+    sampler: &DetailSampler<'_>,
     out_dir: &Path,
 ) -> Result<TexturePaths> {
-    let _ = project;
-    let w = mesh.nx.max(2);
-    let h = mesh.ny.max(2);
+    // Bake in UV0 (planar world projection), not from the mesh grid: the
+    // shape-adaptive mesh has no nx/ny and its vertices are not on a regular
+    // lattice. Sampling the surface through the same albedo helper keeps the
+    // baked texture valid for triangles, quads and any future topology.
+    let stats = hf.stats();
+    let relief = (stats.max - stats.min).max(1e-6);
+    let (ox, oy) = hf.origin();
+    let (sx, sy) = hf.spacing();
+    let ex = (hf.width() - 1) as f64 * sx;
+    let ey = (hf.height() - 1) as f64 * sy;
+    let w = hf.width().max(2);
+    let h = hf.height().max(2);
     let factor = ((w.max(h) as f32) / 4096.0).ceil().max(1.0) as usize;
     let tw = (w / factor).max(2);
     let th = (h / factor).max(2);
-    let (sx, sy) = hf.spacing();
+    let material_noise = Noise::new(project.seed.derive("material-bake"));
+    let rock_style = RockStyle::preset(&project.materials.rock_preset);
+    let custom_texture = RockTexture::load(&project.materials.texture_path);
+    let seed_offset = (project.seed.0 % 4096) as f32 * 0.37;
     let mut albedo_img = image::RgbImage::new(tw as u32, th as u32);
     let mut normal_img = image::RgbImage::new(tw as u32, th as u32);
     let mut mask_img = image::RgbImage::new(tw as u32, th as u32);
-    for oy in 0..th {
-        // Flip: Blender samples UV (0,0) at the bottom-left of the image.
-        let iy = (th - 1 - oy) * (h - 1) / (th.max(2) - 1).max(1);
-        for ox in 0..tw {
-            let ix = ox * (w - 1) / (tw.max(2) - 1).max(1);
-            let index = iy.min(mesh.ny - 1) * mesh.nx + ix.min(mesh.nx - 1);
-            let color = albedo.get(index).copied().unwrap_or([0.5, 0.5, 0.5]);
+    for oy_px in 0..th {
+        // Image row 0 = north, UV v = 0 = south. Blender samples UV (0,0) at
+        // the bottom-left, which is exactly the heightfield row 0.
+        let v = 1.0 - (oy_px as f64 + 0.5) / th as f64;
+        let y = oy + v * ey;
+        let gy = v * (hf.height() - 1) as f64;
+        for ox_px in 0..tw {
+            let u = (ox_px as f64 + 0.5) / tw as f64;
+            let x = ox + u * ex;
+            let gx = u * (hf.width() - 1) as f64;
+            let footprint = (sx.max(sy)) as f32;
+            let z = sampler.height(x, y, footprint);
+            let normal = sampler.normal(x, y, footprint);
+            let masks = masks_at(project, x, y, z, normal, stats.min, relief);
+            let color = material_albedo(
+                project,
+                masks,
+                normal,
+                [x as f32, y as f32, z],
+                &rock_style,
+                &material_noise,
+                custom_texture.as_ref(),
+                seed_offset,
+            );
             let rgb = vf_core::Rgb::new(color[0], color[1], color[2]).to_srgb_u8();
-            albedo_img.put_pixel(ox as u32, oy as u32, image::Rgb(rgb));
-
-            // Height-derived normal in the top-down UV frame. Cliff UVs
-            // stretch, so this is a starting map, not a tangent-perfect bake.
-            let x0 = ix.saturating_sub(1).min(mesh.nx - 1);
-            let x1 = (ix + 1).min(mesh.nx - 1);
-            let y0 = iy.saturating_sub(1).min(mesh.ny - 1);
-            let y1 = (iy + 1).min(mesh.ny - 1);
-            let zx = mesh.positions[iy * mesh.nx + x1][2] - mesh.positions[iy * mesh.nx + x0][2];
-            let zy = mesh.positions[y1 * mesh.nx + ix][2] - mesh.positions[y0 * mesh.nx + ix][2];
-            let dx = zx / ((x1 - x0).max(1) as f32 * sx as f32);
-            let dy = zy / ((y1 - y0).max(1) as f32 * sy as f32);
-            let len = (dx * dx + dy * dy + 1.0).sqrt();
+            albedo_img.put_pixel(ox_px as u32, oy_px as u32, image::Rgb(rgb));
+            let _ = (gx, gy);
             let n = [
-                (-dx / len) * 0.5 + 0.5,
-                (-dy / len) * 0.5 + 0.5,
-                (1.0 / len) * 0.5 + 0.5,
+                (normal[0] * 0.5 + 0.5).clamp(0.0, 1.0),
+                (normal[1] * 0.5 + 0.5).clamp(0.0, 1.0),
+                (normal[2] * 0.5 + 0.5).clamp(0.0, 1.0),
             ];
             normal_img.put_pixel(
-                ox as u32,
-                oy as u32,
+                ox_px as u32,
+                oy_px as u32,
                 image::Rgb([
                     (n[0] * 255.0 + 0.5) as u8,
                     (n[1] * 255.0 + 0.5) as u8,
                     (n[2] * 255.0 + 0.5) as u8,
                 ]),
             );
-
-            let mask = masks.get(index).copied().unwrap_or_default();
             mask_img.put_pixel(
-                ox as u32,
-                oy as u32,
+                ox_px as u32,
+                oy_px as u32,
                 image::Rgb([
-                    (mask.snow.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
-                    (mask.vegetation.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
-                    (mask.scree.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                    (masks.snow.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                    (masks.vegetation.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                    (masks.scree.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
                 ]),
             );
         }
@@ -651,14 +779,18 @@ fn write_heightmap(hf: &HeightField, path: &Path) -> Result<()> {
     let stats = hf.stats();
     let range = (stats.max - stats.min).max(1e-6);
     let (w, h) = (hf.width() as u32, hf.height() as u32);
+    // The heightfield stores row 0 = south, while every image viewer, GIS
+    // heightmap and the Blender UV0 convention put north on the first image
+    // row. Writing the raw rows made the bridge texture vertically mirrored:
+    // plugged as a displacement, it carved the hills and raised the valleys.
+    // White is high; black is low.
     let mut image = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(w, h);
     for y in 0..hf.height() {
+        let dst_y = hf.height() - 1 - y;
         for x in 0..hf.width() {
             let value = ((hf.get(x, y) - stats.min) / range).clamp(0.0, 1.0);
             let pixel = (value * 65535.0 + 0.5) as u16;
-            // Row 0 is south in the heightfield; keep that convention and
-            // document it in the sidecar.
-            image.put_pixel(x as u32, y as u32, image::Luma([pixel]));
+            image.put_pixel(x as u32, dst_y as u32, image::Luma([pixel]));
         }
     }
     image.save(path)?;
@@ -723,7 +855,12 @@ fn build_sidecar(
             "max_m": stats.max,
             "relief_m": stats.relief(),
             "heightmap": heightmap.file_name().and_then(|n| n.to_str()).unwrap_or("heightmap_16.png"),
-            "heightmap_row_zero": "south",
+            "heightmap_row_zero": "north",
+            "mesh_adaptive": project.detail.adaptive,
+            "mesh_quads": project.detail.quad_mesh,
+            "mesh_tolerance_m": project.detail.adaptive_tolerance_m,
+            "obj_file": "scene.obj",
+            "heightmap_white": "high",
             "heightmap_range": [stats.min, stats.max],
         },
         "mesh": {
@@ -826,6 +963,93 @@ mod tests {
         let sidecar: Value = serde_json::from_slice(&fs::read(&report.sidecar).unwrap()).unwrap();
         assert_eq!(sidecar["schema"], "vistaforge.blender/1");
         assert!(sidecar["terrain"]["relief_m"].as_f64().unwrap() > 0.0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baked_normal_map_points_away_from_a_north_rising_slope() {
+        let width = 17usize;
+        let heights: Vec<f32> = (0..width * width)
+            .map(|index| (index / width) as f32 * 20.0)
+            .collect();
+        let hf = HeightField::new(width, width, 10.0, 10.0, heights).unwrap();
+        let mut project = Project::new("normals", Seed::new(2), width as u32);
+        project.detail.enabled = false;
+        project.sync_terrain(&hf);
+        let sampler = DetailSampler::new(&hf, &project.detail, project.seed);
+        let dir = std::env::temp_dir().join(format!(
+            "vf-export-normal-{}-{}",
+            std::process::id(),
+            std::line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        write_texture_maps(&project, &hf, &sampler, &dir).unwrap();
+        let image = image::open(dir.join("normal.png")).unwrap().to_rgb8();
+        let green = image.get_pixel(width as u32 / 2, width as u32 / 2)[1];
+        assert!(
+            green < 118,
+            "a north-rising slope must tilt the normal south (green < 0.5), got {green}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adaptive_quad_export_writes_obj_polygons() {
+        let (mut project, hf) = test_project();
+        project.detail.adaptive = true;
+        project.detail.adaptive_tolerance_m = 0.4;
+        project.detail.quad_mesh = true;
+        let dir = std::env::temp_dir().join(format!(
+            "vf-export-quad-{}-{}",
+            std::process::id(),
+            std::line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let report = export_project(&project, &hf, &dir, &ExportOptions::default()).unwrap();
+        let obj = fs::read_to_string(&report.obj).unwrap();
+        assert!(obj.contains("\nv "));
+        assert!(obj.contains("\nvt "));
+        assert!(obj.contains("\nvn "));
+        let max_face = obj
+            .lines()
+            .filter(|line| line.starts_with("f "))
+            .map(|line| line.split_whitespace().count() - 1)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_face >= 4,
+            "quad OBJ should contain at least one quad, max face = {max_face}"
+        );
+        assert!(report.vertices > 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heightmap_png_is_north_up_and_white_high() {
+        // A ramp increasing north (heightfield row 0 is south).
+        let width = 9usize;
+        let height = 9usize;
+        let heights: Vec<f32> = (0..width * height)
+            .map(|index| (index / width) as f32 * 100.0)
+            .collect();
+        let hf = HeightField::new(width, height, 10.0, 10.0, heights).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "vf-export-heightmap-{}-{}",
+            std::process::id(),
+            std::line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("heightmap_16.png");
+        write_heightmap(&hf, &path).unwrap();
+        let image = image::open(&path).unwrap().to_luma16();
+        let top = image.get_pixel(width as u32 / 2, 0)[0];
+        let bottom = image.get_pixel(width as u32 / 2, height as u32 - 1)[0];
+        assert!(
+            top > bottom,
+            "north (top image row) must be brighter: top={top} bottom={bottom}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

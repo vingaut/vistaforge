@@ -11,7 +11,7 @@
 L'espace Animation est découpé en quatre onglets numérotés. Le viewport et sa
 barre de lecture restent visibles dans tous les onglets.
 
-1. **Tracé** — dessiner et éditer le chemin de l'œil et la cible.
+1. **Tracé** — dessiner et éditer le chemin de la caméra et la cible.
 2. **Réglages** — durée, cadence, optique, contraintes.
 3. **Profil** — choisir le corps et comparer les dynamiques.
 4. **Lecture** — jouer l'animation, rendre une image ou exporter la séquence.
@@ -25,7 +25,7 @@ marqueurs s'animent sans quitter l'orbite ; en caméra, le cadre rendu défile.
 
 ## 1. Tracé
 
-Le tracé cyan est la trajectoire de l'œil. Les clés `E0`, `E1`… portent chacune
+Le tracé cyan est la trajectoire de la caméra. Les clés `E0`, `E1`… portent chacune
 un temps et une position 3D. La cible orange matérialise le point regardé ; elle
 n'est dessinée qu'en **vue design**, jamais dans le rendu.
 
@@ -68,10 +68,10 @@ n'est dessinée qu'en **vue design**, jamais dans le rendu.
 Le dock **Timeline** (bouton dans la barre de transport) reste visible dans les
 quatre onglets.
 
-- **Pistes** : deux lignes, Œil et Cible, avec un losange par clé. Cliquer-glisser
+- **Pistes** : deux lignes, Caméra et Cible, avec un losange par clé. Cliquer-glisser
   un losange change son **temps** ; double-cliquer sur une piste insère une clé à
   cet instant ; clic droit supprime la clé.
-- **Graphe** : choisissez un canal (`Œil X/Y/Z`, `Cible X/Y/Z`, `Vitesse`,
+- **Graphe** : choisissez un canal (`Caméra X/Y/Z`, `Cible X/Y/Z`, `Vitesse`,
   `Roulis`). Les positions se lisent sur la courbe Bézier réelle ; vitesse et
   roulis viennent de la simulation du profil actif. Sur un canal de position,
   glisser un point change à la fois son temps et sa valeur.
@@ -85,36 +85,47 @@ changez de profil, la courbe de roulis se met à jour sans retoucher le tracé.
 
 ### Point de vue
 
-La cible peut être :
+La cible est optionnelle :
 
 | Mode | Comportement |
 |---|---|
+| **Aucune cible** | Plus de point cible, plus de clés cible : la caméra regarde devant elle le long de sa trajectoire. Le keyframing ne porte que sur la caméra. |
 | **Fixe** | Un point immobile, utile pour un plan large ou une orbite. |
-| **Tracé animé** | Une seconde courbe avec ses clés `T0`, `T1`… |
-| **Avance** | La caméra regarde devant elle ; `lead` et lissage réglables. **Mode conservé et recommandé pour un survol.** |
-| **Décalage** | Liaison rigide : la cible reste à un offset monde constant de l'œil (X/Y/Z). |
-| **Retard** | La cible vise l'œil tel qu'il était il y a N secondes (regard arrière, révélation). |
-| **Manuel** | La caméra suit son axe, sans cible matérialisée. |
+| **Tracé animé** | Une seconde courbe indépendante avec ses clés `T0`, `T1`… C'est le keyframing différencié caméra/cible. |
+| **Avance sur courbe** | La cible est **exactement sur la courbe de la caméra** échantillonnée à `t + avance`. Une avance négative regarde en arrière sur la même courbe. Rien n'est extrapolé hors du tracé. |
+| **Décalage** | Liaison rigide : la cible reste à un offset monde constant de la caméra (X/Y/Z). |
+| **Retard sur courbe** | La cible vise la caméra telle qu'elle était il y a N secondes, sur la même courbe. |
+| **Manuel** | La caméra suit son axe, sans point cible matérialisé. |
 
 Le viewport de conception dessine le **viseur** du point de vue (tronc de
-frustum depuis l'œil vers la cible) et la ligne œil → cible. Le rendu utilise
+frustum depuis la caméra vers la cible) et la ligne caméra → cible. Le rendu utilise
 exactement la caméra échantillonnée à `t`, sans ces overlays. L'overlay utilise
 désormais le même calcul de cible que la simulation (offset inclus).
 
 Pour un tracé cible, deux boutons créent un lien éditable :
-**Copier le tracé de l'œil** (même courbe, offset nul) et **Copier + décalage**
+**Copier le tracé de la caméra** (même courbe, offset nul) et **Copier + décalage**
 (même courbe, offset monde). **Synchroniser les temps** copie les temps des
-clés de l'œil sur celles de la cible.
+clés de la caméra sur celles de la cible.
 
 ## 2. Réglages
 
 - **Durée** (0,1–600 s), **images/s** (1–120), **nombre d'images**.
 - **Optique** : FOV, profondeur de champ, ouverture, mise au point, roulis,
   liaison caméra rigide ou ressort.
+- **Altitude relative au sol (AGL)** : la hauteur Z des clés devient une
+  hauteur **au-dessus du relief** au lieu d'une altitude absolue. La
+  trajectoire horizontale et le timing ne changent pas. Réglages :
+  - **Amortissement caméra** et **amortissement cible** (temps de réponse en
+    secondes) : lissent le suivi du relief, indépendamment pour les deux ;
+  - **Anticipation relief** : regarde le sol devant la caméra pour commencer à
+    monter avant la pente ;
+  - **Empreinte au sol** : rayon sur lequel on prend le point haut, pour
+    ignorer les facettes et les pics d'une cellule ;
+  - **Plancher AGL** : hauteur minimale dure, appliquée aussi en suivi exact.
 - **Contraintes** : garde au sol amortie, hauteur, sol de référence, évitement
-  des parois, distance/marge/angle/anticipation/détour, douceur, application à
-  l'œil / la caméra / la cible. Ces corrections s'appliquent **aussi en suivi
-  exact**.
+  des parois, distance/marge/angle/anticipation/détour, douceur, application au
+  trajet caméra et à la caméra optique. Ces corrections s'appliquent **aussi en
+  suivi exact**.
 
 Un encadré de calage compare **vitesse demandée** et **vitesse de croisière**
 du profil (75 % de sa vitesse maximale). Si la durée est trop courte, le corps
@@ -249,7 +260,7 @@ Trois actions :
 - **Vitesse cible** : saisissez une vitesse (0 = croisière du profil) puis
   **Appliquer la vitesse**. Les temps sont recalculés et la durée du clip est
   mise à jour en conséquence.
-- **Synchroniser les temps cible** : recopie les temps de l'œil sur la cible.
+- **Synchroniser les temps cible** : recopie les temps de la caméra sur la cible.
 
 Dans la **Timeline**, chaque segment est dessiné comme une barre avec
 `longueur · durée · vitesse` ; les segments trop rapides passent en orange.

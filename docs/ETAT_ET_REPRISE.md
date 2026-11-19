@@ -5,7 +5,151 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-17 00:25** (aide consultable, historique global, opérations en arrière-plan — livré).
+Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail adaptatif/quads, matières procédurales, pan, avant/après — livré).
+
+---
+
+## 0novodecies. Session du 19 novembre — heightmap, animation, détail adaptatif, matières, pan et avant/après (LIVRÉ)
+
+> **État : livré, testé, non poussé.** `cargo test --workspace` : **262 tests
+> verts** ; `clippy -D warnings` propre ; `cargo fmt` appliqué. Le plan de
+> travail et son journal sont dans [`PLAN_ACTIF.md`](PLAN_ACTIF.md).
+
+### 1. Heightmap : sens de la hauteur
+
+- **Constat** : le `HeightField` stocke la ligne 0 au **sud**, alors que les
+  images, les SIG et l'UV0 Blender mettent le **nord en haut**. L'export
+  `.r32`/PNG de l'application était déjà correct (blanc = haut, nord en haut,
+  testé), mais le `heightmap_16.png` du dossier Blender écrivait les lignes
+  brutes, donc **sud en haut**. Utilisé comme displacement avec l'UV0, il
+  creusait les bosses.
+- **Correction** : `vf-export::write_heightmap` inverse les lignes ; sidecar
+  `heightmap_row_zero: "north"`, `heightmap_white: "high"`.
+- **Tests** : `png_is_north_up_and_white_high` (vf-io),
+  `heightmap_png_is_north_up_and_white_high` (vf-export). Un test de rendu
+  synthétique confirme aussi que le soleil éclaire bien le versant qui lui fait
+  face.
+
+### 2. Animation
+
+- **`TargetMode::None`** : aucune cible, la caméra regarde le long de la
+  trajectoire ; plus de gizmo cible ni de clés cible à gérer.
+- **Avance exacte sur la courbe** : `EyeAhead` échantillonne `sample_path(eye,
+  t + lead)` au lieu de `eye + vitesse × lead`. La cible reste sur le tracé
+  prévu, y compris avec une avance négative (regard arrière sur la courbe).
+  L'overlay de conception utilise le même calcul que la simulation.
+- **Keyframing différencié** : les pistes caméra/cible restent séparées ;
+  l'interface ne parle plus d'« œil » (libellés, clés C0…, timeline, aide) et
+  n'affiche que la caméra et la cible. Les modes `Tracé animé`, copie et
+  synchronisation des temps sont conservés.
+- **Altitude relative au sol (AGL)** : nouveau groupe dans Réglages.
+  `Constraints.relative_altitude` interprète le Z des clés comme une hauteur
+  au-dessus du relief. La trajectoire horizontale et le timing sont inchangés.
+  - `camera_altitude_damping_s` / `target_altitude_damping_s` : filtres du
+    premier ordre indépendants, montée plus rapide que descente ;
+  - `altitude_look_ahead_s` et `altitude_footprint_m` : anticipation et
+    empreinte pour ne pas suivre chaque facette ;
+  - plancher dur `ground_clearance_m` appliqué même en suivi exact.
+- **Correction annexe** : le lacet et le tangage des secousses tournaient
+  autour des mauvais axes (le lacet autour de Y) ; corrigé.
+- **Tests** : cible exactement sur la courbe, mode sans cible, AGL plat/colline,
+  amortissement, cible AGL, déterminisme. `vf-flight` : 32 tests.
+
+### 3. Détail : adaptatif, quads et visibilité
+
+- Cause du « menu qui ne fait rien » : le viewport GPU n'appliquait ni le
+  détail ni les matières ; seul le rendu CPU les voyait.
+- Le **maillage GPU** évalue maintenant `DetailSampler` (cap 1025 segments) :
+  le relief fin est visible dans la vue 3D.
+- **Maillage adaptatif à la forme** (`vf_mesh::build_shape_adaptive`) :
+  blocs de 32 cellules, niveau choisi par l'amplitude locale / la tolérance
+  (comme les couches adaptatives d'un slicer), budget de sommets, équilibrage
+  2:1 et **raccords sans trous** (midpoints sur l'arête du bloc grossier).
+  UV monde continues ; les midpoints sont échantillonnés sur la même surface.
+- **Triangles ou quads** : `DetailSettings.quad_mesh` ; le GLB reste triangulé
+  (glTF), `scene.obj` écrit les quads/n-gons pour Blender.
+- **UV** : projection monde normalisée, conservée sur le maillage adaptatif ;
+  la texture cuite est désormais échantillonnée en UV (et non via `nx/ny`),
+  donc valable pour toutes les topologies.
+- Tests : étanchéité géométrique par arêtes appariées, tolérance plus fine =
+  plus de sommets, export OBJ quads.
+
+### 4. Matières
+
+- Nouvelle crate `vf-material` : presets **granite, basalte, calcaire, grès,
+  schiste, craie, volcanique** (teinte, grain, bancs, fissures, lichen,
+  mouchetures), texture personnelle et déplacement.
+- `Materials` : `rock_preset`, `bump_strength`, `bump_scale_m`,
+  `displacement_m`, `texture_path`, `texture_scale_m`, `texture_bump`,
+  `texture_displacement_m`, `texture_mix`. Migration par `serde(default)`.
+- **Bump** CPU (fbm multi-échelle + gradient de texture) et approximation GPU.
+- **Déplacement** CPU et Blender : bruit procédural + luminance de texture,
+  normales recalculées.
+- **Texture personnelle** : chargée par chemin, projetée en XY monde, mélange
+  albédo ; bump et déplacement lisent la luminance.
+- **Peinture** : pinceau 2D intégré (couleur, gomme, rayon, force, bruit de
+  roche de départ), enregistrement PNG et application immédiate au matériau.
+- **Export Blender** : mêmes couleurs cuites via un helper commun ; déplacement
+  appliqué au maillage GLB/OBJ.
+- Tests : presets distincts au rendu, déplacement déplace les sommets sans
+  toucher aux UV, peinture et sauvegarde.
+
+### 5. Viewport et comparaison
+
+- **PAN** : clic droit, bouton du milieu ou `Maj` + glisser déplace le pivot
+  dans le plan écran ; l'orbite et le zoom restent inchangés.
+- **Vue CPU** : bouton de barre d'outils pour forcer le rendu complet (détail,
+  matières, bump, textures), même quand le GPU est disponible.
+- **AVANT / APRÈS** : bouton de barre d'outils ; snapshot du projet + terrain
+  au moment de l'activation, rendu CPU figé à gauche, projet courant à droite,
+  **ligne verticale déplaçable à la souris**. Boutons **Appliquer** et
+  **Revenir** dans le viewport ; Revenir restaure projet + heightfield,
+  vide les caches et relance l'aperçu.
+- Raccourcis et libellés mis à jour dans l'aide (pan, CPU, comparaison).
+
+### 6. CLI
+
+- `render` : `--rock-material`, `--bump`, `--bump-scale`, `--displacement`,
+  `--texture`, `--texture-scale`, `--texture-bump`,
+  `--texture-displacement`, `--texture-mix`, `--no-shape-adaptive`,
+  `--adaptive-tolerance`, `--quads`.
+
+### Fichiers touchés (principaux)
+
+| Fichier | Rôle |
+|---|---|
+| `crates/vf-core/src/{rig,detail,scene}.rs` | `TargetMode::None`, AGL, adaptive/quad, matériaux |
+| `crates/vf-flight/src/rig.rs` | cible sur courbe, AGL caméra/cible, secousses |
+| `crates/vf-mesh/src/lib.rs` | maillage adaptatif, polygones, raccords 2:1 |
+| `crates/vf-material/src/lib.rs` | **nouveau** presets, textures, déplacement |
+| `crates/vf-render/src/{lib,shade}.rs` | maillage adaptatif, déplacement, bump/preset |
+| `crates/vf-export/src/lib.rs` | heightmap nord, OBJ quads, bake UV, matières |
+| `crates/vf-ui/src/{lib,gpu_view,help,animation_editor}.rs` | pan, CPU, avant/après, peinture, AGL, shader |
+| `crates/vf-cli/src/main.rs` | options matières/détail |
+| `docs/{ANIMATION,BLENDER,PLAN_ACTIF}.md` | documentation |
+
+### Limites restantes
+
+- L'avant/après est validé par la capture `docs/screenshots/compare.png` ;
+  le comparateur n'a pas de raccourci clavier dédié.
+- Le shader GPU est une **approximation** du rendu CPU (bump, neige,
+  végétation) ; le CPU reste la référence.
+- La peinture n'a pas d'annuler/rétablir local (le PNG est réécrit à chaque
+  enregistrement) ; on peut annuler via l'historique global si le fichier est
+  rouvert.
+- Les raccords du maillage adaptatif sont étanches géométriquement, mais les
+  sommets de bord sont dupliqués : Blender peut les recoudre avec Merge by
+  Distance sans changer les UV.
+- L'export OBJ n'embarque pas de MTL ; les matériaux restent dans le GLB.
+
+### Commandes de reprise
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p vf-app -- demo-out/geology/alpine.vfproj
+VISTAFORGE_CAPTURE=/tmp/vfcap cargo run --release -p vf-app -- demo-out/geology/alpine.vfproj
+```
 
 ---
 

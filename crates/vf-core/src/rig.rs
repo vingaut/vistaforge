@@ -137,6 +137,9 @@ pub enum TargetMode {
     Trail,
     /// Aim along the camera's own axis (manual orientation).
     Manual,
+    /// No target object at all: the camera looks along the flight direction.
+    /// Used to animate a pure point of view without keyframing a second path.
+    None,
 }
 
 /// Pursuit target.
@@ -153,6 +156,13 @@ pub struct TargetRig {
     pub offset: [f64; 3],
     /// Smoothing of the aim point, 0 = snap, 1 = heavy.
     pub smoothing: f32,
+}
+
+impl TargetMode {
+    /// True when the rig has an editable / visible target point.
+    pub fn uses_target(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 impl Default for TargetRig {
@@ -458,6 +468,20 @@ pub struct Constraints {
     pub softness: f32,
     /// How far ahead the avoidance looks, seconds.
     pub look_ahead_s: f32,
+    /// Interpret the authored vertical key values as **height above the
+    /// local ground** instead of absolute altitude. The horizontal path and
+    /// its timing stay unchanged; only Z follows the terrain.
+    pub relative_altitude: bool,
+    /// Vertical smoothing of the camera's ground offset, seconds. 0 = raw
+    /// terrain (bumpy), 0.5–3 s = calm aerial shot.
+    pub camera_altitude_damping_s: f32,
+    /// Vertical smoothing of the target's ground offset, seconds.
+    pub target_altitude_damping_s: f32,
+    /// How far ahead the ground envelope is sampled, seconds.
+    pub altitude_look_ahead_s: f32,
+    /// Radius of the ground footprint under the camera/target, metres. A
+    /// wider footprint ignores single-cell spikes.
+    pub altitude_footprint_m: f32,
 }
 
 impl Default for Constraints {
@@ -480,6 +504,11 @@ impl Default for Constraints {
             apply_target: false,
             softness: 0.35,
             look_ahead_s: 0.6,
+            relative_altitude: false,
+            camera_altitude_damping_s: 0.9,
+            target_altitude_damping_s: 1.6,
+            altitude_look_ahead_s: 0.8,
+            altitude_footprint_m: 60.0,
         }
     }
 }
@@ -502,6 +531,30 @@ impl Constraints {
             ("softness", self.softness, 0.0, 1.0),
             ("look_ahead_s", self.look_ahead_s, 0.0, 5.0),
             ("reference_z_m", self.reference_z_m, -10_000.0, 20_000.0),
+            (
+                "camera_altitude_damping_s",
+                self.camera_altitude_damping_s,
+                0.0,
+                10.0,
+            ),
+            (
+                "target_altitude_damping_s",
+                self.target_altitude_damping_s,
+                0.0,
+                10.0,
+            ),
+            (
+                "altitude_look_ahead_s",
+                self.altitude_look_ahead_s,
+                0.0,
+                5.0,
+            ),
+            (
+                "altitude_footprint_m",
+                self.altitude_footprint_m,
+                0.0,
+                5000.0,
+            ),
         ] {
             if !value.is_finite() || !(lo..=hi).contains(&value) {
                 return Err(format!("rig {name} must be in {lo}..={hi}, got {value}"));

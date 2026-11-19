@@ -18,6 +18,9 @@ struct Uniforms {
     water_shallow: vec4<f32>,
     params: vec4<f32>, // tan_half_fov, aspect, exposure, encode_srgb
     misc: vec4<f32>,   // sea_level_rel, relief, fog_density, time
+    material: vec4<f32>,  // enabled, bump, scree, snow coverage
+    material2: vec4<f32>, // vegetation, wetness, snow line (rel), beach (rel)
+    material3: vec4<f32>, // rock tint rgb, bump scale
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -89,9 +92,49 @@ fn vs_terrain(in: TerrainIn) -> TerrainOut {
     return out;
 }
 
+fn hash21(p: vec2<f32>) -> f32 {
+    let q = fract(p * vec2<f32>(123.34, 345.45));
+    let d = dot(q, q + 34.345);
+    return fract(d * d);
+}
+
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
+}
+
+fn rock_fbm(p: vec2<f32>) -> f32 {
+    var sum = 0.0;
+    var amplitude = 0.55;
+    var q = p;
+    for (var i = 0; i < 4; i = i + 1) {
+        sum = sum + amplitude * value_noise(q);
+        q = q * 2.03 + vec2<f32>(7.1, 3.7);
+        amplitude = amplitude * 0.48;
+    }
+    return sum;
+}
+
 @fragment
 fn fs_terrain(in: TerrainOut) -> @location(0) vec4<f32> {
-    let normal = normalize(in.normal);
+    var normal = normalize(in.normal);
+    if (u.material.x > 0.5) {
+        // Approximate the CPU bump: two octaves of world-space grain push the
+        // shading normal, so the Material panel is visible without leaving the
+        // GPU viewport.
+        let scale = max(u.material3.w, 0.05);
+        let p = in.rel.xy / scale;
+        let bump = u.material.y * 0.55;
+        let dx = rock_fbm(p + vec2<f32>(0.65, 0.0)) - rock_fbm(p - vec2<f32>(0.65, 0.0));
+        let dy = rock_fbm(p + vec2<f32>(0.0, 0.65)) - rock_fbm(p - vec2<f32>(0.0, 0.65));
+        normal = normalize(normal + vec3<f32>(-dx, -dy, 0.0) * bump);
+    }
     let slope = 1.0 - clamp(normal.z, 0.0, 1.0);
     let altitude = clamp(in.height / max(u.misc.y, 1.0), 0.0, 1.0);
     let view = normalize(u.eye.xyz - in.rel);
@@ -114,12 +157,33 @@ fn fs_terrain(in: TerrainOut) -> @location(0) vec4<f32> {
         color = reflected * (0.58 + 0.42 * max(u.sun_dir.z, 0.0)) * ripple_tint
             + u.sun_color.rgb * glint;
     } else {
+        let rock_color = mix(u.rock.rgb, u.material3.rgb, u.material.x * 0.85);
         var albedo = mix(u.sand.rgb, u.grass.rgb, smoothstep(0.01, 0.10, slope));
-        albedo = mix(albedo, u.rock.rgb, smoothstep(0.18, 0.55, slope));
+        albedo = mix(albedo, rock_color, smoothstep(0.18, 0.55, slope));
+        if (u.material.x > 0.5) {
+            // Scree: pale debris on the slope band below cliffs.
+            let scree_band = u.material.z
+                * smoothstep(0.26, 0.46, slope)
+                * (1.0 - smoothstep(0.62, 0.86, slope));
+            albedo = mix(albedo, rock_color * 1.28, clamp(scree_band, 0.0, 1.0));
+            // Snow patches: altitude and flatness, with a coarse noise mask.
+            let snow_patch = rock_fbm(in.rel.xy / 180.0) * 0.5 + 0.5;
+            let snow_base = smoothstep(u.material2.z - 0.10, u.material2.z + 0.05, altitude);
+            let snow = snow_base
+                * (1.0 - smoothstep(0.38, 0.66, slope))
+                * smoothstep(0.28, 0.72, snow_patch + u.material.w * 0.35);
+            albedo = mix(albedo, u.snow.rgb, clamp(snow, 0.0, 1.0));
+            // Vegetation on gentle, low ground.
+            let veg = u.material2.x
+                * (1.0 - smoothstep(0.12, 0.38, slope))
+                * (1.0 - smoothstep(0.35, 0.75, altitude));
+            albedo = mix(albedo, u.grass.rgb, clamp(veg, 0.0, 0.85));
+        }
         albedo = mix(
             albedo,
             u.snow.rgb,
             smoothstep(0.62, 0.82, altitude) * (1.0 - smoothstep(0.35, 0.70, slope))
+                * step(0.5, u.material.x + 0.5)
         );
         let shore = smoothstep(u.misc.x + 0.001, u.misc.x + 0.035, in.height);
         albedo = mix(u.sand.rgb, albedo, shore);

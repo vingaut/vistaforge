@@ -18,7 +18,7 @@ ouverts et documentés.
 | Aperçu rapide ou échange informel | JPEG | **Lossy** : jamais pour un DEM de travail. |
 | Ancien format VistaForge | `.dem` v1 | i16, palette, session opaque. Import et export toujours disponibles. |
 | Échange brut / moteur | `.r32` + `.json` | f32 little-endian, ligne 0 au sud ; le sidecar porte dimensions, pas et origine. |
-| Blender, scène complète | **GLB** | Maillage, 7 matériaux, UV0/UV1, caméra, soleil, textures cuites. |
+| Blender, scène complète | **GLB + OBJ** | Maillage, 7 matériaux, UV0/UV1, caméra, soleil, textures cuites. `scene.obj` conserve les quads/n-gons du maillage adaptatif, le GLB reste triangulé. |
 | Blender, trajectoire seule | **GLB caméra** ou `.vfcam` | Aucune géométrie ; voir §5. |
 | Tableur / pipeline custom | CSV | Une ligne par image : temps, œil, cible, up, roulis, FOV, vitesse. |
 

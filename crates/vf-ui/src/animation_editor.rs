@@ -166,7 +166,7 @@ pub fn show(
                 }
             }
         }
-        draw_path(&painter, rect, camera, &rig.eye, EYE_COLOR, 1.8, "Œil");
+        draw_path(&painter, rect, camera, &rig.eye, EYE_COLOR, 1.8, "Caméra");
         if rig.target.mode == TargetMode::Path {
             draw_path(
                 &painter,
@@ -263,7 +263,7 @@ pub fn show(
             output.consumed = true;
             state.trace = false;
             output.status = Some(match marker {
-                AnimSelection::EyeKey(index) => format!("Clé œil {index} sélectionnée"),
+                AnimSelection::EyeKey(index) => format!("Clé caméra {index} sélectionnée"),
                 AnimSelection::TargetKey(index) => format!("Clé cible {index} sélectionnée"),
                 AnimSelection::FixedTarget => "Cible fixe sélectionnée".into(),
             });
@@ -548,7 +548,15 @@ fn draw_camera_frustum(
         (sample.camera.position, sample.target, up)
     } else {
         let eye = sample_path(&rig.eye, time);
-        let Some(target) = current_target(rig, eye, time) else {
+        let target = current_target(rig, eye, time).or_else(|| {
+            if rig.target.mode.uses_target() {
+                None
+            } else {
+                let direction = path_derivative(&rig.eye, time).normalize_or_zero();
+                Some(eye + direction * 500.0)
+            }
+        });
+        let Some(target) = target else {
             return;
         };
         let forward = (target - eye).normalize_or_zero();
@@ -619,7 +627,10 @@ fn draw_time_markers(
     live: Option<&RigSample>,
 ) {
     let (eye, target) = if let Some(sample) = live {
-        (sample.eye, Some(sample.target))
+        (
+            sample.eye,
+            rig.target.mode.uses_target().then_some(sample.target),
+        )
     } else {
         let eye = sample_path(&rig.eye, time);
         (eye, current_target(rig, eye, time))
@@ -657,6 +668,9 @@ fn draw_time_markers(
 }
 
 fn current_target(rig: &CameraRig, eye: DVec3, time: f32) -> Option<DVec3> {
+    if !rig.target.mode.uses_target() {
+        return None;
+    }
     let velocity = path_derivative(&rig.eye, time);
     Some(sample_target(rig, time, eye, velocity) + DVec3::from_array(rig.target.offset))
 }
@@ -681,7 +695,7 @@ fn draw_keys(
             false,
             selection_here,
             hovered_here,
-            &format!("E{index} · {:.1}s", key.time_s),
+            &format!("Caméra {index} · {:.1}s", key.time_s),
         );
     }
     if rig.target.mode == TargetMode::Path {
@@ -697,7 +711,7 @@ fn draw_keys(
                 true,
                 selection_here,
                 hovered_here,
-                &format!("T{index} · {:.1}s", key.time_s),
+                &format!("Cible {index} · {:.1}s", key.time_s),
             );
         }
     }

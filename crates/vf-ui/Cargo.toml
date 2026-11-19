@@ -20,6 +20,7 @@ vf-geology = { path = "../vf-geology" }
 vf-flight = { path = "../vf-flight" }
 vf-io = { path = "../vf-io" }
 vf-material = { path = "../vf-material" }
+vf-mesh = { path = "../vf-mesh" }
 vf-modifiers = { path = "../vf-modifiers" }
 vf-procgen = { path = "../vf-procgen" }
 vf-render = { path = "../vf-render" }

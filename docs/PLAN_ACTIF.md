@@ -79,15 +79,43 @@
 - [ ] Tests headless : pan, position de la ligne, application/annulation,
       clavier.
 
+## 5 bis. Corrections de la deuxième passe (19 novembre, soir)
+
+- [x] **Caméra conservée** après génération / import / composition
+      (`Conserver la caméra`, bouton `Recadrer`), après **Annuler/Rétablir** et
+      après **Revenir** dans le comparateur : l'angle, la distance et le zoom
+      de la vue d'inspection ne sont plus perdus.
+- [x] **Maillage adaptatif par angle de face** : le niveau suit désormais
+      l'écart au plan local (courbure / arête vive), pas la hauteur brute.
+      Une pente raide mais lisse reste grossière ; une crête pointue est
+      subdivisée. Test `a_planar_slope_is_not_over_subdivided`.
+- [x] **Deuxième passe après bump/displacement** : `MaterialSampler` fait
+      évaluer le déplacement de matière par le constructeur adaptatif
+      (`SurfaceSampler`). Tolérance resserrée et subdivision minimale ×2 quand
+      un déplacement est actif.
+- [x] **Adaptatif dans le viewport GPU** : le maillage GPU suit la même
+      recette (SurfaceSampler, tolérance, subdivision) que le CPU.
+- [x] **Déplacement vertical** (et non le long de la normale) : fini les
+      aiguilles triangulaires sur les pentes raides.
+- [x] **Empreinte constante** sur tout le maillage adaptatif : les sommets
+      partagés entre blocs ont exactement la même hauteur, donc plus de trous
+      ni de triangles noirs. Test avec détail actif.
+- [x] **Qualité d'aperçu** : sélecteur Brouillon / Normal / Haute / Finale en
+      haut de chaque panneau, avec bouton `Aperçu` et reprise par les boutons
+      existants.
+- [x] **Comparateur** disponible depuis tous les panneaux (Modificateurs,
+      Roche, Érosion…), pas seulement Détail/Matières.
+- [x] **Sélecteur de fichier** pour la texture personnelle (PNG/JPG/TIFF).
+
 ## 6. Validation et livraison
 
 - [x] `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`,
-      `cargo test --workspace` — **264 tests verts**.
+      `cargo test --workspace` — **268 tests verts**.
 - [x] Capture UI avant/après (`docs/screenshots/compare.png`) ; les captures
       atelier Matières/Détail à jour sont dans `/tmp/vfcap8/`.
 - [x] Mise à jour `ETAT_ET_REPRISE.md`, `README`/docs utilisateur.
-- [~] Binaires `dist/linux-x86_64/` et `SHA256SUMS`.
-- [ ] Commit Git (le travail n'est pas poussé sans validation).
+- [x] Binaires `dist/linux-x86_64/` et `SHA256SUMS`.
+- [~] Commit Git (le travail n'est pas poussé sans validation).
 
 ## Journal d'avancement
 
@@ -100,3 +128,4 @@
 | 2026-11-19 21:40 | Matières | Presets procéduraux, bump, déplacement, texture personnelle, pinceau 2D, export Blender. |
 | 2026-11-19 21:45 | Viewport/UI | Pan, vue CPU, avant/après avec ligne déplaçable, Appliquer/Revenir, détail et matières dans le shader GPU. |
 | 2026-11-19 22:35 | Validation visuelle | Capture `workspace_compare.png` : avant clair / après basalt plus sombre, ligne et boutons fonctionnels. |
+| 2026-11-19 23:45 | Deuxième passe | Caméra conservée, adaptatif par courbure, déplacement vertical + seconde passe, qualité d'aperçu, comparateur global, picker texture. 268 tests. |

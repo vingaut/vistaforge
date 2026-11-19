@@ -19,6 +19,7 @@ use eframe::egui_wgpu::{self, wgpu};
 use glam::{DVec3, Mat4, Vec3};
 use vf_core::{Camera, HeightField, Project};
 use vf_detail::DetailSampler;
+use vf_material::{MaterialSampler, RockTexture};
 use wgpu::util::DeviceExt as _;
 
 const MAX_MESH_SEGMENTS: usize = 2049;
@@ -729,6 +730,53 @@ fn rgba(color: vf_core::Rgb) -> [f32; 4] {
     [color.r, color.g, color.b, 1.0]
 }
 
+fn push_water_plane(
+    vertices: &mut Vec<TerrainVertex>,
+    indices: &mut Vec<u32>,
+    project: &Project,
+    extent: f64,
+    relief: f64,
+    min_z: f64,
+) {
+    if !project.water.enabled {
+        return;
+    }
+    let sea = f64::from(project.water.sea_level);
+    if sea <= min_z - relief * 0.05 {
+        return;
+    }
+    let half = extent * 12.0;
+    let sea_rel = (sea - min_z - relief * 0.0005) as f32;
+    let base = vertices.len() as u32;
+    vertices.extend_from_slice(&[
+        TerrainVertex {
+            position: [-half as f32, -half as f32, sea_rel],
+            normal: [0.0, 0.0, 1.0],
+            kind: 1.0,
+            height: sea_rel,
+        },
+        TerrainVertex {
+            position: [half as f32, -half as f32, sea_rel],
+            normal: [0.0, 0.0, 1.0],
+            kind: 1.0,
+            height: sea_rel,
+        },
+        TerrainVertex {
+            position: [half as f32, half as f32, sea_rel],
+            normal: [0.0, 0.0, 1.0],
+            kind: 1.0,
+            height: sea_rel,
+        },
+        TerrainVertex {
+            position: [-half as f32, half as f32, sea_rel],
+            normal: [0.0, 0.0, 1.0],
+            kind: 1.0,
+            height: sea_rel,
+        },
+    ]);
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 pub fn build_terrain_mesh(
     project: &Project,
     heightfield: &HeightField,
@@ -780,6 +828,83 @@ pub fn build_terrain_mesh(
     let origin = DVec3::new(center_x, center_y, 0.0);
     let relief = (max_z - min_z).max(1.0);
     let extent = bounds.size().iter().copied().fold(1.0, f64::max);
+
+    // Shape-adaptive path: mirror the CPU renderer so the Detail menu's
+    // adaptive/quads settings are visible in the live viewport too.
+    if project.detail.adaptive {
+        let sampler = DetailSampler::new(terrain, &project.detail, project.seed);
+        let material_texture = RockTexture::load(&project.materials.texture_path);
+        let displace = project.materials.enabled
+            && (project.materials.displacement_m > 0.0
+                || project.materials.texture_displacement_m > 0.0);
+        let material_sampler = displace.then(|| {
+            MaterialSampler::new(
+                &sampler,
+                &project.materials,
+                project.seed,
+                material_texture.as_ref(),
+            )
+        });
+        let tolerance = if displace {
+            let amplitude = project
+                .materials
+                .displacement_m
+                .max(project.materials.texture_displacement_m);
+            project
+                .detail
+                .adaptive_tolerance_m
+                .min((amplitude * 0.75).max(0.05))
+        } else {
+            project.detail.adaptive_tolerance_m
+        };
+        let subdivision = project.render.subdivision.max(if displace { 2 } else { 1 }) as u32;
+        let surface: &dyn vf_mesh::SurfaceSampler = match &material_sampler {
+            Some(sampler) => sampler,
+            None => &sampler,
+        };
+        let mesh = vf_mesh::build_shape_adaptive(surface, subdivision, tolerance, 1_800_000);
+        let mut vertices = Vec::with_capacity(mesh.vertex_count() + 4);
+        let mut indices = Vec::with_capacity(mesh.triangle_count() * 3 + 6);
+        for (index, position) in mesh.positions.iter().enumerate() {
+            let normal = mesh.normals[index];
+            vertices.push(TerrainVertex {
+                position: [
+                    position[0] - center_x as f32,
+                    position[1] - center_y as f32,
+                    (f64::from(position[2]) - min_z) as f32,
+                ],
+                normal,
+                kind: 0.0,
+                height: (f64::from(position[2]) - min_z) as f32,
+            });
+        }
+        for [a, b, c] in &mesh.indices {
+            indices.extend_from_slice(&[*a, *b, *c]);
+        }
+        if water_enabled {
+            push_water_plane(&mut vertices, &mut indices, project, extent, relief, min_z);
+        }
+        let triangles = indices.len() / 3;
+        return Ok(TerrainMeshData {
+            vertices,
+            indices,
+            origin,
+            min_z,
+            max_z,
+            summary: format!(
+                "adaptatif {}×{} -> {} sommets · {} triangles",
+                width,
+                height,
+                mesh.vertex_count(),
+                triangles
+            ),
+            sea_level: f64::from(project.water.sea_level),
+            spacing_x,
+            spacing_y,
+            width,
+            height,
+        });
+    }
 
     let longest = width.max(height) - 1;
     let segment_cap = if detail_sampler.is_some() {
@@ -844,40 +969,8 @@ pub fn build_terrain_mesh(
 
     // A large opaque water plane anchors the terrain in the landscape. The
     // CPU renderer has Fresnel/foam; the GPU preview uses a simpler shader.
-    if water_enabled && project.water.enabled {
-        let sea = f64::from(project.water.sea_level);
-        if sea > min_z - relief * 0.05 {
-            let half = extent * 12.0;
-            let sea_rel = (sea - min_z - relief * 0.0005) as f32;
-            let base = vertices.len() as u32;
-            vertices.extend_from_slice(&[
-                TerrainVertex {
-                    position: [-half as f32, -half as f32, sea_rel],
-                    normal: [0.0, 0.0, 1.0],
-                    kind: 1.0,
-                    height: sea_rel,
-                },
-                TerrainVertex {
-                    position: [half as f32, -half as f32, sea_rel],
-                    normal: [0.0, 0.0, 1.0],
-                    kind: 1.0,
-                    height: sea_rel,
-                },
-                TerrainVertex {
-                    position: [half as f32, half as f32, sea_rel],
-                    normal: [0.0, 0.0, 1.0],
-                    kind: 1.0,
-                    height: sea_rel,
-                },
-                TerrainVertex {
-                    position: [-half as f32, half as f32, sea_rel],
-                    normal: [0.0, 0.0, 1.0],
-                    kind: 1.0,
-                    height: sea_rel,
-                },
-            ]);
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
+    if water_enabled {
+        push_water_plane(&mut vertices, &mut indices, project, extent, relief, min_z);
     }
 
     let triangles = indices.len() / 3;

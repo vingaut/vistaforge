@@ -10,6 +10,7 @@
 //! The builder is deterministic and parallel across rows.
 
 use rayon::prelude::*;
+use vf_core::HeightField;
 use vf_detail::DetailSampler;
 
 /// World-space view used to derive a conservative pixel footprint for
@@ -92,6 +93,29 @@ impl MeshData {
                 .max(1e-12);
             *out = [normal[0] / len, normal[1] / len, normal[2] / len];
         }
+    }
+}
+
+/// Surface evaluated by the adaptive builder. `DetailSampler` is the base
+/// implementation; materials add a vertical displacement on top of it so the
+/// adaptive pass also resolves bump/displacement.
+pub trait SurfaceSampler {
+    fn height(&self, x: f64, y: f64, footprint_m: f32) -> f32;
+    fn normal(&self, x: f64, y: f64, footprint_m: f32) -> [f32; 3];
+    fn height_field(&self) -> &HeightField;
+}
+
+impl SurfaceSampler for DetailSampler<'_> {
+    fn height(&self, x: f64, y: f64, footprint_m: f32) -> f32 {
+        DetailSampler::height(self, x, y, footprint_m)
+    }
+
+    fn normal(&self, x: f64, y: f64, footprint_m: f32) -> [f32; 3] {
+        DetailSampler::normal(self, x, y, footprint_m)
+    }
+
+    fn height_field(&self) -> &HeightField {
+        DetailSampler::height_field(self)
     }
 }
 
@@ -609,8 +633,8 @@ const SHAPE_BLOCK: usize = 32;
 /// edges receive the midpoints of the finer side, so the surface is watertight
 /// without skirts. UVs are the global planar world projection, which keeps the
 /// texture continuous across every transition.
-pub fn build_shape_adaptive(
-    sampler: &DetailSampler<'_>,
+pub fn build_shape_adaptive<S: SurfaceSampler + ?Sized>(
+    sampler: &S,
     max_subdivision: u32,
     tolerance_m: f32,
     max_vertices: usize,
@@ -628,31 +652,48 @@ pub fn build_shape_adaptive(
         .floor() as usize)
         .clamp(0, 9);
     let tolerance = tolerance_m.clamp(0.02, 100.0);
+    // One footprint for every vertex, independent of the block level. Shared
+    // block edges must produce exactly the same height on both sides,
+    // otherwise the adaptive surface opens hairline cracks that show as black
+    // triangles. Sub-cell detail stays in the shader bump.
+    let sample_footprint = (sx.max(sy) * 0.5) as f32;
     let mut levels = vec![0u8; blocks_x * blocks_y];
 
-    // Local relief chooses the initial level. The 9x9 probe catches a ridge
-    // that crosses a block even when its four corners are flat.
+    // The level follows the **deviation from the local plane**, not the raw
+    // relief. A smooth 60° slope is planar and stays cheap; a sharp ridge or a
+    // pointed face bends away from its corners and is subdivided. This is the
+    // "face angle" criterion the triangle forest was missing.
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let x0 = bx * SHAPE_BLOCK;
             let y0 = by * SHAPE_BLOCK;
             let x1 = (x0 + SHAPE_BLOCK).min(cells_x);
             let y1 = (y0 + SHAPE_BLOCK).min(cells_y);
-            let mut min = f32::INFINITY;
-            let mut max = f32::NEG_INFINITY;
+            let sample_at = |u: f64, v: f64| -> f32 {
+                let gx = x0 as f64 + (x1 - x0) as f64 * u;
+                let gy = y0 as f64 + (y1 - y0) as f64 * v;
+                sampler.height(ox + gx * sx, oy + gy * sy, sample_footprint)
+            };
+            let c00 = sample_at(0.0, 0.0);
+            let c10 = sample_at(1.0, 0.0);
+            let c01 = sample_at(0.0, 1.0);
+            let c11 = sample_at(1.0, 1.0);
+            let mut error = 0.0f32;
             for iy in 0..=8 {
-                let gy = y0 as f64 + (y1 - y0) as f64 * iy as f64 / 8.0;
-                let y = oy + gy * sy;
+                let v = iy as f64 / 8.0;
                 for ix in 0..=8 {
-                    let gx = x0 as f64 + (x1 - x0) as f64 * ix as f64 / 8.0;
-                    let x = ox + gx * sx;
-                    let z = sampler.height(x, y, (sx.max(sy) * 4.0) as f32);
-                    min = min.min(z);
-                    max = max.max(z);
+                    let u = ix as f64 / 8.0;
+                    let z = f64::from(sample_at(u, v));
+                    let predicted = f64::from(c00) * (1.0 - u) * (1.0 - v)
+                        + f64::from(c10) * u * (1.0 - v)
+                        + f64::from(c01) * (1.0 - u) * v
+                        + f64::from(c11) * u * v;
+                    error = error.max((z - predicted).abs() as f32);
                 }
             }
-            let relief = (max - min).max(0.0);
-            let segments = (relief / tolerance).ceil().max(1.0);
+            // Bilinear error of a piecewise-linear patch falls as 1/N²; this
+            // turns the tolerance into the number of segments needed.
+            let segments = (error / tolerance).max(0.0).sqrt().ceil().max(1.0);
             let level = (segments.log2().ceil() as usize).clamp(0, max_level);
             levels[by * blocks_x + bx] = level as u8;
         }
@@ -738,9 +779,8 @@ pub fn build_shape_adaptive(
                 for ix in 0..n {
                     let gx = x0 as f64 + (x1 - x0) as f64 * ix as f64 / segments as f64;
                     let x = ox + gx * sx;
-                    let footprint = ((x1 - x0) as f64 * sx / segments as f64).max(0.05) as f32;
-                    let z = sampler.height(x, y, footprint);
-                    let normal = sampler.normal(x, y, footprint);
+                    let z = sampler.height(x, y, sample_footprint);
+                    let normal = sampler.normal(x, y, sample_footprint);
                     grid[iy * n + ix] = positions.len() as u32;
                     positions.push([x as f32, y as f32, z]);
                     normals.push(normal);
@@ -768,8 +808,7 @@ pub fn build_shape_adaptive(
                         &mut positions,
                         &mut normals,
                         &mut uvs,
-                        (x1 - x0) as f64 * sx,
-                        segments,
+                        sample_footprint,
                     ));
                 }
             }
@@ -783,8 +822,7 @@ pub fn build_shape_adaptive(
                         &mut positions,
                         &mut normals,
                         &mut uvs,
-                        (x1 - x0) as f64 * sx,
-                        segments,
+                        sample_footprint,
                     ));
                 }
             }
@@ -798,8 +836,7 @@ pub fn build_shape_adaptive(
                         &mut positions,
                         &mut normals,
                         &mut uvs,
-                        (y1 - y0) as f64 * sy,
-                        segments,
+                        sample_footprint,
                     ));
                 }
             }
@@ -813,8 +850,7 @@ pub fn build_shape_adaptive(
                         &mut positions,
                         &mut normals,
                         &mut uvs,
-                        (y1 - y0) as f64 * sy,
-                        segments,
+                        sample_footprint,
                     ));
                 }
             }
@@ -866,21 +902,19 @@ pub fn build_shape_adaptive(
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-fn push_sample(
-    sampler: &DetailSampler<'_>,
+fn push_sample<S: SurfaceSampler + ?Sized>(
+    sampler: &S,
     (gx, gy): (f64, f64),
     (ox, oy, sx, sy, cells_x, cells_y): (f64, f64, f64, f64, usize, usize),
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
-    span_m: f64,
-    segments: usize,
+    sample_footprint: f32,
 ) -> u32 {
     let x = ox + gx * sx;
     let y = oy + gy * sy;
-    let footprint = (span_m / segments as f64).max(0.05) as f32;
-    let z = sampler.height(x, y, footprint);
-    let normal = sampler.normal(x, y, footprint);
+    let z = sampler.height(x, y, sample_footprint);
+    let normal = sampler.normal(x, y, sample_footprint);
     let index = positions.len() as u32;
     positions.push([x as f32, y as f32, z]);
     normals.push(normal);
@@ -957,8 +991,10 @@ mod shape_adaptive_tests {
         let mut heights = vec![0.0f32; width * width];
         for y in 0..width {
             for x in 0..width {
-                let ramp = if x > 64 { (x - 64) as f32 * 4.0 } else { 0.0 };
-                heights[y * width + x] = ramp + (y as f32 * 0.05).sin() * 2.0;
+                let dx = (x as f32 - 64.0) / 30.0;
+                let dy = (y as f32 - 64.0) / 30.0;
+                heights[y * width + x] =
+                    120.0 * (-(dx * dx + dy * dy) * 0.5).exp() + (y as f32 * 0.05).sin() * 2.0;
             }
         }
         HeightField::new(width, width, 10.0, 10.0, heights).unwrap()
@@ -1040,6 +1076,98 @@ mod shape_adaptive_tests {
             );
             assert_eq!(reverse, 1, "edge {a:?} <-> {b:?} is not shared");
         }
+    }
+
+    #[test]
+    fn detailed_adaptive_mesh_has_no_cracks_on_block_edges() {
+        let hf = ridge_field();
+        let settings = DetailSettings {
+            enabled: true,
+            strength: 1.0,
+            amplitude_m: 3.0,
+            ..DetailSettings::default()
+        };
+        let sampler = DetailSampler::new(&hf, &settings, Seed::new(5));
+        let mesh = build_shape_adaptive(&sampler, 2, 0.8, 2_000_000);
+        type Key = (i64, i64, i64);
+        let key = |p: [f32; 3]| -> Key {
+            (
+                (p[0] * 1000.0).round() as i64,
+                (p[1] * 1000.0).round() as i64,
+                (p[2] * 1000.0).round() as i64,
+            )
+        };
+        let mut edges: std::collections::HashMap<(Key, Key), i32> =
+            std::collections::HashMap::new();
+        for polygon in &mesh.polygons {
+            for i in 0..polygon.len() {
+                let a = key(mesh.positions[polygon[i] as usize]);
+                let b = key(mesh.positions[polygon[(i + 1) % polygon.len()] as usize]);
+                *edges.entry((a, b)).or_default() += 1;
+            }
+        }
+        let min_x = mesh
+            .positions
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = mesh
+            .positions
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = mesh
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = mesh
+            .positions
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let border = |p: Key| {
+            let x = p.0 as f32 / 1000.0;
+            let y = p.1 as f32 / 1000.0;
+            (x - min_x).abs() < 1e-3
+                || (x - max_x).abs() < 1e-3
+                || (y - min_y).abs() < 1e-3
+                || (y - max_y).abs() < 1e-3
+        };
+        for ((a, b), count) in &edges {
+            if border(*a) && border(*b) {
+                continue;
+            }
+            assert_eq!(*count, 1, "edge {a:?} -> {b:?} used {count} times");
+            assert_eq!(
+                edges.get(&(*b, *a)).copied().unwrap_or(0),
+                1,
+                "edge {a:?} <-> {b:?} is not shared"
+            );
+        }
+    }
+
+    #[test]
+    fn a_planar_slope_is_not_over_subdivided() {
+        // A steep but perfectly planar ramp has zero deviation from its
+        // corners. The old relief criterion subdivided it to the maximum and
+        // produced the "triangle forest"; the plane criterion must keep it
+        // coarse.
+        let width = 129;
+        let heights: Vec<f32> = (0..width * width)
+            .map(|index| (index % width) as f32 * 10.0)
+            .collect();
+        let hf = HeightField::new(width, width, 10.0, 10.0, heights).unwrap();
+        let settings = DetailSettings::default();
+        let sampler = DetailSampler::new(&hf, &settings, Seed::new(3));
+        let mesh = build_shape_adaptive(&sampler, 1, 0.5, 2_000_000);
+        // 16 blocks × 4 corners is the floor; even with block-edge midpoints
+        // this must stay far below the 16 641-vertex full grid.
+        assert!(
+            mesh.vertex_count() < 1_000,
+            "planar slope was over-subdivided: {} vertices",
+            mesh.vertex_count()
+        );
     }
 
     #[test]

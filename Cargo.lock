@@ -3078,6 +3078,7 @@ dependencies = [
  "vf-geology",
  "vf-io",
  "vf-material",
+ "vf-mesh",
  "vf-modifiers",
  "vf-procgen",
  "vf-render",

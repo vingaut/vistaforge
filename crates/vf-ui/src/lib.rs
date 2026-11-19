@@ -355,6 +355,47 @@ pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
     )
 }
 
+/// Preview quality requested from a panel. Draft/Normal/High stay at the
+/// interactive preview size, Final renders at the project output resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewQuality {
+    Draft,
+    Normal,
+    High,
+    Final,
+}
+
+impl PreviewQuality {
+    const ALL: [Self; 4] = [Self::Draft, Self::Normal, Self::High, Self::Final];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "Brouillon",
+            Self::Normal => "Normal",
+            Self::High => "Haute",
+            Self::Final => "Finale",
+        }
+    }
+
+    fn scale(self) -> f32 {
+        match self {
+            Self::Draft => 0.35,
+            Self::Normal => 0.7,
+            Self::High => 1.0,
+            Self::Final => 1.0,
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Draft => "Aperçu 0,35× : très rapide pour régler un curseur.",
+            Self::Normal => "Aperçu 0,7× : compromis vitesse / lisibilité.",
+            Self::High => "Aperçu 1× (960×540) : détail et matières lisibles.",
+            Self::Final => "Rendu à la résolution de sortie du projet (plus lent).",
+        }
+    }
+}
+
 /// Before/after comparison of the current panel edits.
 ///
 /// A CPU preview is the only renderer that shows the continuous detail and
@@ -544,6 +585,11 @@ struct VistaForgeApp {
     pending_full: bool,
     compare: CompareState,
     paint: PaintState,
+    preview_quality: PreviewQuality,
+    /// Keep the current orbit pose when the terrain is regenerated, imported
+    /// or composed. The previous behaviour auto-framed and lost a detail view
+    /// the user had carefully positioned.
+    preserve_view: bool,
 
     gpu: Option<gpu_view::GpuViewport>,
     gpu_enabled: bool,
@@ -714,6 +760,8 @@ impl VistaForgeApp {
                 ..CompareState::default()
             },
             paint: PaintState::new(),
+            preview_quality: PreviewQuality::Normal,
+            preserve_view: true,
             gpu: None,
             gpu_enabled: true,
             gpu_mesh_dirty: false,
@@ -951,6 +999,20 @@ impl VistaForgeApp {
         self.sync_orbit_from_camera();
     }
 
+    /// Keep the user's viewing angle and distance after a terrain swap. Only
+    /// the orbit pivot moves to the new terrain centre; yaw, pitch, distance
+    /// and FOV are preserved. Auto-frame is still available with the checkbox
+    /// off or the "Recadrer" button.
+    fn adopt_view_after_terrain_change(&mut self) {
+        if self.preserve_view {
+            self.orbit_center = vf_scene::terrain_center(&self.heightfield);
+            self.apply_orbit();
+            self.sync_orbit_from_camera();
+        } else {
+            self.auto_frame();
+        }
+    }
+
     /// Snap the camera to a standard CAD viewpoint. The camera is placed
     /// immediately; the preview is refreshed by the adaptive scheduler.
     fn set_view_preset(&mut self, preset: vf_scene::ViewPreset) {
@@ -1063,7 +1125,11 @@ impl VistaForgeApp {
         self.dirty_first.get_or_insert(now);
         self.refine_at = None;
         self.revision = self.revision.wrapping_add(1);
-        self.preview_scale = if self.adaptive_preview {
+        self.preview_scale = if self.compare.enabled {
+            // Comparison must stay at a readable resolution even while a
+            // slider is dragged; the user explicitly chose the preview level.
+            self.preview_quality.scale().clamp(MIN_PREVIEW_SCALE, 1.0)
+        } else if self.adaptive_preview {
             self.interactive_scale
         } else {
             1.0
@@ -1139,7 +1205,12 @@ impl VistaForgeApp {
             "Comparaison avant/après : le côté gauche est figé, le côté droit suit vos réglages."
                 .into();
         if self.render_task.is_none() {
-            self.start_render(ctx.clone(), false);
+            if self.preview_quality == PreviewQuality::Final {
+                self.start_render(ctx.clone(), true);
+            } else {
+                self.preview_scale = self.preview_quality.scale();
+                self.start_render(ctx.clone(), false);
+            }
         } else {
             // The in-flight render may be stale; queue a fresh baseline as
             // soon as the worker is free.
@@ -1171,11 +1242,15 @@ impl VistaForgeApp {
             return;
         };
         let heightfield = self.compare.baseline_heightfield.clone();
+        // Keep the current viewing pose: reverting a material/detail change
+        // must not throw away a camera the user positioned to inspect it.
+        let camera = self.project.camera.clone();
         self.compare = CompareState {
             split: 0.5,
             ..CompareState::default()
         };
         self.project = project;
+        self.project.camera = camera;
         if let Some(heightfield) = heightfield {
             self.heightfield = heightfield;
         }
@@ -1409,10 +1484,13 @@ impl VistaForgeApp {
         // keeps the heightfield shared and `Arc::make_mut` clones the whole
         // terrain just to patch a small rectangle.
         self.invalidate_terrain_stats();
+        let camera = self.project.camera.clone();
         let Some(label) = self.history.undo(&mut self.project, &mut self.heightfield) else {
             self.status = "Rien à annuler".into();
             return;
         };
+        // History does not record camera moves; keep the inspection view.
+        self.project.camera = camera;
         self.after_history_change(ctx, format!("Annulé : {label}"));
     }
 
@@ -1427,10 +1505,12 @@ impl VistaForgeApp {
             return;
         }
         self.invalidate_terrain_stats();
+        let camera = self.project.camera.clone();
         let Some(label) = self.history.redo(&mut self.project, &mut self.heightfield) else {
             self.status = "Rien à rétablir".into();
             return;
         };
+        self.project.camera = camera;
         self.after_history_change(ctx, format!("Rétabli : {label}"));
     }
 
@@ -1659,6 +1739,33 @@ impl VistaForgeApp {
         self.start_render(ctx, false);
     }
 
+    /// Run the current preview at the quality selected in a panel. `Finale`
+    /// switches to the project output resolution and the full render options.
+    fn start_quality_preview(&mut self, ctx: egui::Context) {
+        if self.preview_quality == PreviewQuality::Final {
+            self.start_render(ctx, true);
+        } else {
+            self.preview_scale = self.preview_quality.scale();
+            self.interactive_scale = self.preview_scale;
+            self.start_render(ctx, false);
+        }
+    }
+
+    /// Compact quality selector placed next to every "preview" action.
+    fn preview_quality_picker(&mut self, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt("preview-quality")
+            .selected_text(format!("Aperçu {}", self.preview_quality.label()))
+            .show_ui(ui, |ui| {
+                for quality in PreviewQuality::ALL {
+                    ui.selectable_value(
+                        &mut self.preview_quality,
+                        quality,
+                        format!("{} — {}", quality.label(), quality.tooltip()),
+                    );
+                }
+            });
+    }
+
     fn start_render(&mut self, ctx: egui::Context, full: bool) {
         if let Some(task) = &self.render_task {
             if full && !task.full {
@@ -1884,7 +1991,7 @@ impl VistaForgeApp {
                     }
                 );
                 self.sync_from_project();
-                self.sync_orbit_from_camera();
+                self.adopt_view_after_terrain_change();
                 self.refresh_preview(ctx.clone());
             }
             jobs::TaskResult::TerrainImported { path, imported } => {
@@ -1906,11 +2013,6 @@ impl VistaForgeApp {
                 });
                 self.heightfield = Arc::new(imported.heightfield);
                 self.project.sync_terrain(&self.heightfield);
-                self.project.camera = vf_scene::auto_frame(
-                    &self.heightfield,
-                    f64::from(self.project.render.width)
-                        / f64::from(self.project.render.height.max(1)),
-                );
                 self.project_path = None;
                 self.path_input = path.with_extension("vfproj").display().to_string();
                 self.anim_framed = false;
@@ -1924,7 +2026,7 @@ impl VistaForgeApp {
                 self.anim_profile_cache = None;
                 self.anim_curve_cache = None;
                 self.sync_from_project();
-                self.sync_orbit_from_camera();
+                self.adopt_view_after_terrain_change();
                 self.mark_dirty();
                 self.start_render(ctx.clone(), false);
                 self.files_status = format!(
@@ -1955,10 +2057,6 @@ impl VistaForgeApp {
                 self.history.label("Composition du monde");
                 self.heightfield = Arc::new(heightfield);
                 self.project.sync_terrain(&self.heightfield);
-                self.project.camera = vf_scene::auto_frame(
-                    &self.heightfield,
-                    f64::from(self.render_width.max(1)) / f64::from(self.render_height.max(1)),
-                );
                 self.texture = None;
                 self.last_image = None;
                 self.sculpt_texture = None;
@@ -1969,7 +2067,7 @@ impl VistaForgeApp {
                     self.heightfield.height()
                 );
                 self.sync_from_project();
-                self.sync_orbit_from_camera();
+                self.adopt_view_after_terrain_change();
                 self.mark_dirty();
                 self.start_render(ctx.clone(), false);
             }
@@ -2274,6 +2372,19 @@ impl VistaForgeApp {
                     &mut self.project.erosion_enabled,
                     "Hydraulic + thermal erosion",
                 );
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(
+                        &mut self.preserve_view,
+                        "Conserver la caméra après génération / import",
+                    )
+                    .on_hover_text(
+                        "Garde l'angle, la distance et le zoom de la vue courante : le pivot se replace au centre du nouveau terrain. Décochez pour recadrer automatiquement.",
+                    );
+                    if ui.button("Recadrer").clicked() {
+                        self.auto_frame();
+                        self.mark_camera_dirty();
+                    }
+                });
                 if ui
                     .add_sized(
                         [ui.available_width(), 28.0],
@@ -2495,7 +2606,7 @@ impl VistaForgeApp {
                         changed = true;
                     }
                     if ui.button("Aperçu").clicked() {
-                        self.start_render(ctx.clone(), false);
+                        self.start_quality_preview(ctx.clone());
                     }
                 });
             });
@@ -2835,7 +2946,7 @@ impl VistaForgeApp {
                     .add(egui::Button::new("Rendre l'aperçu à jour"))
                     .clicked()
                 {
-                    self.start_render(ctx.clone(), false);
+                    self.start_quality_preview(ctx.clone());
                 }
             });
         self.help.register(
@@ -3532,10 +3643,18 @@ impl VistaForgeApp {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut m.texture_path)
-                                .desired_width(ui.available_width() - 72.0)
+                                .desired_width((ui.available_width() - 150.0).max(60.0))
                                 .hint_text("roche.png · albedo.jpg"),
                         )
                         .changed();
+                    if ui.button("Parcourir").clicked() {
+                        self.file_picker.open(
+                            file_picker::PickTarget::Texture,
+                            file_picker::PickMode::OpenFile,
+                            &m.texture_path,
+                            &["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+                        );
+                    }
                     if ui.button("Effacer").clicked() {
                         m.texture_path.clear();
                         changed = true;
@@ -6768,6 +6887,33 @@ impl VistaForgeApp {
             help_topic_for_workspace(self.workspace),
         );
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                self.preview_quality_picker(ui);
+                if ui
+                    .button("Aperçu")
+                    .on_hover_text(
+                        "Relance l'aperçu CPU à la qualité choisie. « Finale » rend à la résolution de sortie.",
+                    )
+                    .clicked()
+                {
+                    self.start_quality_preview(ctx.clone());
+                }
+                if ui
+                    .selectable_label(self.compare.enabled, "Avant/Après")
+                    .on_hover_text(
+                        "Compare le rendu CPU figé à l'état courant, directement depuis ce panneau.",
+                    )
+                    .clicked()
+                {
+                    if self.compare.enabled {
+                        self.compare_apply(ctx);
+                    } else {
+                        self.cpu_preview_forced = true;
+                        self.compare_start(ctx);
+                    }
+                }
+            });
+            ui.separator();
             match self.workspace {
                 Workspace::Help => {}
                 Workspace::Terrain => self.terrain_ui(ui, ctx),
@@ -6808,6 +6954,10 @@ impl VistaForgeApp {
             file_picker::PickTarget::ExportTerrain => self.files_export_path = path,
             file_picker::PickTarget::Animation => self.anim_io_path = path,
             file_picker::PickTarget::BlenderDir => self.blender_export_dir = path,
+            file_picker::PickTarget::Texture => {
+                self.project.materials.texture_path = path;
+                self.mark_dirty();
+            }
         }
     }
 
@@ -7655,10 +7805,10 @@ impl VistaForgeApp {
                     }
                     if ui
                         .button("Preview")
-                        .on_hover_text("Aperçu CPU à la résolution adaptative courante")
+                        .on_hover_text("Aperçu CPU à la qualité choisie dans le panneau")
                         .clicked()
                     {
-                        self.start_render(ctx.clone(), false);
+                        self.start_quality_preview(ctx.clone());
                     }
                 });
                 if self.render_task.as_ref().is_some_and(|task| task.full) {
@@ -9940,6 +10090,15 @@ mod preview_tests {
             scale = next;
         }
         assert!((scale - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn preview_quality_levels_are_ordered() {
+        assert!(PreviewQuality::Draft.scale() < PreviewQuality::Normal.scale());
+        assert!(PreviewQuality::Normal.scale() < PreviewQuality::High.scale());
+        assert_eq!(PreviewQuality::High.scale(), 1.0);
+        assert_eq!(PreviewQuality::Final.scale(), 1.0);
+        assert_eq!(PreviewQuality::ALL.len(), 4);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub enum PickTarget {
     ExportTerrain,
     Animation,
     BlenderDir,
+    Texture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

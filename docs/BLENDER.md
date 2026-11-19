@@ -88,10 +88,12 @@ ses propres textures par matériau et utiliser les masques pour les mélanges.
 ### Maillage adaptatif et quads
 
 Le menu **Détail** propose **Adapter localement le maillage à la forme** et une
-**tolérance géométrique** en mètres. Les blocs plats deviennent de grandes
-faces, les crêtes et falaises reçoivent les sommets ; les raccords 2:1 sont
-cousus sans trous. Les UV restent la projection monde, donc la texture ne se
-casse pas aux transitions.
+**tolérance géométrique** en mètres. Le niveau suit l'**écart au plan local**
+(angle des faces / courbure) : une pente raide mais lisse reste grossière, une
+crête pointue est subdivisée. Le déplacement de matière est inclus dans la
+fonction de hauteur de la **seconde passe** ; les raccords 2:1 sont cousus sans
+trous et les UV restent la projection monde, donc la texture ne se casse pas
+aux transitions.
 
 Le même panneau propose **Exporter en quads / n-gons**. Le GLB reste triangulé
 (le format glTF ne connaît pas les quads), mais `scene.obj` conserve les faces

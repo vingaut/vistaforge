@@ -52,7 +52,10 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   (comme les couches adaptatives d'un slicer), tolérance en mètres, UV monde
   continues, export OBJ à quads pour Blender.
 - **Navigation** : orbite, zoom et **pan** (clic droit, molette ou Maj+glisser) ;
-  vue CPU complète et **comparateur avant/après** à ligne déplaçable.
+  vue CPU complète, **aperçus Brouillon/Normal/Haute/Finale** et **comparateur
+  avant/après** à ligne déplaçable, disponible dans tous les panneaux. La
+  caméra d'inspection est conservée lors des générations, imports, annulations
+  et retours arrière.
   ![Comparateur avant/après](docs/screenshots/compare.png)
 - **Grands mondes** : heightfield jusqu'à 16 384², tuilage N×M avec flips/rotations,
   mode **seamless** (correction des quatre bords + variation macro), et modes de rendu

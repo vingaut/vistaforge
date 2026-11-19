@@ -112,31 +112,55 @@ pub fn export_project(
     // are part of the scene, not a renderer-only trick.
     let export_hf = prepare_surface(project, hf)?;
     let sampler = DetailSampler::new(&export_hf, &project.detail, project.seed);
-    let mut mesh = if project.detail.adaptive {
-        vf_mesh::build_shape_adaptive(
+    let material_texture = vf_material::RockTexture::load(&project.materials.texture_path);
+    let material_displacement = project.materials.enabled
+        && (project.materials.displacement_m > 0.0
+            || project.materials.texture_displacement_m > 0.0);
+    let material_sampler = material_displacement.then(|| {
+        vf_material::MaterialSampler::new(
             &sampler,
-            options.subdivision.clamp(1, 8),
-            project.detail.adaptive_tolerance_m,
+            &project.materials,
+            project.seed,
+            material_texture.as_ref(),
+        )
+    });
+    let subdivision = if material_displacement {
+        options.subdivision.clamp(1, 8).max(2)
+    } else {
+        options.subdivision.clamp(1, 8)
+    };
+    let tolerance = if material_displacement {
+        let amplitude = project
+            .materials
+            .displacement_m
+            .max(project.materials.texture_displacement_m);
+        project
+            .detail
+            .adaptive_tolerance_m
+            .min((amplitude * 0.75).max(0.05))
+    } else {
+        project.detail.adaptive_tolerance_m
+    };
+    let mut mesh = if project.detail.adaptive {
+        let surface: &dyn vf_mesh::SurfaceSampler = match &material_sampler {
+            Some(sampler) => sampler,
+            None => &sampler,
+        };
+        vf_mesh::build_shape_adaptive(
+            surface,
+            subdivision,
+            tolerance,
             options.max_vertices.max(1024),
         )
     } else {
-        vf_mesh::build(
-            &sampler,
-            options.subdivision.clamp(1, 8),
-            options.max_vertices.max(1024),
-            None,
-        )
+        vf_mesh::build(&sampler, subdivision, options.max_vertices.max(1024), None)
     };
-    if project.materials.enabled
-        && (project.materials.displacement_m > 0.0
-            || project.materials.texture_displacement_m > 0.0)
-    {
-        let texture = vf_material::RockTexture::load(&project.materials.texture_path);
+    if !project.detail.adaptive && material_displacement {
         vf_material::displace(
             &mut mesh,
             &project.materials,
             project.seed,
-            texture.as_ref(),
+            material_texture.as_ref(),
         );
     }
     let built = build_scene(project, &export_hf, &mesh, options)?;

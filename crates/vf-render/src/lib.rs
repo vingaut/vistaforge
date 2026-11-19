@@ -390,6 +390,18 @@ fn build_scene(
         vf_core::DetailSettings::default()
     };
     let sampler = vf_detail::DetailSampler::new(hf, &detail_settings, project.seed);
+    let material_texture = vf_material::RockTexture::load(&project.materials.texture_path);
+    let material_displacement = project.materials.enabled
+        && (project.materials.displacement_m > 0.0
+            || project.materials.texture_displacement_m > 0.0);
+    let material_sampler = material_displacement.then(|| {
+        vf_material::MaterialSampler::new(
+            &sampler,
+            &project.materials,
+            project.seed,
+            material_texture.as_ref(),
+        )
+    });
     let mesh_view = vf_mesh::View {
         camera: [
             project.camera.position.x,
@@ -402,35 +414,47 @@ fn build_scene(
     // Adaptive LOD pays for its block/skirt bookkeeping on large grids; on a
     // small tile the uniform mesh is both simpler and faster.
     let use_adaptive = options.adaptive && hf.sample_count() >= 2_000_000;
-    let subdivision = u32::from(options.subdivision.max(1));
+    let base_subdivision = u32::from(options.subdivision.max(1));
+    // Displacement lives below the base cell size. When it is active, raise
+    // the maximum subdivision and tighten the tolerance so the adaptive pass
+    // resolves the displaced surface instead of shearing it into spikes.
+    let subdivision = if material_displacement {
+        base_subdivision.max(2)
+    } else {
+        base_subdivision
+    };
+    let adaptive_tolerance = if material_displacement {
+        let amplitude = project
+            .materials
+            .displacement_m
+            .max(project.materials.texture_displacement_m);
+        detail_settings
+            .adaptive_tolerance_m
+            .min((amplitude * 0.75).max(0.05))
+    } else {
+        detail_settings.adaptive_tolerance_m
+    };
     let mut mesh = if detail_settings.adaptive {
         // Shape-adaptive path: spend vertices where the surface bends, keep
-        // large quads on flats. This follows the same recipe as adaptive layer
-        // height in a slicer, applied to the 2.5D terrain.
-        vf_mesh::build_shape_adaptive(
-            &sampler,
-            subdivision,
-            detail_settings.adaptive_tolerance_m,
-            MAX_MESH_VERTICES,
-        )
+        // large quads on flats. The material sampler is the second pass: the
+        // builder sees the displaced surface, not the bare heightfield.
+        let surface: &dyn vf_mesh::SurfaceSampler = match &material_sampler {
+            Some(sampler) => sampler,
+            None => &sampler,
+        };
+        vf_mesh::build_shape_adaptive(surface, subdivision, adaptive_tolerance, MAX_MESH_VERTICES)
     } else if use_adaptive {
         vf_mesh::build_adaptive(&sampler, subdivision, MAX_MESH_VERTICES, mesh_view)
     } else {
         vf_mesh::build(&sampler, subdivision, MAX_MESH_VERTICES, Some(mesh_view))
     };
-    // Material displacement is applied to the render mesh, after the detail
-    // surface and before normals/lighting. The same helper is used by the
-    // Blender exporter, so the preview and the exported geometry agree.
-    if project.materials.enabled
-        && (project.materials.displacement_m > 0.0
-            || project.materials.texture_displacement_m > 0.0)
-    {
-        let texture = vf_material::RockTexture::load(&project.materials.texture_path);
+    if !detail_settings.adaptive && material_displacement {
+        // Uniform grid: apply the material displacement after meshing.
         vf_material::displace(
             &mut mesh,
             &project.materials,
             project.seed,
-            texture.as_ref(),
+            material_texture.as_ref(),
         );
     }
 
@@ -501,7 +525,7 @@ fn build_scene(
             detail_settings.focus_center[0].clamp(ox, x1),
             detail_settings.focus_center[1].clamp(oy, y1),
         ];
-        let patch = vf_mesh::build_focus_patch(
+        let mut patch = vf_mesh::build_focus_patch(
             &sampler,
             center,
             detail_settings.focus_size_m,
@@ -509,6 +533,14 @@ fn build_scene(
             2_500_000,
             Some(mesh_view),
         );
+        if material_displacement {
+            vf_material::displace(
+                &mut patch,
+                &project.materials,
+                project.seed,
+                material_texture.as_ref(),
+            );
+        }
         let base_index = vertices.len() as u32;
         for (index, position) in patch.positions.iter().enumerate() {
             let pos = Vec3::new(

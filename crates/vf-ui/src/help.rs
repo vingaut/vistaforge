@@ -204,7 +204,7 @@ impl HelpTopic {
                 "Le bouton Render produit l'image finale CPU, déterministe, indépendante du viewport GPU. C'est aussi ce rendu qui sert à l'export de séquence."
             }
             Self::Adaptive => {
-                "Pendant une interaction, l'aperçu CPU baisse sa résolution puis se raffine dès que la main s'arrête, pour rester fluide sans sacrifier l'image finale."
+                "Chaque panneau propose un niveau d'aperçu Brouillon / Normal / Haute / Finale. L'aperçu adaptatif baisse sa résolution pendant l'interaction puis se raffine dès que la main s'arrête ; « Finale » rend à la résolution de sortie."
             }
             Self::Gpu => {
                 "Le viewport GPU dessine le relief en temps réel via wgpu (Vulkan ou Metal). C'est un aperçu de navigation : il ne modifie jamais le rendu final."
@@ -319,7 +319,7 @@ impl HelpTopic {
             ],
             Self::Detail => &[
                 "Le profil de roche choisit les couches de détail (sillons, arêtes, cratères, exfoliation).",
-                "Maillage adaptatif : les blocs plats deviennent de grandes faces, les crêtes reçoivent les sommets ; la tolérance borne l'erreur en mètres. Les raccords sont cousus et les UV monde restent continues.",
+                "Maillage adaptatif : le niveau suit l'écart au plan local (angle des faces / courbure). Une pente raide mais lisse reste économe, une crête pointue est subdivisée ; le déplacement de matière est inclus dans la seconde passe. Les raccords sont cousus et les UV monde restent continues.",
                 "Quads / n-gons : le GLB reste triangulé, mais scene.obj conserve les quads pour Blender.",
                 "La densité du maillage subdivise encore la grille (1× à 8×) sans changer le heightfield.",
                 "Le patch de gros plan ajoute un maillage fin à 2–50 cm de pas sous la caméra.",
@@ -346,7 +346,7 @@ impl HelpTopic {
             ],
             Self::Materials => &[
                 "Les presets de roche (granite, basalte, calcaire, grès, schiste, craie, volcanique) changent la teinte, les bancs, les fissures et le grain.",
-                "Le bump perturbe la normale ; le déplacement ajoute de la géométrie au maillage CPU et Blender.",
+                "Le bump perturbe la normale ; le déplacement ajoute de la géométrie verticale au maillage CPU et Blender, et l'adaptatif le prend en compte dans sa seconde passe.",
                 "Une texture personnelle (chemin ou pinceau intégré) est projetée en XY monde : sa luminance sert au bump et au déplacement.",
                 "Neige et végétation restent des masques : couverture, pente et altitude se combinent.",
                 "L'étagement règle la ligne de neige, la limite des arbres et la plage.",

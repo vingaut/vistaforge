@@ -11,7 +11,7 @@ Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail
 
 ## 0novodecies. Session du 19 novembre — heightmap, animation, détail adaptatif, matières, pan et avant/après (LIVRÉ)
 
-> **État : livré, testé, non poussé.** `cargo test --workspace` : **262 tests
+> **État : livré, testé, non poussé.** `cargo test --workspace` : **268 tests
 > verts** ; `clippy -D warnings` propre ; `cargo fmt` appliqué. Le plan de
 > travail et son journal sont dans [`PLAN_ACTIF.md`](PLAN_ACTIF.md).
 
@@ -113,6 +113,38 @@ Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail
   `--texture`, `--texture-scale`, `--texture-bump`,
   `--texture-displacement`, `--texture-mix`, `--no-shape-adaptive`,
   `--adaptive-tolerance`, `--quads`.
+
+### Deuxième passe (même session, retour utilisateur)
+
+- **Caméra** : un point de vue d'inspection n'est plus perdu après une
+  génération/import/composition (case **Conserver la caméra**, bouton
+  **Recadrer**), après **Annuler/Rétablir**, ni après **Revenir** dans le
+  comparateur. Le pivot se replace au centre du nouveau terrain, l'angle, la
+  distance et le zoom restent ceux de l'utilisateur.
+- **Maillage adaptatif** : le niveau n'est plus piloté par le relief brut mais
+  par l'**écart au plan local** (courbure / angle des faces). Une paroi raide
+  mais lisse reste économe ; une crête pointue est subdivisée. Test
+  `a_planar_slope_is_not_over_subdivided`.
+- **Deuxième passe après bump/displacement** : `MaterialSampler` implémente
+  `SurfaceSampler` et inclut le déplacement de matière dans la fonction de
+  hauteur vue par le constructeur adaptatif. La tolérance est resserrée et la
+  subdivision minimale portée à ×2 quand un déplacement est actif.
+- **Déplacement vertical** : le déplacement de matière se fait en Z et non le
+  long de la normale ; les aiguilles triangulaires sur les pentes raides
+  disparaissent.
+- **Empreinte constante** : tous les sommets adaptatifs utilisent la même
+  empreinte d'échantillonnage, donc les arêtes partagées entre blocs ont la
+  même hauteur. Test d'étanchéité avec détail actif
+  (`detailed_adaptive_mesh_has_no_cracks_on_block_edges`).
+- **Qualité d'aperçu** : sélecteur **Brouillon / Normal / Haute / Finale**
+  affiché en haut de chaque panneau, avec bouton **Aperçu** ; les boutons
+  existants (Modificateurs, Détail, Rendu) utilisent ce niveau.
+- **Comparateur global** : bouton **Avant/Après** dans tous les panneaux, y
+  compris Modificateurs, Roche et Érosion.
+- **Sélecteur de fichier** pour la texture personnelle (PNG/JPEG/TIFF/BMP).
+
+Validation : **268 tests**, clippy propre, rendu de contrôle sur falaise
+(`/tmp/close_crack.png`) sans forêt de triangles ni couture noire.
 
 ### Fichiers touchés (principaux)
 

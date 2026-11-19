@@ -12,7 +12,8 @@ depuis la source de ce dépôt avec `cargo build --release --workspace`.
 Tailles : CLI 6,7 Mo, interface 27 Mo, serveur MCP 5,3 Mo. Binaires
 `strip`és. Les trois binaires ont été reconstruits le 19 novembre 2026 depuis
 l'arbre de travail courant (heightmap nord-en-haut, animation AGL, maillage
-adaptatif/quads, matières procédurales, pan et avant/après).
+adaptatif par courbure, matières procédurales, caméra conservée, qualités
+d'aperçu, pan et comparateur avant/après dans tous les panneaux).
 Construits avec `cargo build --release --workspace` (Rust 1.99.1).
 
 ## Utilisation

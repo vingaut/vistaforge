@@ -6,8 +6,9 @@
 //! describe the same rock.
 
 use glam::{Vec2, Vec3};
-use vf_core::{Materials, Project, Rgb, Seed};
-use vf_mesh::MeshData;
+use vf_core::{HeightField, Materials, Project, Rgb, Seed};
+use vf_detail::DetailSampler;
+use vf_mesh::{MeshData, SurfaceSampler};
 use vf_procgen::Noise;
 
 /// A loaded custom texture. Kept linear and small enough for per-pixel
@@ -257,6 +258,95 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Height offset of the material at one world point.
+pub fn displacement_at(
+    materials: &Materials,
+    texture: Option<&RockTexture>,
+    x: f32,
+    y: f32,
+    noise: &Noise,
+) -> f32 {
+    let procedural = materials.displacement_m.max(0.0);
+    let textured = materials.texture_displacement_m.max(0.0);
+    if procedural <= 1e-4 && textured <= 1e-4 {
+        return 0.0;
+    }
+    let scale = materials.bump_scale_m.max(0.05);
+    let texture_scale = materials.texture_scale_m.max(0.1);
+    let mut offset = 0.0;
+    if procedural > 0.0 {
+        offset += noise.fbm2(x / scale, y / scale, 4, 2.0, 0.5) * procedural;
+    }
+    if textured > 0.0
+        && let Some(texture) = texture
+    {
+        offset += (texture.luminance(x / texture_scale, y / texture_scale) - 0.5) * 2.0 * textured;
+    }
+    offset
+}
+
+/// Adapts a `DetailSampler` to include the material's vertical displacement,
+/// so the shape-adaptive mesh is built on the final displaced surface (the
+/// second pass after bump/displacement) and resolves its grain.
+pub struct MaterialSampler<'a> {
+    inner: &'a DetailSampler<'a>,
+    materials: &'a Materials,
+    texture: Option<&'a RockTexture>,
+    noise: Noise,
+}
+
+impl<'a> MaterialSampler<'a> {
+    pub fn new(
+        inner: &'a DetailSampler<'a>,
+        materials: &'a Materials,
+        seed: Seed,
+        texture: Option<&'a RockTexture>,
+    ) -> Self {
+        Self {
+            inner,
+            materials,
+            texture,
+            noise: Noise::new(seed.derive("material-displacement")),
+        }
+    }
+
+    pub fn inner(&self) -> &DetailSampler<'a> {
+        self.inner
+    }
+
+    fn offset(&self, x: f64, y: f64) -> f32 {
+        displacement_at(
+            self.materials,
+            self.texture,
+            x as f32,
+            y as f32,
+            &self.noise,
+        )
+    }
+}
+
+impl SurfaceSampler for MaterialSampler<'_> {
+    fn height(&self, x: f64, y: f64, footprint_m: f32) -> f32 {
+        self.inner.height(x, y, footprint_m) + self.offset(x, y)
+    }
+
+    fn normal(&self, x: f64, y: f64, footprint_m: f32) -> [f32; 3] {
+        let eps = f64::from((footprint_m * 2.0).clamp(0.35, 80.0));
+        let hx = f64::from(self.height(x + eps, y, footprint_m))
+            - f64::from(self.height(x - eps, y, footprint_m));
+        let hy = f64::from(self.height(x, y + eps, footprint_m))
+            - f64::from(self.height(x, y - eps, footprint_m));
+        let dx = (hx / (2.0 * eps)) as f32;
+        let dy = (hy / (2.0 * eps)) as f32;
+        let inv = 1.0 / (dx * dx + dy * dy + 1.0).sqrt();
+        [-dx * inv, -dy * inv, inv]
+    }
+
+    fn height_field(&self) -> &HeightField {
+        self.inner.height_field()
+    }
+}
+
 /// Apply material displacement to a built mesh. Two layers:
 /// * a procedural fractal shared by all presets (cheap, always coherent);
 /// * the custom texture luminance, sampled in world XY at `texture_scale_m`.
@@ -275,27 +365,14 @@ pub fn displace(
         return;
     }
     let noise = Noise::new(project_seed.derive("material-displacement"));
-    let scale = materials.bump_scale_m.max(0.05);
-    let texture_scale = materials.texture_scale_m.max(0.1);
-    for (index, position) in mesh.positions.iter_mut().enumerate() {
-        let normal = Vec3::from_array(mesh.normals[index]);
-        let mut offset = 0.0;
-        if procedural > 0.0 {
-            offset +=
-                noise.fbm2(position[0] / scale, position[1] / scale, 4, 2.0, 0.5) * procedural;
-        }
-        if textured > 0.0
-            && let Some(texture) = texture
-        {
-            let u = position[0] / texture_scale;
-            let v = position[1] / texture_scale;
-            offset += (texture.luminance(u, v) - 0.5) * 2.0 * textured;
-        }
+    for position in mesh.positions.iter_mut() {
+        let offset = displacement_at(materials, texture, position[0], position[1], &noise);
         if offset.abs() > 1e-6 {
-            let p = normal * offset;
-            position[0] += p.x;
-            position[1] += p.y;
-            position[2] += p.z;
+            // Heightfield displacement is vertical. Moving along the vertex
+            // normal on a coarse steep slope made the mesh explode into
+            // triangular fins; vertical displacement keeps the surface
+            // single-valued and the recomputed normal coherent.
+            position[2] += offset;
         }
     }
     mesh.recompute_normals();
@@ -330,6 +407,41 @@ mod tests {
         assert!(distance(granite, basalt) > 0.05);
         assert!(distance(granite, sandstone) > 0.05);
         assert!(distance(basalt, sandstone) > 0.05);
+    }
+
+    #[test]
+    fn adaptive_builder_sees_the_material_displacement() {
+        use vf_core::{DetailSettings, Seed};
+        use vf_detail::DetailSampler;
+        use vf_mesh::build_shape_adaptive;
+
+        let width = 65usize;
+        let hf = vf_core::HeightField::new(width, width, 10.0, 10.0, vec![0.0f32; width * width])
+            .unwrap();
+        let detail = DetailSettings::default();
+        let inner = DetailSampler::new(&hf, &detail, Seed::new(7));
+        let materials = Materials {
+            displacement_m: 8.0,
+            bump_scale_m: 9.0,
+            ..Materials::default()
+        };
+        let sampler = MaterialSampler::new(&inner, &materials, Seed::new(7), None);
+        let mesh = build_shape_adaptive(&sampler, 2, 0.5, 500_000);
+        let max_z = mesh
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_z = mesh
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            max_z - min_z > 1.0,
+            "material displacement was not visible to the adaptive builder: {min_z}..{max_z}"
+        );
+        assert!(mesh.polygons.len() > 16);
     }
 
     #[test]

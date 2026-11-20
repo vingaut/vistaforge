@@ -724,7 +724,7 @@ struct RenderArgs {
     /// Close-up patch vertex spacing, metres.
     #[arg(long)]
     detail_focus_spacing: Option<f32>,
-    /// Shader micro-normal strength (0 disables it).
+    /// Legacy alias for the material bump strength (0 disables it).
     #[arg(long)]
     detail_normal: Option<f32>,
     /// Large-scale detail patchiness (0..1), breaks layer repetition.
@@ -2210,7 +2210,7 @@ fn run_render(args: RenderArgs) -> Result<()> {
         project.detail.enabled = true;
     }
     if let Some(strength) = args.detail_normal {
-        project.materials.detail_normal = strength;
+        project.materials.bump_strength = strength;
     }
     if let Some(name) = &args.rock_material {
         let key = name.trim().to_ascii_lowercase();

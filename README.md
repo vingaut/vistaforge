@@ -52,11 +52,9 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   (comme les couches adaptatives d'un slicer), tolérance en mètres, UV monde
   continues, export OBJ à quads pour Blender.
 - **Navigation** : orbite, zoom et **pan** (clic droit, molette ou Maj+glisser) ;
-  vue CPU complète, **aperçus Brouillon/Normal/Haute/Finale** et **comparateur
-  avant/après** à ligne déplaçable, disponible dans tous les panneaux. La
-  caméra d'inspection est conservée lors des générations, imports, annulations
-  et retours arrière.
-  ![Comparateur avant/après](docs/screenshots/compare.png)
+  bascule **GPU / CPU** et **aperçus Brouillon/Normal/Haute/Finale**. La caméra
+  d'inspection est conservée lors des générations, imports, annulations et
+  retours arrière.
 - **Grands mondes** : heightfield jusqu'à 16 384², tuilage N×M avec flips/rotations,
   mode **seamless** (correction des quatre bords + variation macro), et modes de rendu
   `fast` / `refined` / `photoreal`. Voir [`docs/MONDE.md`](docs/MONDE.md).
@@ -203,6 +201,8 @@ le CLI et le MCP partagent le même noyau que l'interface.
 | [`docs/QUALITE_ECARTS.md`](docs/QUALITE_ECARTS.md) | analyse des écarts, plan qualité, essais négatifs |
 | [`docs/ETAT_ET_REPRISE.md`](docs/ETAT_ET_REPRISE.md) | état du projet et reprise |
 | [`docs/PLAN_ACTIF.md`](docs/PLAN_ACTIF.md) | plan de la session en cours et journal d'avancement |
+| [`docs/SESSION_2026-11-20.md`](docs/SESSION_2026-11-20.md) | reprise de la session du 20 novembre (simplification UI, relief procédural) |
+| [`docs/RECHERCHE_SURFACES_ROCHEUSES.md`](docs/RECHERCHE_SURFACES_ROCHEUSES.md) | signatures géologiques et algorithmes de relief procédural |
 | [`docs/SPEC_REALISME.md`](docs/SPEC_REALISME.md) | contrat et faisabilité de la session réalisme |
 | [`docs/RIG.md`](docs/RIG.md) | rig caméra, presets de dynamique, contraintes, CLI |
 | [`docs/MONDE.md`](docs/MONDE.md) | tailles, tuilage, seamless, modes de rendu, évitement |

@@ -13,6 +13,9 @@ barre de lecture restent visibles dans tous les onglets.
 
 1. **Tracé** — dessiner et éditer le chemin de la caméra et la cible.
 2. **Réglages** — durée, cadence, optique, contraintes.
+   Le bouton **Réinitialiser l'animation**, sous les onglets, remet le rig par
+   défaut sans toucher à la caméra de vue ; Ctrl+Z restaure l'ancienne
+   animation.
 3. **Profil** — choisir le corps et comparer les dynamiques.
 4. **Lecture** — jouer l'animation, rendre une image ou exporter la séquence.
 

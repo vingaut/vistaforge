@@ -679,10 +679,10 @@ pub fn build_shape_adaptive<S: SurfaceSampler + ?Sized>(
             let c01 = sample_at(0.0, 1.0);
             let c11 = sample_at(1.0, 1.0);
             let mut error = 0.0f32;
-            for iy in 0..=8 {
-                let v = iy as f64 / 8.0;
-                for ix in 0..=8 {
-                    let u = ix as f64 / 8.0;
+            for iy in 0..=4 {
+                let v = iy as f64 / 4.0;
+                for ix in 0..=4 {
+                    let u = ix as f64 / 4.0;
                     let z = f64::from(sample_at(u, v));
                     let predicted = f64::from(c00) * (1.0 - u) * (1.0 - v)
                         + f64::from(c10) * u * (1.0 - v)
@@ -699,28 +699,33 @@ pub fn build_shape_adaptive<S: SurfaceSampler + ?Sized>(
         }
     }
 
-    // Vertex budget: coarsen the currently densest blocks.
-    let estimate = |levels: &[u8]| -> usize {
-        levels
-            .iter()
-            .map(|&level| {
-                let n = (1usize << level) + 1;
-                n * n
-            })
-            .sum()
+    // Vertex budget: coarsen the densest blocks. Buckets by level avoid
+    // re-scanning every block on a 8192² terrain for each decrement.
+    let cost = |level: u8| -> usize {
+        let n = (1usize << level) + 1;
+        n * n
     };
-    while estimate(&levels) > max_vertices.max(1024) {
-        let mut best: Option<(usize, u8)> = None;
-        for (index, &level) in levels.iter().enumerate() {
-            if level == 0 {
-                continue;
-            }
-            if best.is_none_or(|(_, current)| level > current) {
-                best = Some((index, level));
-            }
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    let mut total = 0usize;
+    for (index, &level) in levels.iter().enumerate() {
+        buckets[level as usize].push(index);
+        total += cost(level);
+    }
+    let budget = max_vertices.max(1024);
+    let mut top = max_level;
+    while total > budget {
+        while top > 0 && buckets[top].is_empty() {
+            top -= 1;
         }
-        let Some((index, _)) = best else { break };
-        levels[index] -= 1;
+        if top == 0 {
+            break;
+        }
+        let Some(index) = buckets[top].pop() else {
+            break;
+        };
+        total = total - cost(top as u8) + cost((top - 1) as u8);
+        levels[index] = (top - 1) as u8;
+        buckets[top - 1].push(index);
     }
 
     // 2:1 balance makes every block boundary need at most one midpoint per

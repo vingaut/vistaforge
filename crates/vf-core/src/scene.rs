@@ -643,6 +643,14 @@ pub const ROCK_PRESETS: &[&str] = &[
     "schist",
     "chalk",
     "volcanic",
+    "chert",
+    "andesite",
+    "marble",
+    "phyllite",
+    "slate",
+    "gneiss",
+    "conglomerate",
+    "travertine",
 ];
 
 /// Surface material mix used by the renderer. Masks are procedural; the
@@ -697,7 +705,7 @@ impl Default for Materials {
         Self {
             enabled: true,
             rock: 0.8,
-            detail_normal: 0.45,
+            detail_normal: 0.0,
             detail_scale_m: 18.0,
             scree: 0.4,
             scree_slope: 0.42,
@@ -706,12 +714,12 @@ impl Default for Materials {
             vegetation: 0.74,
             wetness: 0.3,
             rock_preset: "generic".into(),
-            bump_strength: 0.6,
+            bump_strength: 0.0,
             bump_scale_m: 7.0,
             displacement_m: 0.0,
             texture_path: String::new(),
             texture_scale_m: 80.0,
-            texture_bump: 0.5,
+            texture_bump: 0.0,
             texture_displacement_m: 0.0,
             texture_mix: 0.8,
         }
@@ -925,8 +933,8 @@ impl RenderSettings {
         if !(1..=3).contains(&self.ssaa) {
             return Err("ssaa must be 1, 2 or 3".into());
         }
-        if !(1..=4).contains(&self.subdivision) {
-            return Err("render subdivision must be in 1..=4".into());
+        if !(1..=8).contains(&self.subdivision) {
+            return Err("render subdivision must be in 1..=8".into());
         }
         if !self.cliff_warp.is_finite() || !(0.0..=1.0).contains(&self.cliff_warp) {
             return Err("cliff_warp must be in 0..=1".into());
@@ -968,6 +976,15 @@ mod tests {
         s.azimuth_deg_from_south = 180.0;
         s.declination_deg = 90.0;
         assert!((s.direction() - DVec3::Z).length() < 1e-9);
+    }
+
+    #[test]
+    fn default_materials_do_not_add_surface_noise() {
+        let m = Materials::default();
+        assert_eq!(m.bump_strength, 0.0);
+        assert_eq!(m.detail_normal, 0.0);
+        assert_eq!(m.displacement_m, 0.0);
+        m.validate().unwrap();
     }
 
     #[test]

@@ -141,7 +141,7 @@ impl HelpTopic {
                 "Le cube donne l'orientation de la scène. Cliquez une face ou un axe pour cadrer, la maison pour revenir au cadrage par défaut."
             }
             Self::Transport => {
-                "La barre de lecture reste ancrée en bas du viewport : elle permet de lancer l'animation depuis n'importe quel onglet, sans chercher un bouton dans le panneau."
+                "La barre de lecture reste ancrée en bas du viewport : elle permet de lancer l'animation depuis n'importe quel onglet. « Réinitialiser l'animation » est dans l'en-tête de l'espace Animation."
             }
             Self::Path => {
                 "Le tracé cyan est la trajectoire de la caméra. Les clés C0, C1… portent chacune un temps et une position 3D ; la courbe passe par toutes."
@@ -162,7 +162,7 @@ impl HelpTopic {
                 "Le profil ne change pas le tracé : il change la façon dont le corps suit ce tracé (inertie, accélérations, roulis, secousses). C'est là que se joue la différence drone / hélicoptère / dirigeable."
             }
             Self::Preview => {
-                "La lecture anime la caméra dans le viewport. On peut régler le temps à la main, changer la vitesse et basculer entre vue design et vue caméra."
+                "La lecture anime la caméra dans le viewport. On peut régler le temps à la main, changer la vitesse et basculer entre vue design et vue caméra. « Réinitialiser l'animation » efface tracé, cible et réglages du rig ; Ctrl+Z permet de revenir."
             }
             Self::Export => {
                 "L'espace Fichiers échange le terrain (GeoTIFF, ASCII, DEM, PNG/JPEG), exporte la scène pour Blender (GLB + textures) et les trajectoires seules (.vfcam, GLB, CSV). La séquence PNG reste dans l'onglet Lecture."
@@ -320,10 +320,12 @@ impl HelpTopic {
             Self::Detail => &[
                 "Le profil de roche choisit les couches de détail (sillons, arêtes, cratères, exfoliation).",
                 "Maillage adaptatif : le niveau suit l'écart au plan local (angle des faces / courbure). Une pente raide mais lisse reste économe, une crête pointue est subdivisée ; le déplacement de matière est inclus dans la seconde passe. Les raccords sont cousus et les UV monde restent continues.",
+                "Géométrie de surface : tafoni/nids d'abeille, bancs différentiels, joints et oolithes déplacent réellement le relief, y compris dans le maillage adaptatif et l'export Blender.",
+                "Tolérance jusqu'à 0,001 m et densité jusqu'à 8× ; « Défaut maillage » et « Réinitialiser le détail » reviennent à l'état propre.",
                 "Quads / n-gons : le GLB reste triangulé, mais scene.obj conserve les quads pour Blender.",
                 "La densité du maillage subdivise encore la grille (1× à 8×) sans changer le heightfield.",
                 "Le patch de gros plan ajoute un maillage fin à 2–50 cm de pas sous la caméra.",
-                "Le viewport GPU affiche le détail ; l'avant/après CPU montre le rendu exact. Trop de détail à distance produit du bruit : l'empreinte pixel limite la fréquence.",
+                "Le viewport GPU affiche le détail ; la vue CPU montre le rendu exact. Trop de détail à distance produit du bruit : l'empreinte pixel limite la fréquence.",
             ],
             Self::Sculpt => &[
                 "Le module travaille à la résolution du heightfield : à 25 m/cellule, un banc de 8 m ne peut pas être sculpté. Densifiez ×2 avant les terrasses fines.",
@@ -345,7 +347,8 @@ impl HelpTopic {
                 "Désactiver l'eau est le moyen le plus rapide de vérifier une vallée.",
             ],
             Self::Materials => &[
-                "Les presets de roche (granite, basalte, calcaire, grès, schiste, craie, volcanique) changent la teinte, les bancs, les fissures et le grain.",
+                "Les presets de roche (granite, basalte, calcaire, grès, schiste, craie, volcanique, chert, andésite, marbre, phyllite, ardoise, gneiss, conglomérat, travertin) changent la teinte, les bancs, les fissures et le grain.",
+                "« Lier la géométrie de détail au preset de roche » applique aussi tafoni, bancs, joints et oolithes, sans écraser la tolérance adaptative ni les quads.",
                 "Le bump perturbe la normale ; le déplacement ajoute de la géométrie verticale au maillage CPU et Blender, et l'adaptatif le prend en compte dans sa seconde passe.",
                 "Une texture personnelle (chemin ou pinceau intégré) est projetée en XY monde : sa luminance sert au bump et au déplacement.",
                 "Neige et végétation restent des masques : couverture, pente et altitude se combinent.",

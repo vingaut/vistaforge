@@ -17,7 +17,7 @@
 //! exporter, so both see the same surface.
 
 use vf_core::{DetailSettings, HeightField, Seed};
-use vf_procgen::Noise;
+use vf_procgen::{Noise, value2};
 
 /// Evaluate the detailed surface for one base heightfield.
 #[derive(Debug, Clone)]
@@ -31,6 +31,8 @@ pub struct DetailSampler<'a> {
     crater_noise: Noise,
     exfoliation_noise: Noise,
     vesicle_noise: Noise,
+    tafoni_noise: Noise,
+    bench_noise: Noise,
     seed: u64,
     origin: (f64, f64),
     spacing: (f64, f64),
@@ -53,6 +55,8 @@ impl<'a> DetailSampler<'a> {
             crater_noise: Noise::new(derived("craters")),
             exfoliation_noise: Noise::new(derived("exfoliation")),
             vesicle_noise: Noise::new(derived("vesicles")),
+            tafoni_noise: Noise::new(derived("tafoni")),
+            bench_noise: Noise::new(derived("benches")),
             seed,
             origin,
             spacing,
@@ -149,6 +153,10 @@ impl<'a> DetailSampler<'a> {
         sum += self.craters(xw, yw, footprint, variation);
         sum += self.exfoliation(xw, yw, footprint, variation) * slope_weight;
         sum += self.vesicles(xw, yw, footprint, variation);
+        sum += self.tafoni(xw, yw, footprint, slope, variation);
+        sum += self.benches(xw, yw, footprint, slope, variation);
+        sum += self.joints(xw, yw, footprint, variation);
+        sum += self.ooliths(xw, yw, footprint, slope, variation);
         (sum * vertical * d.strength * patchiness.clamp(0.35, 1.65)).clamp(-80.0, 80.0)
     }
 
@@ -426,6 +434,122 @@ impl<'a> DetailSampler<'a> {
         let pit = smoothstep(threshold, 1.0, n);
         -v.depth_m * pit * pit * band
     }
+
+    /// Tafoni / honeycomb: warped cellular bowls on exposed faces.
+    fn tafoni(&self, x: f32, y: f32, footprint: f32, slope: f32, variation: f32) -> f32 {
+        let t = &self.settings.tafoni;
+        if !t.enabled || t.depth_m <= 0.0 || t.cell_m <= 0.0 {
+            return 0.0;
+        }
+        let band = band_limit(t.cell_m, footprint);
+        if band <= 0.0 {
+            return 0.0;
+        }
+        let cell = t.cell_m.max(0.05);
+        let warp_scale = (cell * 4.0).max(1.0);
+        let wx = self
+            .tafoni_noise
+            .fbm2(x / warp_scale, y / warp_scale, 3, 2.0, 0.5)
+            * cell
+            * 0.35;
+        let wy = self
+            .tafoni_noise
+            .fbm2(x / warp_scale + 13.0, y / warp_scale - 7.0, 3, 2.0, 0.5)
+            * cell
+            * 0.35;
+        let (f1, _, id) = cellular(x + wx, y + wy, cell, self.seed ^ 0x0007_A0F1);
+        let coverage = smoothstep(1.0 - t.coverage, 1.0, id);
+        let bowl = (1.0 - smoothstep(0.0, 0.72, f1))
+            .max(0.0)
+            .powf(1.0 + t.sharpness);
+        let rim = smoothstep(0.45, 0.62, f1) * (1.0 - smoothstep(0.62, 0.82, f1));
+        let patch = if t.patchiness > 0.0 {
+            let p = self
+                .tafoni_noise
+                .fbm01(x / (cell * 12.0), y / (cell * 12.0), 3, 2.0, 0.5);
+            (1.0 - t.patchiness) + t.patchiness * smoothstep(0.35, 0.7, p)
+        } else {
+            1.0
+        };
+        let vertical = 1.0 - t.vertical_bias + t.vertical_bias * smoothstep(0.22, 0.62, slope);
+        let scale = (0.8 + 0.4 * variation).clamp(0.5, 1.4);
+        (-t.depth_m * bowl + t.depth_m * 0.22 * rim) * coverage * patch * vertical * scale * band
+    }
+
+    /// Sedimentary beds: hard ledges and softer recesses, dipping.
+    fn benches(&self, x: f32, y: f32, footprint: f32, slope: f32, variation: f32) -> f32 {
+        let b = &self.settings.benches;
+        if !b.enabled || b.thickness_m <= 0.0 || b.relief_m <= 0.0 {
+            return 0.0;
+        }
+        let band = band_limit(b.thickness_m, footprint);
+        if band <= 0.0 {
+            return 0.0;
+        }
+        let dip = b.dip_deg.to_radians().tan();
+        let az = b.dip_azimuth_deg.to_radians();
+        let along = x * az.cos() + y * az.sin();
+        let base = self.base_height(f64::from(x), f64::from(y));
+        let s = base - dip * along;
+        let warp = self.bench_noise.fbm2(
+            x / (b.thickness_m * 5.0),
+            y / (b.thickness_m * 5.0),
+            3,
+            2.0,
+            0.5,
+        ) * b.variation;
+        let phase = s / b.thickness_m + warp;
+        let f = phase - phase.floor();
+        let riser = smoothstep(0.0, (1.0 - b.sharpness * 0.85).max(0.02), f);
+        let profile = riser - 0.5;
+        let slope_mask = smoothstep(0.12, 0.5, slope);
+        let scale = (0.75 + 0.5 * variation).clamp(0.4, 1.5);
+        b.relief_m * profile * slope_mask * scale * band
+    }
+
+    /// Two orthogonal joint sets, carved as narrow grooves.
+    fn joints(&self, x: f32, y: f32, footprint: f32, _variation: f32) -> f32 {
+        let j = &self.settings.joints;
+        if !j.enabled || j.spacing_m <= 0.0 || j.depth_m <= 0.0 {
+            return 0.0;
+        }
+        let band = band_limit(j.spacing_m, footprint);
+        if band <= 0.0 {
+            return 0.0;
+        }
+        let seed = self.seed ^ 0x0004_A017;
+        let d1 = grid_distance(x, y, j.spacing_m, j.angle_deg.to_radians(), j.jitter, seed);
+        let d2 = grid_distance(
+            x,
+            y,
+            j.spacing_m,
+            j.angle2_deg.to_radians(),
+            j.jitter,
+            seed + 31,
+        );
+        let width = j.width_m.max(0.01);
+        let seam = 1.0 - smoothstep(width * 0.35, width * 0.35 + width, d1.min(d2));
+        -j.depth_m * seam * band
+    }
+
+    /// Oolitic / bioclastic grains: rounded growths proud of the matrix.
+    fn ooliths(&self, x: f32, y: f32, footprint: f32, slope: f32, _variation: f32) -> f32 {
+        let o = &self.settings.ooliths;
+        if !o.enabled || o.radius_m <= 0.0 || o.relief_m <= 0.0 {
+            return 0.0;
+        }
+        let cell = (o.radius_m * 2.4).max(0.01);
+        let band = band_limit(cell, footprint);
+        if band <= 0.0 {
+            return 0.0;
+        }
+        let (f1, _, id) = cellular(x, y, cell, self.seed ^ 0x0000_0117);
+        let coverage = smoothstep(1.0 - o.coverage, 1.0, id);
+        let bump = (1.0 - smoothstep(0.0, 0.62, f1)).max(0.0).powf(0.65);
+        let size = 1.0 + (value2(x / cell, y / cell, self.seed) - 0.5) * o.variation;
+        let slope_mask = 0.35 + 0.65 * (1.0 - smoothstep(0.45, 0.8, slope));
+        o.relief_m * bump * coverage * size * slope_mask * band
+    }
 }
 
 #[inline]
@@ -435,6 +559,48 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Distance to the nearest line of a rotated 2D grid, in metres.
+fn grid_distance(x: f32, y: f32, spacing: f32, angle_rad: f32, jitter: f32, seed: u64) -> f32 {
+    let (s, c) = angle_rad.sin_cos();
+    let u = x * c + y * s;
+    let v = -x * s + y * c;
+    let ju = (value2(u / spacing, 0.0, seed) - 0.5) * jitter * spacing;
+    let jv = (value2(0.0, v / spacing, seed + 1) - 0.5) * jitter * spacing;
+    let fu = (u / spacing + ju / spacing + 0.5).fract() - 0.5;
+    let fv = (v / spacing + jv / spacing + 0.5).fract() - 0.5;
+    (fu.abs().min(fv.abs())) * spacing
+}
+
+/// Warped cellular field: (F1, F2, cell id) in cell units.
+fn cellular(x: f32, y: f32, cell: f32, seed: u64) -> (f32, f32, f32) {
+    let px = x / cell;
+    let py = y / cell;
+    let cx = px.floor();
+    let cy = py.floor();
+    let mut f1 = f32::INFINITY;
+    let mut f2 = f32::INFINITY;
+    let mut id = 0.0;
+    for oy in -1..=1 {
+        for ox in -1..=1 {
+            let gx = cx + ox as f32;
+            let gy = cy + oy as f32;
+            let jx = value2(gx, gy, seed);
+            let jy = value2(gx + 17.0, gy - 9.0, seed + 3);
+            let rx = gx + jx;
+            let ry = gy + jy;
+            let d = (rx - px) * (rx - px) + (ry - py) * (ry - py);
+            if d < f1 {
+                f2 = f1;
+                f1 = d;
+                id = value2(gx, gy, seed + 11);
+            } else if d < f2 {
+                f2 = d;
+            }
+        }
+    }
+    (f1.sqrt(), f2.sqrt(), id)
 }
 
 /// Fade a wavelength out when it is close to the pixel footprint. Below
@@ -484,6 +650,71 @@ mod tests {
         let base = a.base_height(x, y);
         let detailed = a.height(x, y, 1.0);
         assert!((detailed - base).abs() > 1e-4, "detail is a no-op");
+    }
+
+    #[test]
+    fn new_geometry_layers_produce_relief_and_are_deterministic() {
+        let hf = field();
+        let x = 820.0;
+        let y = 940.0;
+        for layer in 0..4 {
+            let mut settings = DetailSettings {
+                enabled: true,
+                strength: 1.0,
+                ..DetailSettings::default()
+            };
+            // Isolate one layer at a time: the fractal stays, but the
+            // layer-specific fields are disabled except the tested one.
+            settings.tafoni.enabled = false;
+            settings.benches.enabled = false;
+            settings.joints.enabled = false;
+            settings.ooliths.enabled = false;
+            match layer {
+                0 => {
+                    settings.tafoni.enabled = true;
+                    settings.tafoni.cell_m = 1.4;
+                    settings.tafoni.depth_m = 0.5;
+                    settings.tafoni.coverage = 1.0;
+                    settings.tafoni.patchiness = 0.0;
+                }
+                1 => {
+                    settings.benches.enabled = true;
+                    settings.benches.thickness_m = 2.0;
+                    settings.benches.relief_m = 1.0;
+                    settings.benches.sharpness = 0.8;
+                }
+                2 => {
+                    settings.joints.enabled = true;
+                    settings.joints.spacing_m = 4.0;
+                    settings.joints.depth_m = 0.4;
+                    settings.joints.width_m = 0.4;
+                }
+                _ => {
+                    settings.ooliths.enabled = true;
+                    settings.ooliths.radius_m = 0.35;
+                    settings.ooliths.coverage = 1.0;
+                    settings.ooliths.relief_m = 0.3;
+                }
+            }
+            let a = DetailSampler::new(&hf, &settings, Seed::new(11));
+            let b = DetailSampler::new(&hf, &settings, Seed::new(11));
+            let da = a.detail(x, y, 0.1);
+            let db = b.detail(x, y, 0.1);
+            assert_eq!(
+                da.to_bits(),
+                db.to_bits(),
+                "layer {layer} is not deterministic"
+            );
+            let mut different = false;
+            for dx in 0..12 {
+                let d = a.detail(x + dx as f64 * 0.7, y + dx as f64 * 0.4, 0.1);
+                if (d - da).abs() > 1e-4 {
+                    different = true;
+                    break;
+                }
+            }
+            assert!(different, "layer {layer} has no spatial variation");
+        }
     }
 
     #[test]

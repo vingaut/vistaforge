@@ -158,6 +158,136 @@ impl Default for Vesicles {
     }
 }
 
+/// Tafoni / honeycomb weathering: rounded cells hollowed into vertical faces.
+///
+/// Natural tafoni are salt-weathering cells with thin walls; the procedural
+/// version uses a warped cellular field, a bowl profile per cell and a
+/// slope/altitude mask so the pattern stays on exposed rock faces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tafoni {
+    pub enabled: bool,
+    /// Cell diameter, metres.
+    pub cell_m: f32,
+    /// Cavity depth, metres.
+    pub depth_m: f32,
+    /// Cell coverage, 0..1 (fraction of cells that are hollowed).
+    pub coverage: f32,
+    /// 0 = shallow bowls, 1 = deep cups with thin walls.
+    pub sharpness: f32,
+    /// 0 = everywhere, 1 = only on steep faces.
+    pub vertical_bias: f32,
+    /// Low-frequency patch mask, 0..1.
+    pub patchiness: f32,
+}
+
+impl Default for Tafoni {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cell_m: 1.8,
+            depth_m: 0.35,
+            coverage: 0.55,
+            sharpness: 0.55,
+            vertical_bias: 0.7,
+            patchiness: 0.5,
+        }
+    }
+}
+
+/// Differential weathering of sedimentary beds: hard ledges, soft recesses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Benches {
+    pub enabled: bool,
+    /// Bed thickness, metres.
+    pub thickness_m: f32,
+    /// Relief between hard and soft beds, metres.
+    pub relief_m: f32,
+    /// Dip, degrees.
+    pub dip_deg: f32,
+    /// Dip azimuth, degrees (0 = north).
+    pub dip_azimuth_deg: f32,
+    /// 0 = smooth sine, 1 = flat bench with a sharp riser.
+    pub sharpness: f32,
+    /// Lateral thickness variation, 0..1.
+    pub variation: f32,
+}
+
+impl Default for Benches {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            thickness_m: 4.5,
+            relief_m: 0.8,
+            dip_deg: 4.0,
+            dip_azimuth_deg: 90.0,
+            sharpness: 0.65,
+            variation: 0.35,
+        }
+    }
+}
+
+/// Orthogonal / columnar fracture network carved as narrow grooves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JointBlocks {
+    pub enabled: bool,
+    /// Mean joint spacing, metres.
+    pub spacing_m: f32,
+    /// Groove depth, metres.
+    pub depth_m: f32,
+    /// Groove width, metres.
+    pub width_m: f32,
+    /// First set orientation, degrees.
+    pub angle_deg: f32,
+    /// Second set orientation, degrees. Equal to the first for a square net.
+    pub angle2_deg: f32,
+    /// Position jitter, 0..1.
+    pub jitter: f32,
+}
+
+impl Default for JointBlocks {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            spacing_m: 18.0,
+            depth_m: 1.0,
+            width_m: 0.45,
+            angle_deg: 20.0,
+            angle2_deg: 110.0,
+            jitter: 0.35,
+        }
+    }
+}
+
+/// Oolitic / bioclastic grain: rounded growths proud of the matrix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ooliths {
+    pub enabled: bool,
+    /// Mean grain radius, metres.
+    pub radius_m: f32,
+    /// Fraction of the surface covered, 0..1.
+    pub coverage: f32,
+    /// Grain relief, metres.
+    pub relief_m: f32,
+    /// Size variation, 0..1.
+    pub variation: f32,
+}
+
+impl Default for Ooliths {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            radius_m: 0.22,
+            coverage: 0.55,
+            relief_m: 0.08,
+            variation: 0.45,
+        }
+    }
+}
+
 /// Resolution-independent rock detail recipe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -190,6 +320,10 @@ pub struct DetailSettings {
     pub craters: CraterField,
     pub exfoliation: Exfoliation,
     pub vesicles: Vesicles,
+    pub tafoni: Tafoni,
+    pub benches: Benches,
+    pub joints: JointBlocks,
+    pub ooliths: Ooliths,
     /// Optional high-density patch around a chosen point. This is how a
     /// close-up of one rock gets centimetre-scale triangles without paying
     /// for a dense mesh over the whole 10 km terrain.
@@ -233,6 +367,10 @@ impl Default for DetailSettings {
             craters: CraterField::default(),
             exfoliation: Exfoliation::default(),
             vesicles: Vesicles::default(),
+            tafoni: Tafoni::default(),
+            benches: Benches::default(),
+            joints: JointBlocks::default(),
+            ooliths: Ooliths::default(),
             focus_enabled: false,
             focus_center: [0.0, 0.0],
             focus_size_m: 240.0,
@@ -257,6 +395,14 @@ pub const DETAIL_PRESETS: &[&str] = &[
     "volcanic",
     "canyon",
     "patagonia",
+    "chert",
+    "andesite",
+    "marble",
+    "phyllite",
+    "slate",
+    "gneiss",
+    "conglomerate",
+    "travertine",
 ];
 
 impl DetailSettings {
@@ -305,6 +451,24 @@ impl DetailSettings {
                     spacing_m: 2.2,
                     density: 0.12,
                 };
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 34.0,
+                    depth_m: 0.8,
+                    width_m: 0.55,
+                    angle_deg: 25.0,
+                    angle2_deg: 115.0,
+                    jitter: 0.45,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 1.4,
+                    depth_m: 0.18,
+                    coverage: 0.28,
+                    sharpness: 0.35,
+                    vertical_bias: 0.75,
+                    patchiness: 0.7,
+                };
             }
             "basalt" => {
                 // Columnar rhythm, vesicles, small craterlets.
@@ -337,6 +501,15 @@ impl DetailSettings {
                     depth_m: 1.2,
                     rim: 0.30,
                     ejecta: 0.25,
+                };
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 9.0,
+                    depth_m: 1.1,
+                    width_m: 0.35,
+                    angle_deg: 0.0,
+                    angle2_deg: 60.0,
+                    jitter: 0.15,
                 };
             }
             "limestone" => {
@@ -372,6 +545,31 @@ impl DetailSettings {
                     sharpness: 0.4,
                     layers: 2,
                 };
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 2.6,
+                    relief_m: 0.9,
+                    dip_deg: 3.0,
+                    dip_azimuth_deg: 90.0,
+                    sharpness: 0.6,
+                    variation: 0.4,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 2.2,
+                    depth_m: 0.4,
+                    coverage: 0.5,
+                    sharpness: 0.55,
+                    vertical_bias: 0.8,
+                    patchiness: 0.55,
+                };
+                d.ooliths = Ooliths {
+                    enabled: true,
+                    radius_m: 0.18,
+                    coverage: 0.45,
+                    relief_m: 0.07,
+                    variation: 0.5,
+                };
             }
             "sandstone" => {
                 // Cross-bedding, rounded ledges, honeycomb pitting.
@@ -405,6 +603,24 @@ impl DetailSettings {
                     sharpness: 0.45,
                     layers: 2,
                 };
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 4.0,
+                    relief_m: 1.0,
+                    dip_deg: 6.0,
+                    dip_azimuth_deg: 120.0,
+                    sharpness: 0.7,
+                    variation: 0.45,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 1.7,
+                    depth_m: 0.45,
+                    coverage: 0.60,
+                    sharpness: 0.6,
+                    vertical_bias: 0.85,
+                    patchiness: 0.55,
+                };
             }
             "schist" => {
                 // Foliation, sharp flakes, strong anisotropy.
@@ -431,6 +647,24 @@ impl DetailSettings {
                     anisotropy: 2.2,
                     angle_deg: 35.0,
                 };
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 1.5,
+                    relief_m: 0.35,
+                    dip_deg: 55.0,
+                    dip_azimuth_deg: 35.0,
+                    sharpness: 0.8,
+                    variation: 0.3,
+                };
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 7.5,
+                    depth_m: 0.5,
+                    width_m: 0.25,
+                    angle_deg: 35.0,
+                    angle2_deg: 125.0,
+                    jitter: 0.55,
+                };
             }
             "chalk" => {
                 // Soft, rounded, dry valleys and flint bands.
@@ -455,6 +689,24 @@ impl DetailSettings {
                     scale_m: 18.0,
                     sharpness: 0.3,
                     layers: 2,
+                };
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 5.0,
+                    relief_m: 0.45,
+                    dip_deg: 2.0,
+                    dip_azimuth_deg: 90.0,
+                    sharpness: 0.45,
+                    variation: 0.55,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 3.0,
+                    depth_m: 0.3,
+                    coverage: 0.35,
+                    sharpness: 0.35,
+                    vertical_bias: 0.6,
+                    patchiness: 0.65,
                 };
             }
             "volcanic" => {
@@ -516,6 +768,24 @@ impl DetailSettings {
                     rim: 0.12,
                     ejecta: 0.0,
                 };
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 5.5,
+                    relief_m: 1.2,
+                    dip_deg: 2.0,
+                    dip_azimuth_deg: 90.0,
+                    sharpness: 0.8,
+                    variation: 0.35,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 2.5,
+                    depth_m: 0.7,
+                    coverage: 0.55,
+                    sharpness: 0.65,
+                    vertical_bias: 0.9,
+                    patchiness: 0.45,
+                };
             }
             "patagonia" => {
                 // Vertical granite towers, glacial polish, exfoliation.
@@ -549,19 +819,264 @@ impl DetailSettings {
                     sharpness: 0.65,
                     layers: 3,
                 };
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 12.0,
+                    depth_m: 1.3,
+                    width_m: 0.4,
+                    angle_deg: 75.0,
+                    angle2_deg: 165.0,
+                    jitter: 0.35,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 1.6,
+                    depth_m: 0.3,
+                    coverage: 0.35,
+                    sharpness: 0.45,
+                    vertical_bias: 0.85,
+                    patchiness: 0.5,
+                };
+            }
+            "chert" => {
+                // Waxy silica, conchoidal fracture, sparse joints.
+                d.scale_m = 18.0;
+                d.amplitude_m = 0.45;
+                d.fractal_dimension = 2.08;
+                d.octaves = 6;
+                d.gain = 0.38;
+                d.warp = 0.15;
+                d.slope_bias = 0.2;
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 22.0,
+                    depth_m: 0.35,
+                    width_m: 0.25,
+                    angle_deg: 65.0,
+                    angle2_deg: 155.0,
+                    jitter: 0.6,
+                };
+            }
+            "andesite" => {
+                // Porphyritic grey rock, small vesicles, blocky joints.
+                d.scale_m = 26.0;
+                d.amplitude_m = 1.0;
+                d.fractal_dimension = 2.35;
+                d.octaves = 7;
+                d.gain = 0.52;
+                d.warp = 0.25;
+                d.slope_bias = 0.3;
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 14.0,
+                    depth_m: 0.7,
+                    width_m: 0.35,
+                    angle_deg: 10.0,
+                    angle2_deg: 100.0,
+                    jitter: 0.35,
+                };
+                d.vesicles = Vesicles {
+                    enabled: true,
+                    depth_m: 0.22,
+                    spacing_m: 1.3,
+                    density: 0.22,
+                };
+            }
+            "marble" => {
+                // Smooth, folded carbonate with thin exfoliation plates.
+                d.scale_m = 50.0;
+                d.amplitude_m = 0.8;
+                d.fractal_dimension = 2.10;
+                d.octaves = 6;
+                d.gain = 0.42;
+                d.warp = 0.5;
+                d.slope_bias = 0.3;
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 12.0,
+                    relief_m: 0.35,
+                    dip_deg: 25.0,
+                    dip_azimuth_deg: 60.0,
+                    sharpness: 0.25,
+                    variation: 0.65,
+                };
+                d.exfoliation = Exfoliation {
+                    enabled: true,
+                    amplitude_m: 0.3,
+                    scale_m: 16.0,
+                    sharpness: 0.35,
+                    layers: 2,
+                };
+            }
+            "phyllite" => {
+                // Fine silky foliation, wavy cleavage.
+                d.scale_m = 20.0;
+                d.amplitude_m = 0.9;
+                d.fractal_dimension = 2.4;
+                d.octaves = 8;
+                d.gain = 0.55;
+                d.warp = 0.35;
+                d.slope_bias = 0.25;
+                d.grooves = Grooves {
+                    enabled: true,
+                    spacing_m: 6.0,
+                    depth_m: 0.45,
+                    angle_deg: 40.0,
+                    sharpness: 0.75,
+                    wander: 0.35,
+                };
+                d.ridges = Ridges {
+                    enabled: true,
+                    amplitude_m: 0.3,
+                    scale_m: 5.5,
+                    sharpness: 0.8,
+                    anisotropy: 2.4,
+                    angle_deg: 40.0,
+                };
+            }
+            "slate" => {
+                // Flat cleavage planes, sharp joints, low roughness.
+                d.scale_m = 30.0;
+                d.amplitude_m = 0.55;
+                d.fractal_dimension = 2.12;
+                d.octaves = 6;
+                d.gain = 0.4;
+                d.warp = 0.15;
+                d.slope_bias = 0.35;
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 1.2,
+                    relief_m: 0.25,
+                    dip_deg: 65.0,
+                    dip_azimuth_deg: 30.0,
+                    sharpness: 0.9,
+                    variation: 0.2,
+                };
+                d.joints = JointBlocks {
+                    enabled: true,
+                    spacing_m: 6.0,
+                    depth_m: 0.3,
+                    width_m: 0.18,
+                    angle_deg: 30.0,
+                    angle2_deg: 120.0,
+                    jitter: 0.45,
+                };
+            }
+            "gneiss" => {
+                // Banded metamorphic rock, folded lenses.
+                d.scale_m = 34.0;
+                d.amplitude_m = 1.2;
+                d.fractal_dimension = 2.28;
+                d.octaves = 7;
+                d.gain = 0.48;
+                d.warp = 0.5;
+                d.slope_bias = 0.25;
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 3.2,
+                    relief_m: 0.6,
+                    dip_deg: 35.0,
+                    dip_azimuth_deg: 75.0,
+                    sharpness: 0.5,
+                    variation: 0.6,
+                };
+                d.ridges = Ridges {
+                    enabled: true,
+                    amplitude_m: 0.35,
+                    scale_m: 9.0,
+                    sharpness: 0.5,
+                    anisotropy: 2.0,
+                    angle_deg: 75.0,
+                };
+            }
+            "conglomerate" => {
+                // Rounded pebbles in a finer matrix.
+                d.scale_m = 24.0;
+                d.amplitude_m = 0.9;
+                d.fractal_dimension = 2.2;
+                d.octaves = 6;
+                d.gain = 0.45;
+                d.warp = 0.3;
+                d.slope_bias = 0.25;
+                d.ooliths = Ooliths {
+                    enabled: true,
+                    radius_m: 0.55,
+                    coverage: 0.65,
+                    relief_m: 0.35,
+                    variation: 0.85,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 2.4,
+                    depth_m: 0.25,
+                    coverage: 0.35,
+                    sharpness: 0.4,
+                    vertical_bias: 0.7,
+                    patchiness: 0.5,
+                };
+            }
+            "travertine" => {
+                // Banded carbonate with vugs and dissolution pockets.
+                d.scale_m = 38.0;
+                d.amplitude_m = 1.0;
+                d.fractal_dimension = 2.15;
+                d.octaves = 6;
+                d.gain = 0.44;
+                d.warp = 0.45;
+                d.slope_bias = 0.4;
+                d.benches = Benches {
+                    enabled: true,
+                    thickness_m: 6.0,
+                    relief_m: 0.55,
+                    dip_deg: 2.0,
+                    dip_azimuth_deg: 90.0,
+                    sharpness: 0.55,
+                    variation: 0.55,
+                };
+                d.vesicles = Vesicles {
+                    enabled: true,
+                    depth_m: 0.35,
+                    spacing_m: 2.2,
+                    density: 0.35,
+                };
+                d.tafoni = Tafoni {
+                    enabled: true,
+                    cell_m: 2.8,
+                    depth_m: 0.45,
+                    coverage: 0.4,
+                    sharpness: 0.5,
+                    vertical_bias: 0.5,
+                    patchiness: 0.6,
+                };
             }
             _ => return None,
         }
         Some(d)
     }
 
-    /// Apply a profile by name, preserving the extra seed.
+    /// Apply a rock profile while preserving the mesh/display settings the
+    /// user tuned separately (adaptive tolerance, quads, focus patch, seed).
+    /// Changing the rock must not silently reset the adaptive mesh.
     pub fn apply_preset(&mut self, name: &str) -> bool {
         match Self::preset(name) {
             Some(preset) => {
                 let seed = self.seed;
+                let adaptive = self.adaptive;
+                let tolerance = self.adaptive_tolerance_m;
+                let quads = self.quad_mesh;
+                let focus_enabled = self.focus_enabled;
+                let focus_center = self.focus_center;
+                let focus_size = self.focus_size_m;
+                let focus_spacing = self.focus_spacing_m;
                 *self = preset;
                 self.seed = seed;
+                self.adaptive = adaptive;
+                self.adaptive_tolerance_m = tolerance;
+                self.quad_mesh = quads;
+                self.focus_enabled = focus_enabled;
+                self.focus_center = focus_center;
+                self.focus_size_m = focus_size;
+                self.focus_spacing_m = focus_spacing;
                 true
             }
             None => false,
@@ -569,8 +1084,8 @@ impl DetailSettings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if !(0.02..=100.0).contains(&self.adaptive_tolerance_m) {
-            return Err("detail adaptive tolerance must be in 0.02..=100 m".into());
+        if !(0.001..=100.0).contains(&self.adaptive_tolerance_m) {
+            return Err("detail adaptive tolerance must be in 0.001..=100 m".into());
         }
         if !self.strength.is_finite() || !(0.0..=2.0).contains(&self.strength) {
             return Err("detail strength must be in 0..=2".into());
@@ -610,6 +1125,28 @@ impl DetailSettings {
         if !self.vesicles.spacing_m.is_finite() || self.vesicles.spacing_m <= 0.0 {
             return Err("detail vesicle spacing must be positive".into());
         }
+        for (name, value) in [
+            ("tafoni.cell_m", self.tafoni.cell_m),
+            ("benches.thickness_m", self.benches.thickness_m),
+            ("joints.spacing_m", self.joints.spacing_m),
+            ("joints.width_m", self.joints.width_m),
+            ("ooliths.radius_m", self.ooliths.radius_m),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("detail {name} must be finite and positive"));
+            }
+        }
+        if !(0.0..=1.0).contains(&self.tafoni.coverage)
+            || !(0.0..=1.0).contains(&self.tafoni.sharpness)
+            || !(0.0..=1.0).contains(&self.tafoni.vertical_bias)
+            || !(0.0..=1.0).contains(&self.benches.sharpness)
+            || !(0.0..=1.0).contains(&self.benches.variation)
+            || !(0.0..=1.0).contains(&self.joints.jitter)
+            || !(0.0..=1.0).contains(&self.ooliths.coverage)
+            || !(0.0..=1.0).contains(&self.ooliths.variation)
+        {
+            return Err("detail layer fractions must be in 0..=1".into());
+        }
         if self.focus_enabled {
             if !self.focus_size_m.is_finite() || !(8.0..=5000.0).contains(&self.focus_size_m) {
                 return Err("detail focus size must be in 8..=5000 metres".into());
@@ -640,6 +1177,10 @@ mod tests {
         let chalk = DetailSettings::preset("chalk").unwrap();
         assert!(granite.exfoliation.enabled);
         assert!(granite.amplitude_m > chalk.amplitude_m);
+        assert!(DetailSettings::preset("sandstone").unwrap().tafoni.enabled);
+        assert!(DetailSettings::preset("limestone").unwrap().benches.enabled);
+        assert!(DetailSettings::preset("basalt").unwrap().joints.enabled);
+        assert!(DetailSettings::preset("limestone").unwrap().ooliths.enabled);
         assert!(DetailSettings::preset("nope").is_none());
         assert!(!DetailSettings::preset("none").unwrap().enabled);
     }
@@ -657,9 +1198,36 @@ mod tests {
     }
 
     #[test]
+    fn apply_preset_keeps_adaptive_mesh_settings() {
+        let mut d = DetailSettings {
+            adaptive: false,
+            adaptive_tolerance_m: 0.012,
+            quad_mesh: true,
+            ..DetailSettings::default()
+        };
+        assert!(d.apply_preset("basalt"));
+        assert!(!d.adaptive);
+        assert!((d.adaptive_tolerance_m - 0.012).abs() < 1e-9);
+        assert!(d.quad_mesh);
+    }
+
+    #[test]
     fn default_is_disabled_and_valid() {
         let d = DetailSettings::default();
         assert!(!d.enabled);
+        assert!(!d.tafoni.enabled && !d.benches.enabled);
+        assert!(!d.joints.enabled && !d.ooliths.enabled);
         d.validate().unwrap();
+    }
+
+    #[test]
+    fn adaptive_tolerance_accepts_fine_values() {
+        let mut d = DetailSettings {
+            adaptive_tolerance_m: 0.001,
+            ..DetailSettings::default()
+        };
+        d.validate().unwrap();
+        d.adaptive_tolerance_m = 0.0005;
+        assert!(d.validate().is_err());
     }
 }

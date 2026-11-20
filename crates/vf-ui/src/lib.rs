@@ -302,16 +302,6 @@ impl CaptureState {
             });
         }
         steps.push(CaptureStep {
-            name: "workspace_compare",
-            workspace: Workspace::Materials,
-            anim_tab: AnimTab::Path,
-            help: None,
-            design: true,
-            compare: false,
-            select_key: false,
-            preferences: false,
-        });
-        steps.push(CaptureStep {
             name: "workspace_preferences",
             workspace: Workspace::Help,
             anim_tab: AnimTab::Path,
@@ -396,13 +386,6 @@ impl PreviewQuality {
     }
 }
 
-/// Before/after comparison of the current panel edits.
-///
-/// A CPU preview is the only renderer that shows the continuous detail and
-/// the material pass, so compare mode forces it even when the GPU viewport is
-/// available. The left side is a frozen snapshot taken when compare was
-/// enabled; the right side follows the live project. Apply keeps the result,
-/// Revert restores the snapshot (project + heightfield).
 /// A small 2D paint canvas used to author a custom rock texture without
 /// leaving VistaForge. The pixels are saved to a PNG and then referenced by the
 /// material's texture path, so the normal bump/displacement pipeline applies.
@@ -541,19 +524,6 @@ impl PaintState {
     }
 }
 
-#[derive(Default)]
-struct CompareState {
-    enabled: bool,
-    /// Normalised split position, 0 = all before, 1 = all after.
-    split: f32,
-    before: Option<egui::TextureHandle>,
-    baseline_project: Option<Project>,
-    baseline_heightfield: Option<Arc<HeightField>>,
-    /// The next completed CPU render becomes the baseline.
-    waiting_for_baseline: bool,
-    dragging: bool,
-}
-
 struct VistaForgeApp {
     project: Project,
     /// Copy-on-write terrain. Preview renders, background jobs and undo
@@ -583,13 +553,16 @@ struct VistaForgeApp {
     preview_ms: u128,
     revision: u64,
     pending_full: bool,
-    compare: CompareState,
     paint: PaintState,
     preview_quality: PreviewQuality,
     /// Keep the current orbit pose when the terrain is regenerated, imported
     /// or composed. The previous behaviour auto-framed and lost a detail view
     /// the user had carefully positioned.
     preserve_view: bool,
+    /// When a rock material preset changes, apply the matching geometry
+    /// profile too (tafoni, benches, joints...). The adaptive tolerance and
+    /// quad settings are preserved by `DetailSettings::apply_preset`.
+    link_detail_to_material: bool,
 
     gpu: Option<gpu_view::GpuViewport>,
     gpu_enabled: bool,
@@ -698,9 +671,6 @@ struct VistaForgeApp {
     help: help::HelpState,
     last_viewport_rect: egui::Rect,
     capture: Option<CaptureState>,
-    /// Capture-only: 0 = baseline requested, 1 = material changed for the
-    /// before/after screenshot.
-    capture_compare_stage: u8,
 }
 
 impl VistaForgeApp {
@@ -755,13 +725,10 @@ impl VistaForgeApp {
             preview_ms: 0,
             revision: 0,
             pending_full: false,
-            compare: CompareState {
-                split: 0.5,
-                ..CompareState::default()
-            },
             paint: PaintState::new(),
             preview_quality: PreviewQuality::Normal,
             preserve_view: true,
+            link_detail_to_material: true,
             gpu: None,
             gpu_enabled: true,
             gpu_mesh_dirty: false,
@@ -857,7 +824,6 @@ impl VistaForgeApp {
             task: None,
             help: help::HelpState::new(),
             last_viewport_rect: egui::Rect::NOTHING,
-            capture_compare_stage: 0,
             capture: std::env::var("VISTAFORGE_CAPTURE")
                 .ok()
                 .filter(|dir| !dir.trim().is_empty())
@@ -1125,11 +1091,7 @@ impl VistaForgeApp {
         self.dirty_first.get_or_insert(now);
         self.refine_at = None;
         self.revision = self.revision.wrapping_add(1);
-        self.preview_scale = if self.compare.enabled {
-            // Comparison must stay at a readable resolution even while a
-            // slider is dragged; the user explicitly chose the preview level.
-            self.preview_quality.scale().clamp(MIN_PREVIEW_SCALE, 1.0)
-        } else if self.adaptive_preview {
+        self.preview_scale = if self.adaptive_preview {
             self.interactive_scale
         } else {
             1.0
@@ -1175,104 +1137,6 @@ impl VistaForgeApp {
             && self.gpu.is_some()
             && !self.show_final_render
             && !self.cpu_preview_forced
-            && !self.compare.enabled
-    }
-
-    /// Enter before/after mode. The current project and terrain become the
-    /// frozen "before" snapshot; the next CPU preview becomes the "after".
-    fn compare_start(&mut self, ctx: &egui::Context) {
-        if self.compare.enabled {
-            return;
-        }
-        // Never reuse `self.texture` here: it may be a preview from another
-        // workspace or an older project. The first completed CPU render after
-        // this point is the authoritative "before" image.
-        self.compare = CompareState {
-            enabled: true,
-            split: 0.5,
-            before: None,
-            baseline_project: Some(self.project.clone()),
-            baseline_heightfield: Some(Arc::clone(&self.heightfield)),
-            waiting_for_baseline: true,
-            dragging: false,
-        };
-        // The GPU viewport cannot show a before/after split (it has no frozen
-        // image), so compare mode always uses the CPU renderer. This is also
-        // the only renderer that includes the continuous detail and the
-        // material pass.
-        self.texture = None;
-        self.status =
-            "Comparaison avant/après : le côté gauche est figé, le côté droit suit vos réglages."
-                .into();
-        if self.render_task.is_none() {
-            if self.preview_quality == PreviewQuality::Final {
-                self.start_render(ctx.clone(), true);
-            } else {
-                self.preview_scale = self.preview_quality.scale();
-                self.start_render(ctx.clone(), false);
-            }
-        } else {
-            // The in-flight render may be stale; queue a fresh baseline as
-            // soon as the worker is free.
-            self.dirty_since = Some(Instant::now());
-            self.dirty_first = Some(Instant::now());
-        }
-    }
-
-    /// Accept the pending edits and leave comparison mode.
-    fn compare_apply(&mut self, ctx: &egui::Context) {
-        if !self.compare.enabled {
-            return;
-        }
-        self.compare = CompareState {
-            split: 0.5,
-            ..CompareState::default()
-        };
-        self.status = "Modifications appliquées".into();
-        self.refresh_preview(ctx.clone());
-    }
-
-    /// Restore the snapshot taken when comparison started.
-    fn compare_revert(&mut self, ctx: &egui::Context) {
-        let Some(project) = self.compare.baseline_project.clone() else {
-            self.compare = CompareState {
-                split: 0.5,
-                ..CompareState::default()
-            };
-            return;
-        };
-        let heightfield = self.compare.baseline_heightfield.clone();
-        // Keep the current viewing pose: reverting a material/detail change
-        // must not throw away a camera the user positioned to inspect it.
-        let camera = self.project.camera.clone();
-        self.compare = CompareState {
-            split: 0.5,
-            ..CompareState::default()
-        };
-        self.project = project;
-        self.project.camera = camera;
-        if let Some(heightfield) = heightfield {
-            self.heightfield = heightfield;
-        }
-        self.texture = None;
-        self.last_image = None;
-        self.sculpt_texture = None;
-        self.sculpt_texture_dirty = true;
-        self.terrain_stats = None;
-        self.terrain_stats_hf = None;
-        self.anim_track = None;
-        self.anim_track_error = None;
-        self.anim_live_sample = None;
-        self.anim_trail_cache = None;
-        self.anim_compare_cache = None;
-        self.anim_profile_cache = None;
-        self.anim_curve_cache = None;
-        self.anim_editor.selection = None;
-        self.sync_from_project();
-        self.sync_orbit_from_camera();
-        self.history.clear(&self.project, &self.heightfield);
-        self.status = "Modifications annulées : retour à l'état d'avant comparaison".into();
-        self.refresh_preview(ctx.clone());
     }
 
     /// Start a fresh preview after loading/generating a scene. When the GPU
@@ -1621,7 +1485,7 @@ impl VistaForgeApp {
         let seed = Seed::new(self.seed);
         let mut project = self.project.clone();
         project.seed = seed;
-        let size = self.size.clamp(2, 16_384);
+        let size = self.size.clamp(2, 8192);
         project.source = match self.mode {
             TerrainMode::Classic => TerrainSource::Classic {
                 params: ClassicParams {
@@ -1742,6 +1606,8 @@ impl VistaForgeApp {
     /// Run the current preview at the quality selected in a panel. `Finale`
     /// switches to the project output resolution and the full render options.
     fn start_quality_preview(&mut self, ctx: egui::Context) {
+        self.cpu_preview_forced = true;
+        self.texture = None;
         if self.preview_quality == PreviewQuality::Final {
             self.start_render(ctx, true);
         } else {
@@ -1751,7 +1617,24 @@ impl VistaForgeApp {
         }
     }
 
-    /// Compact quality selector placed next to every "preview" action.
+    /// Switch the central view between the live GPU scene and the complete
+    /// CPU preview. CPU mode is the only one that shows the material and
+    /// detail passes exactly.
+    fn switch_view(&mut self, ctx: &egui::Context, cpu: bool) {
+        if cpu {
+            if !self.cpu_preview_forced {
+                self.cpu_preview_forced = true;
+                self.texture = None;
+                self.mark_dirty();
+                self.start_quality_preview(ctx.clone());
+            }
+        } else {
+            self.cpu_preview_forced = false;
+            self.refresh_preview(ctx.clone());
+        }
+    }
+
+    /// Compact quality selector placed next to the Aperçu action.
     fn preview_quality_picker(&mut self, ui: &mut egui::Ui) {
         egui::ComboBox::from_id_salt("preview-quality")
             .selected_text(format!("Aperçu {}", self.preview_quality.label()))
@@ -1832,7 +1715,7 @@ impl VistaForgeApp {
     fn pump_preview(&mut self, ctx: &egui::Context) {
         // When a GPU viewport exists, automatic CPU previews are unnecessary:
         // the GPU scene is live and a manual Render/Preview still works.
-        if self.gpu_enabled && self.gpu.is_some() && !self.compare.enabled {
+        if self.gpu_enabled && self.gpu.is_some() && !self.cpu_preview_forced {
             return;
         }
         if self.render_task.is_some() {
@@ -2173,13 +2056,7 @@ impl VistaForgeApp {
             Ok(Ok(output)) => {
                 let stale = task.revision != self.revision;
                 let gpu_available = self.gpu_enabled && self.gpu.is_some();
-                if stale && self.compare.enabled && self.compare.waiting_for_baseline {
-                    // Never freeze a stale frame as the comparison baseline:
-                    // it would show a different scene on the left.
-                    self.status = "Comparaison : référence obsolète, nouveau rendu…".into();
-                    self.dirty_since = Some(Instant::now());
-                    self.dirty_first = Some(Instant::now());
-                } else if task.full && stale {
+                if task.full && stale {
                     self.status = "Rendu final obsolète (scène modifiée)".into();
                 } else if stale && gpu_available {
                     // The GPU view already shows the latest scene; do not
@@ -2226,18 +2103,6 @@ impl VistaForgeApp {
             &output.image.pixels,
         );
         self.texture = Some(ctx.load_texture("viewport", image, egui::TextureOptions::LINEAR));
-        if self.compare.enabled
-            && (self.compare.waiting_for_baseline || self.compare.before.is_none())
-        {
-            self.compare.before = self.texture.clone();
-            self.compare.waiting_for_baseline = false;
-        }
-        if self.capture_compare_stage == 1
-            && self.compare.enabled
-            && !self.compare.waiting_for_baseline
-        {
-            self.capture_compare_stage = 2;
-        }
         self.last_render_size = (output.image.width, output.image.height);
         if task.full {
             self.status = format!(
@@ -2281,7 +2146,7 @@ impl VistaForgeApp {
                         .add(
                             egui::DragValue::new(&mut self.size)
                                 .speed(2.0)
-                                .range(2..=16_384),
+                                .range(2..=8192),
                         )
                         .changed()
                     {
@@ -2298,6 +2163,29 @@ impl VistaForgeApp {
                     if ui.button("1026").clicked() {
                         self.size = 1026;
                         self.mark_dirty();
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Rapide");
+                    for preset in [2048u32, 4096, 8192] {
+                        if ui
+                            .selectable_label(self.size == preset, preset.to_string())
+                            .on_hover_text(format!(
+                                "Heightfield {preset}² ≈ {:.0} Mo (f32), avant érosion et maillage.",
+                                (preset as f64 * preset as f64 * 4.0) / 1_048_576.0
+                            ))
+                            .clicked()
+                        {
+                            self.size = preset;
+                            self.mark_dirty();
+                        }
+                    }
+                    if self.size >= 4096 {
+                        ui.label(
+                            egui::RichText::new("gros terrain : génération longue")
+                                .small()
+                                .color(egui::Color32::from_rgb(240, 190, 120)),
+                        );
                     }
                 });
                 ui.horizontal(|ui| {
@@ -2605,9 +2493,6 @@ impl VistaForgeApp {
                         self.selected_modifier = 0;
                         changed = true;
                     }
-                    if ui.button("Aperçu").clicked() {
-                        self.start_quality_preview(ctx.clone());
-                    }
                 });
             });
         self.help.register(
@@ -2751,28 +2636,24 @@ impl VistaForgeApp {
         }
     }
 
-    fn detail_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .button("Voir le détail en avant/après (CPU)")
-                .on_hover_text(
-                    "Le viewport GPU est un aperçu de navigation : il n'applique pas le détail continu. Le rendu CPU le montre ; ce bouton le compare à l'état figé.",
-                )
-                .clicked()
-            {
-                self.cpu_preview_forced = true;
-                self.compare_start(ctx);
-            }
-            ui.label(
-                egui::RichText::new("Le détail et le maillage adaptatif sont visibles en vue CPU.")
-                    .small()
-                    .weak(),
-            );
-        });
+    fn detail_ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let header = egui::CollapsingHeader::new("Géométrie")
             .default_open(true)
             .show(ui, |ui| {
-                ui.checkbox(&mut self.project.detail.enabled, "Détail continu actif");
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut self.project.detail.enabled, "Détail continu actif");
+                    if ui
+                        .button("Réinitialiser le détail")
+                        .on_hover_text(
+                            "Revient au détail par défaut : désactivé, sans bruit ajouté, densité 1×.",
+                        )
+                        .clicked()
+                    {
+                        self.project.detail = vf_core::DetailSettings::default();
+                        self.project.render.subdivision = 1;
+                        self.mark_dirty();
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Profil de roche");
                     let mut selected = self.project.detail.profile.clone();
@@ -2784,11 +2665,10 @@ impl VistaForgeApp {
                             }
                         });
                     if selected != self.project.detail.profile
-                        && let Some(preset) = vf_core::DetailSettings::preset(&selected)
+                        && self.project.detail.apply_preset(&selected)
                     {
-                        let seed = self.project.detail.seed;
-                        self.project.detail = preset;
-                        self.project.detail.seed = seed;
+                        // `apply_preset` keeps the adaptive mesh settings,
+                        // tolerance, quads and focus patch.
                         self.project.detail.enabled = true;
                         self.mark_dirty();
                     }
@@ -2798,7 +2678,7 @@ impl VistaForgeApp {
                     let mut subdivision = self.project.render.subdivision as f32;
                     if ui
                         .add(
-                            egui::Slider::new(&mut subdivision, 1.0..=4.0)
+                            egui::Slider::new(&mut subdivision, 1.0..=8.0)
                                 .step_by(1.0)
                                 .text("×"),
                         )
@@ -2825,24 +2705,46 @@ impl VistaForgeApp {
                     self.mark_dirty();
                 }
                 if self.project.detail.adaptive {
-                    if param_f32(
-                        ui,
-                        "Tolérance géométrique",
-                        "m",
-                        &mut self.project.detail.adaptive_tolerance_m,
-                        0.05,
-                        50.0,
-                        2.5,
-                    ) {
-                        self.mark_dirty();
-                    }
-                    ui.label(
-                        egui::RichText::new(
-                            "Petite tolérance = plus de sommets, plus fidèle. Les UV restent la projection monde, continues sur tout le terrain.",
-                        )
-                        .small()
-                        .weak(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Tolérance géométrique");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.project.detail.adaptive_tolerance_m,
+                                    0.001..=25.0,
+                                )
+                                .logarithmic(true)
+                                .max_decimals(3)
+                                .suffix(" m"),
+                            )
+                            .on_hover_text(
+                                "Écart maximal au plan local. 0,001 m = quasi sculpté, 2,5 m = paysage. Les valeurs très fines demandent une densité élevée.",
+                            )
+                            .changed()
+                        {
+                            self.mark_dirty();
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Fine = plus de sommets. Les UV restent la projection monde.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        if ui
+                            .button("Défaut maillage")
+                            .on_hover_text("Adaptatif activé, tolérance 2,5 m, quads désactivés, densité 1×.")
+                            .clicked()
+                        {
+                            self.project.detail.adaptive = true;
+                            self.project.detail.adaptive_tolerance_m = 2.5;
+                            self.project.detail.quad_mesh = false;
+                            self.project.render.subdivision = 1;
+                            self.mark_dirty();
+                        }
+                    });
                 }
                 if ui
                     .checkbox(
@@ -2942,12 +2844,6 @@ impl VistaForgeApp {
                     &mut self.project.detail.band_limit,
                     "Anti-aliasing par empreinte pixel",
                 );
-                if ui
-                    .add(egui::Button::new("Rendre l'aperçu à jour"))
-                    .clicked()
-                {
-                    self.start_quality_preview(ctx.clone());
-                }
             });
         self.help.register(
             header.header_response.rect.union(
@@ -3047,6 +2943,73 @@ impl VistaForgeApp {
                 }
                 ui.checkbox(&mut self.project.detail.exfoliation.enabled, "Exfoliation");
                 ui.checkbox(&mut self.project.detail.vesicles.enabled, "Vésicules");
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Detail,
+        );
+
+        let header = egui::CollapsingHeader::new("Géométrie de surface (roche)")
+            .default_open(false)
+            .show(ui, |ui| {
+                let d = &mut self.project.detail;
+                let mut changed = false;
+                ui.label(egui::RichText::new("Tafoni / nids d'abeille").strong());
+                changed |= ui.checkbox(&mut d.tafoni.enabled, "Alvéoles et tafoni").changed();
+                if d.tafoni.enabled {
+                    changed |= param_f32(ui, "Cellule", "m", &mut d.tafoni.cell_m, 0.05, 20.0, 1.8);
+                    changed |= param_f32(ui, "Profondeur", "m", &mut d.tafoni.depth_m, 0.0, 3.0, 0.35);
+                    changed |= param_f32(ui, "Couverture", "", &mut d.tafoni.coverage, 0.0, 1.0, 0.55);
+                    changed |= param_f32(ui, "Netteté", "", &mut d.tafoni.sharpness, 0.0, 1.0, 0.55);
+                    changed |= param_f32(ui, "Faces verticales", "", &mut d.tafoni.vertical_bias, 0.0, 1.0, 0.7);
+                    changed |= param_f32(ui, "Taches", "", &mut d.tafoni.patchiness, 0.0, 1.0, 0.5);
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Bancs et litage").strong());
+                changed |= ui.checkbox(&mut d.benches.enabled, "Bancs différentiels").changed();
+                if d.benches.enabled {
+                    changed |= param_f32(ui, "Épaisseur", "m", &mut d.benches.thickness_m, 0.1, 50.0, 4.5);
+                    changed |= param_f32(ui, "Relief", "m", &mut d.benches.relief_m, 0.0, 5.0, 0.8);
+                    changed |= param_f32(ui, "Pendage", "°", &mut d.benches.dip_deg, -80.0, 80.0, 4.0);
+                    changed |= param_f32(ui, "Azimut", "°", &mut d.benches.dip_azimuth_deg, -180.0, 180.0, 90.0);
+                    changed |= param_f32(ui, "Netteté du banc", "", &mut d.benches.sharpness, 0.0, 1.0, 0.65);
+                    changed |= param_f32(ui, "Variation", "", &mut d.benches.variation, 0.0, 1.0, 0.35);
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Fractures").strong());
+                changed |= ui.checkbox(&mut d.joints.enabled, "Réseau de joints").changed();
+                if d.joints.enabled {
+                    changed |= param_f32(ui, "Espacement", "m", &mut d.joints.spacing_m, 0.2, 200.0, 18.0);
+                    changed |= param_f32(ui, "Profondeur", "m", &mut d.joints.depth_m, 0.0, 5.0, 1.0);
+                    changed |= param_f32(ui, "Largeur", "m", &mut d.joints.width_m, 0.01, 2.0, 0.45);
+                    changed |= param_f32(ui, "Angle 1", "°", &mut d.joints.angle_deg, -180.0, 180.0, 20.0);
+                    changed |= param_f32(ui, "Angle 2", "°", &mut d.joints.angle2_deg, -180.0, 180.0, 110.0);
+                    changed |= param_f32(ui, "Irrégularité", "", &mut d.joints.jitter, 0.0, 1.0, 0.35);
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Grain oolithique / bioclastique").strong());
+                changed |= ui.checkbox(&mut d.ooliths.enabled, "Oolithes").changed();
+                if d.ooliths.enabled {
+                    changed |= param_f32(ui, "Rayon", "m", &mut d.ooliths.radius_m, 0.01, 2.0, 0.22);
+                    changed |= param_f32(ui, "Couverture", "", &mut d.ooliths.coverage, 0.0, 1.0, 0.55);
+                    changed |= param_f32(ui, "Relief", "m", &mut d.ooliths.relief_m, 0.0, 1.0, 0.08);
+                    changed |= param_f32(ui, "Variation", "", &mut d.ooliths.variation, 0.0, 1.0, 0.45);
+                }
+                if changed {
+                    self.mark_dirty();
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Ces couches déplacent la géométrie : elles sont vues par le maillage adaptatif et l'export Blender, pas seulement par la couleur.",
+                    )
+                    .small()
+                    .weak(),
+                );
             });
         self.help.register(
             header.header_response.rect.union(
@@ -3577,20 +3540,9 @@ impl VistaForgeApp {
             .default_open(true)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.project.materials.enabled, "Matériaux activés");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button("Voir en avant/après (CPU)")
-                        .on_hover_text(
-                            "Le viewport GPU n'affiche ni le détail continu ni les matières. Ce bouton bascule sur le rendu CPU avec une comparaison figée.",
-                        )
-                        .clicked()
-                    {
-                        self.cpu_preview_forced = true;
-                        self.compare_start(ui.ctx());
-                    }
-                });
                 let m = &mut self.project.materials;
                 let mut changed = false;
+                let mut new_rock_preset: Option<String> = None;
                 ui.horizontal(|ui| {
                     ui.label("Roche procédurale");
                     let mut preset = m.rock_preset.clone();
@@ -3602,13 +3554,43 @@ impl VistaForgeApp {
                             }
                         });
                     if preset != m.rock_preset {
-                        m.rock_preset = preset;
+                        m.rock_preset = preset.clone();
+                        changed = true;
+                        new_rock_preset = Some(preset.clone());
+                    }
+                });
+                changed |= ui
+                    .checkbox(
+                        &mut self.link_detail_to_material,
+                        "Lier la géométrie de détail au preset de roche",
+                    )
+                    .on_hover_text(
+                        "Quand vous changez de roche, le profil de détail (tafoni, bancs, joints, grain) suit. La tolérance adaptative et les quads sont conservés.",
+                    )
+                    .changed();
+                if let Some(name) = new_rock_preset.as_deref()
+                    && self.link_detail_to_material
+                    && self.project.detail.enabled
+                {
+                    self.project.detail.apply_preset(name);
+                }
+                changed |= param_f32(ui, "Roche", "", &mut m.rock, 0.0, 1.0, 0.8);
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Bump et déplacement").strong());
+                    if ui
+                        .button("Zéro bruit")
+                        .on_hover_text("Remet bump, détail de normale et déplacements à zéro.")
+                        .clicked()
+                    {
+                        m.bump_strength = 0.0;
+                        m.detail_normal = 0.0;
+                        m.texture_bump = 0.0;
+                        m.displacement_m = 0.0;
+                        m.texture_displacement_m = 0.0;
                         changed = true;
                     }
                 });
-                changed |= param_f32(ui, "Roche", "", &mut m.rock, 0.0, 1.0, 0.8);
-                ui.separator();
-                ui.label(egui::RichText::new("Bump et déplacement").strong());
                 changed |= param_f32(
                     ui,
                     "Bump",
@@ -3704,24 +3686,6 @@ impl VistaForgeApp {
                     .weak(),
                 );
                 ui.separator();
-                changed |= param_f32(
-                    ui,
-                    "Détail (normale)",
-                    "",
-                    &mut m.detail_normal,
-                    0.0,
-                    1.0,
-                    0.32,
-                );
-                changed |= param_f32(
-                    ui,
-                    "Échelle détail",
-                    "m",
-                    &mut m.detail_scale_m,
-                    1.0,
-                    200.0,
-                    34.0,
-                );
                 changed |= param_f32(ui, "Éboulis", "", &mut m.scree, 0.0, 1.0, 0.4);
                 changed |= param_f32(ui, "Pente éboulis", "", &mut m.scree_slope, 0.0, 1.0, 0.42);
                 changed |= param_f32(ui, "Neige", "", &mut m.snow_coverage, 0.0, 1.0, 0.55);
@@ -4053,6 +4017,33 @@ impl VistaForgeApp {
         self.anim_live_sample = None;
         self.anim_track_error = None;
         self.project.mark_modified();
+    }
+
+    /// Clear the authored animation and restore a fresh default rig. The
+    /// current camera/view is kept so the user can start drawing again from
+    /// the same inspection angle; Ctrl+Z restores the previous animation.
+    fn reset_animation(&mut self) {
+        let seed = self.project.rig.seed;
+        self.project.rig = CameraRig {
+            enabled: true,
+            seed,
+            ..CameraRig::default()
+        };
+        self.rig_time = 0.0;
+        self.anim_view = animation_ui::AnimViewMode::Design;
+        self.anim_design_camera = None;
+        self.anim_editor.selection = None;
+        self.anim_edit_target = false;
+        self.anim_track = None;
+        self.anim_track_error = None;
+        self.anim_live_sample = None;
+        self.anim_trail_cache = None;
+        self.anim_compare_cache = None;
+        self.anim_curve_cache = None;
+        self.anim_framed = false;
+        self.rig_status = "Animation réinitialisée · Ctrl+Z pour revenir".into();
+        self.mark_animation_changed();
+        self.mark_camera_dirty();
     }
 
     /// Return the precomputed animation track for the current rig revision.
@@ -4474,22 +4465,6 @@ impl VistaForgeApp {
         let (Some(step), Some(dir)) = (step, dir) else {
             return;
         };
-        if step.name == "workspace_compare" {
-            if self.capture_compare_stage == 0 {
-                if self.compare.before.is_some() {
-                    // The baseline is frozen; now make a visible change for
-                    // the right side of the split.
-                    self.capture_compare_stage = 1;
-                    self.project.materials.rock_preset = "basalt".into();
-                    self.project.materials.bump_strength = 1.1;
-                    self.mark_dirty();
-                }
-                return;
-            }
-            if self.capture_compare_stage == 1 {
-                return;
-            }
-        }
         if frame < 28
             || self.render_task.is_some()
             || self.task.is_some()
@@ -4508,13 +4483,6 @@ impl VistaForgeApp {
 
     fn capture_apply_step(&mut self, step: CaptureStep, ctx: &egui::Context) {
         self.workspace = step.workspace;
-        if step.name == "workspace_compare" {
-            // Start comparison and let the baseline render finish before the
-            // capture mutates the material (see `pump_capture`).
-            self.cpu_preview_forced = true;
-            self.capture_compare_stage = 0;
-            self.compare_start(ctx);
-        }
         self.preferences_open = step.preferences;
         self.anim_tab = step.anim_tab;
         self.anim_compare = step.compare;
@@ -4574,6 +4542,22 @@ impl VistaForgeApp {
                     self.anim_tab = tab;
                 }
             }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Réinitialiser l'animation")
+                .on_hover_text(
+                    "Efface le tracé, la cible et les réglages du rig. La caméra de vue est conservée ; Ctrl+Z permet de revenir.",
+                )
+                .clicked()
+            {
+                self.reset_animation();
+            }
+            ui.label(
+                egui::RichText::new("remet le rig par défaut, sans toucher à la caméra de vue")
+                    .small()
+                    .weak(),
+            );
         });
         ui.separator();
         if !self.anim_editor.is_dragging() && !self.anim_timeline.is_dragging() {
@@ -6887,33 +6871,6 @@ impl VistaForgeApp {
             help_topic_for_workspace(self.workspace),
         );
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                self.preview_quality_picker(ui);
-                if ui
-                    .button("Aperçu")
-                    .on_hover_text(
-                        "Relance l'aperçu CPU à la qualité choisie. « Finale » rend à la résolution de sortie.",
-                    )
-                    .clicked()
-                {
-                    self.start_quality_preview(ctx.clone());
-                }
-                if ui
-                    .selectable_label(self.compare.enabled, "Avant/Après")
-                    .on_hover_text(
-                        "Compare le rendu CPU figé à l'état courant, directement depuis ce panneau.",
-                    )
-                    .clicked()
-                {
-                    if self.compare.enabled {
-                        self.compare_apply(ctx);
-                    } else {
-                        self.cpu_preview_forced = true;
-                        self.compare_start(ctx);
-                    }
-                }
-            });
-            ui.separator();
             match self.workspace {
                 Workspace::Help => {}
                 Workspace::Terrain => self.terrain_ui(ui, ctx),
@@ -7792,25 +7749,13 @@ impl VistaForgeApp {
                         .weak(),
                     );
                 }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_sized(
-                            [ui.available_width() * 0.55, 28.0],
-                            egui::Button::new("Render"),
-                        )
-                        .on_hover_text("Rendu final CPU déterministe, à la résolution de sortie")
-                        .clicked()
-                    {
-                        self.start_render(ctx.clone(), true);
-                    }
-                    if ui
-                        .button("Preview")
-                        .on_hover_text("Aperçu CPU à la qualité choisie dans le panneau")
-                        .clicked()
-                    {
-                        self.start_quality_preview(ctx.clone());
-                    }
-                });
+                ui.label(
+                    egui::RichText::new(
+                        "Le rendu final CPU se lance avec le bouton Render de la barre d'outils.",
+                    )
+                    .small()
+                    .weak(),
+                );
                 if self.render_task.as_ref().is_some_and(|task| task.full) {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -8856,100 +8801,6 @@ impl VistaForgeApp {
 
         self.last_viewport_rect = rect;
 
-        // Before/after split. The CPU preview is drawn full-size first; the
-        // frozen image is then repainted over the left part with a clip rect,
-        // and a draggable vertical line marks the boundary.
-        if self.compare.enabled {
-            let line_x = rect.left() + rect.width() * self.compare.split.clamp(0.0, 1.0);
-            let pointer = ui.input(|input| input.pointer.interact_pos());
-            if let Some(pointer) = pointer
-                && response.contains_pointer()
-                && ui.input(|input| input.pointer.primary_pressed())
-                && (pointer.x - line_x).abs() <= 16.0
-            {
-                self.compare.dragging = true;
-            }
-            if !ui.input(|input| input.pointer.primary_down()) {
-                self.compare.dragging = false;
-            }
-            if self.compare.dragging
-                && let Some(pointer) = pointer
-            {
-                self.compare.split =
-                    ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
-            }
-            let line_x = rect.left() + rect.width() * self.compare.split.clamp(0.0, 1.0);
-            if let Some(before) = self.compare.before.clone() {
-                // Draw the frozen image first, then the live image clipped to
-                // the right. This makes the left/right ownership explicit and
-                // avoids relying on the texture painted earlier by the
-                // viewport path.
-                ui.painter().image(
-                    before.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                if let Some(after) = self.texture.clone() {
-                    let clip = egui::Rect::from_min_max(egui::pos2(line_x, rect.top()), rect.max);
-                    ui.painter().with_clip_rect(clip).image(
-                        after.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                }
-            }
-            let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 235, 180));
-            ui.painter().line_segment(
-                [
-                    egui::pos2(line_x, rect.top()),
-                    egui::pos2(line_x, rect.bottom()),
-                ],
-                stroke,
-            );
-            ui.painter().circle_filled(
-                egui::pos2(line_x, rect.center().y),
-                7.0,
-                egui::Color32::from_rgb(255, 235, 180),
-            );
-            ui.painter().circle_stroke(
-                egui::pos2(line_x, rect.center().y),
-                8.0,
-                egui::Stroke::new(1.0, egui::Color32::BLACK),
-            );
-            ui.painter().text(
-                rect.left_top() + egui::vec2(10.0, 30.0),
-                egui::Align2::LEFT_TOP,
-                "AVANT",
-                egui::FontId::proportional(13.0),
-                egui::Color32::from_rgb(255, 235, 180),
-            );
-            ui.painter().text(
-                rect.right_top() + egui::vec2(-10.0, 30.0),
-                egui::Align2::RIGHT_TOP,
-                "APRÈS",
-                egui::FontId::proportional(13.0),
-                egui::Color32::from_rgb(255, 235, 180),
-            );
-            let button_size = egui::vec2(92.0, 24.0);
-            let apply_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.left() + 10.0, rect.bottom() - 34.0),
-                button_size,
-            );
-            let revert_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.left() + 108.0, rect.bottom() - 34.0),
-                button_size,
-            );
-            let apply = ui.put(apply_rect, egui::Button::new("Appliquer"));
-            let revert = ui.put(revert_rect, egui::Button::new("Revenir"));
-            if apply.clicked() {
-                self.compare_apply(ui.ctx());
-            } else if revert.clicked() {
-                self.compare_revert(ui.ctx());
-            }
-        }
-
         if gpu_active && let Some(gpu) = self.gpu.as_ref() {
             let camera = self.project.camera.clone();
             if let Some(callback) = gpu.callback(&camera, &self.project, image_px[0], image_px[1]) {
@@ -9074,12 +8925,7 @@ impl VistaForgeApp {
         let pan_drag = response.dragged_by(egui::PointerButton::Middle)
             || response.dragged_by(egui::PointerButton::Secondary)
             || (response.dragged_by(egui::PointerButton::Primary) && shift_held);
-        if pan_drag
-            && !pointer_over_gizmo
-            && !editor_consumed
-            && !pointer_over_transport
-            && !self.compare.enabled
-        {
+        if pan_drag && !pointer_over_gizmo && !editor_consumed && !pointer_over_transport {
             // Pan in the screen plane: move the orbit pivot (and therefore the
             // camera) along the current camera right/up axes. The previous
             // controls could only orbit and zoom, which made it impossible to
@@ -9103,7 +8949,6 @@ impl VistaForgeApp {
             && !pointer_over_gizmo
             && !editor_consumed
             && !pointer_over_transport
-            && !self.compare.enabled
             && !shift_held
         {
             self.leave_animation_shot_for_orbit();
@@ -9471,33 +9316,35 @@ impl eframe::App for VistaForgeApp {
                 if render_button.clicked() {
                     self.start_render(ctx.clone(), true);
                 }
+                ui.separator();
+                let gpu_available = self.gpu_enabled && self.gpu.is_some();
+                ui.label("Vue");
                 if ui
-                    .selectable_label(self.cpu_preview_forced, "Vue CPU")
+                    .add_enabled(
+                        gpu_available,
+                        egui::Button::selectable(!self.cpu_preview_forced && gpu_available, "GPU"),
+                    )
+                    .on_hover_text("Vue 3D temps réel (navigation, détail et matières simplifiés).")
+                    .clicked()
+                {
+                    self.switch_view(&ctx, false);
+                }
+                if ui
+                    .selectable_label(self.cpu_preview_forced || !gpu_available, "CPU")
                     .on_hover_text(
-                        "Affiche le rendu CPU complet (détail continu, matières, bump, déplacement, textures importées). Plus lent que la vue GPU mais c'est lui qui montre les effets.",
+                        "Rendu CPU complet : détail, matières, bump, déplacement et textures. Plus lent mais c'est la référence.",
                     )
                     .clicked()
                 {
-                    self.cpu_preview_forced = !self.cpu_preview_forced;
-                    if self.cpu_preview_forced {
-                        self.texture = None;
-                        self.mark_dirty();
-                        self.start_render(ctx.clone(), false);
-                    } else {
-                        self.refresh_preview(ctx.clone());
-                    }
+                    self.switch_view(&ctx, true);
                 }
-                let compare_button = ui
-                    .selectable_label(self.compare.enabled, "Avant/Après")
-                    .on_hover_text(
-                        "Compare le rendu CPU figé à l'état courant. Faites glisser la ligne verticale ; Appliquer garde le résultat, Revenir restaure l'état d'avant.",
-                    );
-                if compare_button.clicked() {
-                    if self.compare.enabled {
-                        self.compare_apply(&ctx);
-                    } else {
-                        self.compare_start(&ctx);
-                    }
+                self.preview_quality_picker(ui);
+                if ui
+                    .button("Aperçu")
+                    .on_hover_text("Bascule en vue CPU et relance l'aperçu à la qualité choisie.")
+                    .clicked()
+                {
+                    self.start_quality_preview(ctx.clone());
                 }
                 if self.render_task.is_some() {
                     ui.spinner();

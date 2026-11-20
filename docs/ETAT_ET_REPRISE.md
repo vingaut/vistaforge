@@ -5,11 +5,13 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail adaptatif/quads, matières procédurales, pan, avant/après — livré).
+Dernière mise à jour : **2026-11-20** (simplification UI GPU/CPU, relief rocheux procédural, hautes résolutions — en cours).
+
+> **Note du 20 novembre** : le comparateur avant/après a été **retiré** de l'interface. Les mentions ci-dessous sont historiques ; la vue se choisit désormais par un simple sélecteur **GPU / CPU** dans la barre d'outils. La suite (simplification, relief rocheux procédural, hautes résolutions) est décrite dans [`SESSION_2026-11-20.md`](SESSION_2026-11-20.md).
 
 ---
 
-## 0novodecies. Session du 19 novembre — heightmap, animation, détail adaptatif, matières, pan et avant/après (LIVRÉ)
+## 0novodecies. Session du 19 novembre — heightmap, animation, détail adaptatif, matières, pan (comparateur retiré le 20)
 
 > **État : livré, testé, non poussé.** `cargo test --workspace` : **268 tests
 > verts** ; `clippy -D warnings` propre ; `cargo fmt` appliqué. Le plan de
@@ -98,8 +100,8 @@ Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail
 
 - **PAN** : clic droit, bouton du milieu ou `Maj` + glisser déplace le pivot
   dans le plan écran ; l'orbite et le zoom restent inchangés.
-- **Vue CPU** : bouton de barre d'outils pour forcer le rendu complet (détail,
-  matières, bump, textures), même quand le GPU est disponible.
+- **Vue GPU / CPU** : sélecteur unique dans la barre d'outils (le comparateur
+  avant/après a été retiré le 20 novembre).
 - **AVANT / APRÈS** : bouton de barre d'outils ; snapshot du projet + terrain
   au moment de l'activation, rendu CPU figé à gauche, projet courant à droite,
   **ligne verticale déplaçable à la souris**. Boutons **Appliquer** et
@@ -139,8 +141,6 @@ Dernière mise à jour : **2026-11-19 22:00** (heightmap, animation AGL, détail
 - **Qualité d'aperçu** : sélecteur **Brouillon / Normal / Haute / Finale**
   affiché en haut de chaque panneau, avec bouton **Aperçu** ; les boutons
   existants (Modificateurs, Détail, Rendu) utilisent ce niveau.
-- **Comparateur global** : bouton **Avant/Après** dans tous les panneaux, y
-  compris Modificateurs, Roche et Érosion.
 - **Sélecteur de fichier** pour la texture personnelle (PNG/JPEG/TIFF/BMP).
 
 Validation : **268 tests**, clippy propre, rendu de contrôle sur falaise
@@ -162,8 +162,6 @@ Validation : **268 tests**, clippy propre, rendu de contrôle sur falaise
 
 ### Limites restantes
 
-- L'avant/après est validé par la capture `docs/screenshots/compare.png` ;
-  le comparateur n'a pas de raccourci clavier dédié.
 - Le shader GPU est une **approximation** du rendu CPU (bump, neige,
   végétation) ; le CPU reste la référence.
 - La peinture n'a pas d'annuler/rétablir local (le PNG est réécrit à chaque

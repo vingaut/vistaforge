@@ -173,7 +173,7 @@ pub fn export_project(
     write_obj(&obj_path, &mesh, project.detail.quad_mesh)?;
     let heightmap_path = out_dir.join("heightmap_16.png");
     write_heightmap(&export_hf, &heightmap_path)?;
-    let textures = write_texture_maps(project, &export_hf, &sampler, out_dir)?;
+    let textures = write_texture_maps(project, &export_hf, out_dir)?;
     let sidecar_path = out_dir.join("scene.json");
     let sidecar = build_sidecar(
         project,
@@ -706,12 +706,7 @@ fn write_obj(path: &Path, mesh: &MeshData, quads: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_texture_maps(
-    project: &Project,
-    hf: &HeightField,
-    sampler: &DetailSampler<'_>,
-    out_dir: &Path,
-) -> Result<TexturePaths> {
+fn write_texture_maps(project: &Project, hf: &HeightField, out_dir: &Path) -> Result<TexturePaths> {
     // Bake in UV0 (planar world projection), not from the mesh grid: the
     // shape-adaptive mesh has no nx/ny and its vertices are not on a regular
     // lattice. Sampling the surface through the same albedo helper keeps the
@@ -744,9 +739,13 @@ fn write_texture_maps(
             let u = (ox_px as f64 + 0.5) / tw as f64;
             let x = ox + u * ex;
             let gx = u * (hf.width() - 1) as f64;
-            let footprint = (sx.max(sy)) as f32;
-            let z = sampler.height(x, y, footprint);
-            let normal = sampler.normal(x, y, footprint);
+            // The texture bake only needs the base surface: the detailed
+            // geometry is already in the mesh and evaluating the full detail
+            // field per texel made a 4096² bake prohibitively slow.
+            let z = hf.sample_bilinear(gx, gy);
+            let cell_x = gx.round().clamp(0.0, (hf.width() - 1) as f64) as usize;
+            let cell_y = gy.round().clamp(0.0, (hf.height() - 1) as f64) as usize;
+            let normal = hf.normal_at(cell_x, cell_y, 1.0);
             let masks = masks_at(project, x, y, z, normal, stats.min, relief);
             let color = material_albedo(
                 project,
@@ -1000,7 +999,6 @@ mod tests {
         let mut project = Project::new("normals", Seed::new(2), width as u32);
         project.detail.enabled = false;
         project.sync_terrain(&hf);
-        let sampler = DetailSampler::new(&hf, &project.detail, project.seed);
         let dir = std::env::temp_dir().join(format!(
             "vf-export-normal-{}-{}",
             std::process::id(),
@@ -1008,7 +1006,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        write_texture_maps(&project, &hf, &sampler, &dir).unwrap();
+        write_texture_maps(&project, &hf, &dir).unwrap();
         let image = image::open(dir.join("normal.png")).unwrap().to_rgb8();
         let green = image.get_pixel(width as u32 / 2, width as u32 / 2)[1];
         assert!(

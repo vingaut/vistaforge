@@ -179,6 +179,94 @@ impl RockStyle {
                 lichen: 0.03,
                 speckle: 0.60,
             },
+            "chert" => Self {
+                tint: [0.52, 0.55, 0.60],
+                bedding_m: 0.0,
+                bedding_strength: 0.0,
+                grain_m: 0.7,
+                grain_strength: 0.10,
+                crack_m: 22.0,
+                crack_strength: 0.55,
+                lichen: 0.02,
+                speckle: 0.18,
+            },
+            "andesite" => Self {
+                tint: [0.86, 0.82, 0.88],
+                bedding_m: 0.0,
+                bedding_strength: 0.0,
+                grain_m: 1.8,
+                grain_strength: 0.32,
+                crack_m: 26.0,
+                crack_strength: 0.40,
+                lichen: 0.06,
+                speckle: 0.55,
+            },
+            "marble" => Self {
+                tint: [1.28, 1.25, 1.18],
+                bedding_m: 0.0,
+                bedding_strength: 0.0,
+                grain_m: 3.2,
+                grain_strength: 0.14,
+                crack_m: 20.0,
+                crack_strength: 0.28,
+                lichen: 0.01,
+                speckle: 0.12,
+            },
+            "phyllite" => Self {
+                tint: [0.82, 0.90, 0.84],
+                bedding_m: 1.8,
+                bedding_strength: 0.85,
+                grain_m: 0.7,
+                grain_strength: 0.28,
+                crack_m: 9.0,
+                crack_strength: 0.55,
+                lichen: 0.18,
+                speckle: 0.28,
+            },
+            "slate" => Self {
+                tint: [0.55, 0.61, 0.70],
+                bedding_m: 1.1,
+                bedding_strength: 0.90,
+                grain_m: 0.6,
+                grain_strength: 0.18,
+                crack_m: 8.0,
+                crack_strength: 0.60,
+                lichen: 0.10,
+                speckle: 0.18,
+            },
+            "gneiss" => Self {
+                tint: [1.02, 0.90, 0.88],
+                bedding_m: 2.6,
+                bedding_strength: 0.75,
+                grain_m: 1.4,
+                grain_strength: 0.30,
+                crack_m: 30.0,
+                crack_strength: 0.35,
+                lichen: 0.08,
+                speckle: 0.38,
+            },
+            "conglomerate" => Self {
+                tint: [1.12, 0.96, 0.80],
+                bedding_m: 0.0,
+                bedding_strength: 0.0,
+                grain_m: 1.9,
+                grain_strength: 0.42,
+                crack_m: 38.0,
+                crack_strength: 0.30,
+                lichen: 0.05,
+                speckle: 0.80,
+            },
+            "travertine" => Self {
+                tint: [1.22, 1.14, 0.96],
+                bedding_m: 7.0,
+                bedding_strength: 0.75,
+                grain_m: 2.2,
+                grain_strength: 0.12,
+                crack_m: 28.0,
+                crack_strength: 0.35,
+                lichen: 0.03,
+                speckle: 0.15,
+            },
             _ => Self {
                 tint: [1.0; 3],
                 bedding_m: 0.0,
@@ -404,6 +492,11 @@ mod tests {
         let basalt = RockStyle::preset("basalt").shade(base, pos, 0.4, &noise, 7.0);
         let sandstone = RockStyle::preset("sandstone").shade(base, pos, 0.4, &noise, 7.0);
         let distance = |a: Rgb, b: Rgb| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+        for name in vf_core::ROCK_PRESETS {
+            let style = RockStyle::preset(name);
+            let c = style.shade(base, pos, 0.4, &noise, 7.0);
+            assert!(c.r.is_finite() && c.g.is_finite() && c.b.is_finite());
+        }
         assert!(distance(granite, basalt) > 0.05);
         assert!(distance(granite, sandstone) > 0.05);
         assert!(distance(basalt, sandstone) > 0.05);

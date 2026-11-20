@@ -212,7 +212,10 @@ impl<'a> ShadeCtx<'a> {
     /// catch the light like rock instead of smooth clay.
     fn detail_normal(&self, n: Vec3, p: Vec3, distance: f32) -> Vec3 {
         let mats = &self.project.materials;
-        if !mats.enabled || mats.detail_normal <= 0.0 || mats.detail_scale_m <= 0.0 {
+        if !mats.enabled
+            || (mats.bump_strength <= 0.0 && mats.texture_bump <= 0.0)
+            || mats.bump_scale_m <= 0.0
+        {
             return n;
         }
         // Fade out with distance: high-frequency detail would alias the ridges.
@@ -238,7 +241,7 @@ impl<'a> ShadeCtx<'a> {
         let h0 = f(u, v);
         let hu = f(u + eps, v);
         let hv = f(u, v + eps);
-        let k = mats.bump_strength.max(mats.detail_normal) * 2.0 * fade;
+        let k = mats.bump_strength * 2.0 * fade;
         let mut perturbed = n - tangent * ((hu - h0) * k) - bitangent * ((hv - h0) * k);
         // Custom texture bump: luminance gradient in tile space. The texture
         // is sampled in world XY so it stays stable while the camera moves.

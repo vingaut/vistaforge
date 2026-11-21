@@ -110,10 +110,11 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 | Patagonie, tours verticales | ![Patagonie](docs/screenshots/patagonia.png) |
 | Crépuscule étoilé | ![Crépuscule](docs/screenshots/dusk.png) |
 
-## Binaires précompilés (Linux x86_64)
+## Binaires précompilés (Linux et Windows x86_64)
 
 Les exécutables `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
-[`dist/linux-x86_64/`](dist/linux-x86_64/), avec leurs sommes SHA-256 :
+[`dist/linux-x86_64/`](dist/linux-x86_64/) et
+[`dist/windows-x86_64/`](dist/windows-x86_64/), avec leurs sommes SHA-256 :
 
 ```bash
 cd dist/linux-x86_64
@@ -122,9 +123,16 @@ cd dist/linux-x86_64
 ./vistaforge-mcp --workspace .
 ```
 
-Voir [`dist/README.md`](dist/README.md) pour les prérequis (Vulkan/OpenGL,
-glibc) et la procédure de vérification. Les binaires sont Linux x86_64 ;
-macOS et Windows se compilent depuis la source.
+```powershell
+cd dist\windows-x86_64
+.\vistaforge.exe --help
+.\vistaforge-app.exe
+.\vistaforge-mcp.exe --workspace .
+```
+
+Voir [`dist/README.md`](dist/README.md) pour les prérequis (Vulkan/DX12 ou
+OpenGL, glibc, runtime MSVC) et la procédure de vérification. macOS se
+compile depuis la source.
 
 ## Démarrage rapide
 

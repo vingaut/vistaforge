@@ -23,7 +23,14 @@ chmod +x dist/linux-x86_64/vistaforge-mcp
 Git conserve le bit exécutable (`100755`) ; si le dépôt a été téléchargé en ZIP,
 `chmod +x` est nécessaire.
 
-### macOS, Windows ou autre architecture : recompiler
+### Windows x86_64 : binaire déjà dans le dépôt
+
+```powershell
+.\dist\windows-x86_64\vistaforge-mcp.exe --version
+# vistaforge-mcp 0.2.0
+```
+
+### macOS ou autre architecture : recompiler
 
 ```bash
 # Rust s'installe via https://rustup.rs ; la toolchain 1.99.1 est épinglée.

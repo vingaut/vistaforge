@@ -6,7 +6,7 @@ depuis la source de ce dépôt avec `cargo build --release` :
 | Plateforme | Dossier | Compilation |
 |---|---|---|
 | Linux x86_64 | [`linux-x86_64/`](linux-x86_64/README.md) | Rust 1.99.1, binaires `strip`és |
-| Windows x86_64 | [`windows-x86_64/`](windows-x86_64/README.md) | Rust 1.99.1 MSVC |
+| Windows x86_64 | [`windows-x86_64/`](windows-x86_64/README.md) | Rust 1.99.1 MSVC, version 0.2.0 |
 
 Chaque dossier contient les trois exécutables et un `SHA256SUMS` :
 
@@ -19,7 +19,8 @@ Chaque dossier contient les trois exécutables et un `SHA256SUMS` :
 Tailles Linux : CLI 6,8 Mo, interface 27 Mo, serveur MCP 5,3 Mo, binaires
 `strip`és. Tailles Windows (non `strip`és) : CLI 5,4 Mo, interface 21,9 Mo,
 serveur MCP 4,2 Mo. Les binaires Linux ont été reconstruits le 20 novembre
-2026 et les binaires Windows le 22 novembre 2026 depuis l'arbre de travail
+2026 (version 0.1.0, à reconstruire sur Linux pour aligner sur 0.2.0) et les
+binaires Windows le 22 novembre 2026 (version 0.2.0) depuis l'arbre de travail
 courant (interface GPU/CPU unifiée, tafoni/bancs/joints/oolithes, presets
 rocheux enrichis, résolutions 2048–8192, caméra conservée, aperçus
 Brouillon → Finale).

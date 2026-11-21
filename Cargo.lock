@@ -2868,7 +2868,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vf-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "vf-ui",
@@ -2876,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "vf-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "vf-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "ron",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "vf-detail"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vf-core",
  "vf-procgen",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "vf-export"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "image",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "vf-flight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "vf-core",
@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "vf-geology"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vf-core",
  "vf-procgen",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "vf-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "ron",
@@ -2967,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "vf-material"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "image",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "vf-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "clap",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "vf-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "vf-core",
@@ -3011,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "vf-modifiers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vf-core",
  "vf-procgen",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "vf-procgen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vf-core",
  "vf-terrain",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "vf-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "rayon",
@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "vf-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "vf-core",
@@ -3056,14 +3056,14 @@ dependencies = [
 
 [[package]]
 name = "vf-terrain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "vf-core",
 ]
 
 [[package]]
 name = "vf-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "eframe",

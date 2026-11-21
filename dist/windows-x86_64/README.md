@@ -1,8 +1,8 @@
 # Binaires précompilés — Windows x86_64
 
-Ce dossier contient les binaires **Windows x86_64** de VistaForge, construits
-depuis la source de ce dépôt avec `cargo build --release -p vf-cli -p vf-mcp
--p vf-app`.
+Ce dossier contient les binaires **Windows x86_64** de VistaForge **0.2.0**,
+construits depuis la source de ce dépôt avec `cargo build --release -p vf-cli
+-p vf-mcp -p vf-app`.
 
 | Binaire | Rôle | Taille |
 |---|---|---|
@@ -10,9 +10,9 @@ depuis la source de ce dépôt avec `cargo build --release -p vf-cli -p vf-mcp
 | `vistaforge-app.exe` | Interface graphique `egui` + viewport GPU wgpu (Vulkan/DX12) et aperçu CPU. | 21,9 Mo |
 | `vistaforge-mcp.exe` | Serveur MCP stdio (29 outils). | 4,2 Mo |
 
-Construits le 22 novembre 2026 depuis l'arbre de travail courant
-(commit `7f294f5`, interface GPU/CPU unifiée, tafoni/bancs/joints/oolithes,
-presets rocheux enrichis, résolutions 2048–8192). Toolchain épinglée
+Construits le 22 novembre 2026 depuis `master`, release `v0.2.0` (interface
+GPU/CPU unifiée, tafoni/bancs/joints/oolithes, presets rocheux enrichis,
+résolutions 2048–8192). Toolchain épinglée
 `1.99.1-x86_64-pc-windows-msvc`, profil `release` (`lto = "thin"`,
 `codegen-units = 1`, `panic = "abort"`).
 
@@ -21,6 +21,7 @@ presets rocheux enrichis, résolutions 2048–8192). Toolchain épinglée
 ```powershell
 cd dist\windows-x86_64
 .\vistaforge.exe --version
+# vistaforge 0.2.0
 .\vistaforge.exe --help
 
 # Interface

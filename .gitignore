@@ -26,3 +26,6 @@ __pycache__/
 /dist/**/blender-out/
 /dist/**/export/
 /dist/**/anim-out/
+/dist/**/mesh-out/
+# Generated demo assets (projects are ignored by the *.vfproj rule)
+/demo/

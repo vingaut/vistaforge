@@ -11,9 +11,11 @@ bytemuck.workspace = true
 eframe.workspace = true
 glam.workspace = true
 image.workspace = true
+pollster.workspace = true
 ron.workspace = true
 serde.workspace = true
 vf-core = { path = "../vf-core" }
+vf-compute = { path = "../vf-compute" }
 vf-detail = { path = "../vf-detail" }
 vf-export = { path = "../vf-export" }
 vf-geology = { path = "../vf-geology" }
@@ -25,6 +27,7 @@ vf-modifiers = { path = "../vf-modifiers" }
 vf-procgen = { path = "../vf-procgen" }
 vf-render = { path = "../vf-render" }
 vf-scene = { path = "../vf-scene" }
+vf-sculpt = { path = "../vf-sculpt" }
 vf-terrain = { path = "../vf-terrain" }
 
 [lints]

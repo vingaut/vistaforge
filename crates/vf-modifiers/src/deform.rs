@@ -1,5 +1,6 @@
 //! Deformation operators: displace, warp, transform, swirl and fold.
 
+use rayon::prelude::*;
 use vf_core::{HeightField, Modifier, Result, Seed};
 
 use crate::{noise_for, rebuild, rotate, sample_world, slope_at, world_extent};
@@ -16,23 +17,29 @@ pub fn displace(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Hei
     let (ox, oy, _, _) = world_extent(hf);
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = (ox + x as f64 * sx) as f32;
-            let wy = (oy + y as f64 * sy) as f32;
-            let (u, v) = rotate(wx, wy, angle);
-            // Stretch across the direction: elongated ridges instead of blobs.
-            let (a, b) = (u / scale, v / (scale * 0.45));
-            let fbm = noise.fbm01(a, b, 5, 2.0, 0.5);
-            let ridge = noise.ridged2(a + 13.7, b - 8.1, 3, 2.0, 0.5);
-            let n = fbm * (1.0 - ridged) + ridge * ridged;
-            let i = y * hf.width() + x;
-            heights[i] += (n - 0.5) * 2.0 * amount;
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = (ox + x as f64 * sx) as f32;
+                    let wy = (oy + y as f64 * sy) as f32;
+                    let (u, v) = rotate(wx, wy, angle);
+                    // Stretch across the direction: elongated ridges instead
+                    // of blobs.
+                    let (a, b) = (u / scale, v / (scale * 0.45));
+                    let fbm = noise.fbm01(a, b, 5, 2.0, 0.5);
+                    let ridge = noise.ridged2(a + 13.7, b - 8.1, 3, 2.0, 0.5);
+                    let n = fbm * (1.0 - ridged) + ridge * ridged;
+                    *out += (n - 0.5) * 2.0 * amount;
+                }
+            });
+    });
     rebuild(hf, heights)
 }
 
@@ -48,26 +55,33 @@ pub fn warp(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<HeightF
     let (ox, oy, _, _) = world_extent(hf);
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = ox + x as f64 * sx;
-            let wy = oy + y as f64 * sy;
-            let slope = slope_at(hf, x, y);
-            // Directional warp: the noise is stretched along `angle`, and the
-            // displacement follows the local slope when bias is high.
-            let bias = 1.0 - slope_bias + slope_bias * crate::smoothstep(0.25, 1.20, slope);
-            let (u, v) = rotate(wx as f32, wy as f32, angle);
-            let n1 = noise.fbm2(u / scale, v / (scale * 0.5), 4, 2.0, 0.5);
-            let n2 = noise.fbm2(u / scale + 31.7, v / (scale * 0.5) - 17.3, 4, 2.0, 0.5);
-            let (dx, dy) = rotate(n1, n2 * 0.6, angle);
-            let px = wx + f64::from(dx * amount * bias);
-            let py = wy + f64::from(dy * amount * bias);
-            heights[y * hf.width() + x] = sample_world(hf, px, py, false);
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = ox + x as f64 * sx;
+                    let wy = oy + y as f64 * sy;
+                    let slope = slope_at(hf, x, y);
+                    // Directional warp: the noise is stretched along `angle`,
+                    // and the displacement follows the local slope when bias
+                    // is high.
+                    let bias = 1.0 - slope_bias + slope_bias * crate::smoothstep(0.25, 1.20, slope);
+                    let (u, v) = rotate(wx as f32, wy as f32, angle);
+                    let n1 = noise.fbm2(u / scale, v / (scale * 0.5), 4, 2.0, 0.5);
+                    let n2 = noise.fbm2(u / scale + 31.7, v / (scale * 0.5) - 17.3, 4, 2.0, 0.5);
+                    let (dx, dy) = rotate(n1, n2 * 0.6, angle);
+                    let px = wx + f64::from(dx * amount * bias);
+                    let py = wy + f64::from(dy * amount * bias);
+                    *out = sample_world(hf, px, py, false);
+                }
+            });
+    });
     rebuild(hf, heights)
 }
 
@@ -85,22 +99,28 @@ pub fn transform(hf: &HeightField, modifier: &Modifier) -> Result<HeightField> {
     let cy = oy + ey * 0.5;
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = ox + x as f64 * sx;
-            let wy = oy + y as f64 * sy;
-            // Inverse transform around the terrain centre.
-            let dx = wx - cx - offset_x;
-            let dy = wy - cy - offset_y;
-            let (rx, ry) = rotate(dx as f32, dy as f32, -rotation);
-            let qx = cx + f64::from(rx) / scale;
-            let qy = cy + f64::from(ry) / scale;
-            heights[y * hf.width() + x] = sample_world(hf, qx, qy, repeat);
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = ox + x as f64 * sx;
+                    let wy = oy + y as f64 * sy;
+                    // Inverse transform around the terrain centre.
+                    let dx = wx - cx - offset_x;
+                    let dy = wy - cy - offset_y;
+                    let (rx, ry) = rotate(dx as f32, dy as f32, -rotation);
+                    let qx = cx + f64::from(rx) / scale;
+                    let qy = cy + f64::from(ry) / scale;
+                    *out = sample_world(hf, qx, qy, repeat);
+                }
+            });
+    });
     rebuild(hf, heights)
 }
 
@@ -116,27 +136,31 @@ pub fn swirl(hf: &HeightField, modifier: &Modifier) -> Result<HeightField> {
     let cy = oy + ey * f64::from(modifier.value("center_y").clamp(0.0, 1.0));
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = ox + x as f64 * sx;
-            let wy = oy + y as f64 * sy;
-            let dx = wx - cx;
-            let dy = wy - cy;
-            let r = (dx * dx + dy * dy).sqrt();
-            if r >= radius {
-                heights[y * hf.width() + x] = hf.get(x, y);
-                continue;
-            }
-            let t = (1.0 - r / radius) as f32;
-            let twist = angle * t.powf(1.0 + 1.5 * falloff);
-            let (rx, ry) = rotate(dx as f32, dy as f32, -twist);
-            heights[y * hf.width() + x] =
-                sample_world(hf, cx + f64::from(rx), cy + f64::from(ry), false);
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = ox + x as f64 * sx;
+                    let wy = oy + y as f64 * sy;
+                    let dx = wx - cx;
+                    let dy = wy - cy;
+                    let r = (dx * dx + dy * dy).sqrt();
+                    if r >= radius {
+                        continue;
+                    }
+                    let t = (1.0 - r / radius) as f32;
+                    let twist = angle * t.powf(1.0 + 1.5 * falloff);
+                    let (rx, ry) = rotate(dx as f32, dy as f32, -twist);
+                    *out = sample_world(hf, cx + f64::from(rx), cy + f64::from(ry), false);
+                }
+            });
+    });
     rebuild(hf, heights)
 }
 
@@ -154,28 +178,34 @@ pub fn fold(hf: &HeightField, modifier: &Modifier) -> Result<HeightField> {
     let (dir_x, dir_y) = (angle.cos(), angle.sin());
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = ox + x as f64 * sx;
-            let wy = oy + y as f64 * sy;
-            let dx = wx - cx;
-            let dy = wy - cy;
-            let u = dx * f64::from(dir_x) + dy * f64::from(dir_y);
-            let v = -dx * f64::from(dir_y) + dy * f64::from(dir_x);
-            let phase = (u / period).rem_euclid(2.0);
-            let triangle = 1.0 - (phase - 1.0).abs();
-            let u_fold = period * triangle;
-            let u_mix = u + (u_fold - u) * f64::from(strength);
-            let qx = cx + u_mix * f64::from(dir_x) - v * f64::from(dir_y);
-            let qy = cy + u_mix * f64::from(dir_y) + v * f64::from(dir_x);
-            let ridge = (1.0 - (phase - 1.0).abs()) as f32;
-            let accent = amplitude * (ridge * ridge - 0.35) * strength;
-            heights[y * hf.width() + x] = sample_world(hf, qx, qy, false) + accent;
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = ox + x as f64 * sx;
+                    let wy = oy + y as f64 * sy;
+                    let dx = wx - cx;
+                    let dy = wy - cy;
+                    let u = dx * f64::from(dir_x) + dy * f64::from(dir_y);
+                    let v = -dx * f64::from(dir_y) + dy * f64::from(dir_x);
+                    let phase = (u / period).rem_euclid(2.0);
+                    let triangle = 1.0 - (phase - 1.0).abs();
+                    let u_fold = period * triangle;
+                    let u_mix = u + (u_fold - u) * f64::from(strength);
+                    let qx = cx + u_mix * f64::from(dir_x) - v * f64::from(dir_y);
+                    let qy = cy + u_mix * f64::from(dir_y) + v * f64::from(dir_x);
+                    let ridge = (1.0 - (phase - 1.0).abs()) as f32;
+                    let accent = amplitude * (ridge * ridge - 0.35) * strength;
+                    *out = sample_world(hf, qx, qy, false) + accent;
+                }
+            });
+    });
     rebuild(hf, heights)
 }
 

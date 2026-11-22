@@ -8,6 +8,8 @@ description = "Core data model for VistaForge: seeds, heightfield, scene and pro
 
 [dependencies]
 glam.workspace = true
+rayon.workspace = true
+ron.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

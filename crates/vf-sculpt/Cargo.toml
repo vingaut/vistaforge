@@ -1,0 +1,25 @@
+[package]
+name = "vf-sculpt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sculpting, adaptive remeshing, fracture, voxels, metaballs and debris physics for VistaForge 3D meshes"
+
+[dependencies]
+glam.workspace = true
+image.workspace = true
+rayon.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+vf-compute = { path = "../vf-compute" }
+vf-core = { path = "../vf-core" }
+vf-detail = { path = "../vf-detail" }
+vf-mesh = { path = "../vf-mesh" }
+
+[dev-dependencies]
+approx = "0.5"
+vf-procgen = { path = "../vf-procgen" }
+
+[lints]
+workspace = true

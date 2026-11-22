@@ -3,6 +3,7 @@
 
 use crate::DEFAULT_WORLD_EXTENT_M;
 use crate::noise::Noise;
+use rayon::prelude::*;
 use vf_core::{HeightField, ModernParams, Result, Seed};
 
 /// Generate a modern fractal terrain.
@@ -20,63 +21,77 @@ pub fn generate(params: &ModernParams) -> Result<HeightField> {
     let coast_noise = Noise::new(Seed::new(params.seed).derive("coast"));
     let mut heights = vec![0.0f32; size * size];
 
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for y in 0..size {
-        let v = y as f32 * inv;
-        for x in 0..size {
-            let u = x as f32 * inv;
-            let cx = (u - 0.5) * 2.0;
-            let cy = (v - 0.5) * 2.0;
+    let (min, max) = vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(size)
+            .enumerate()
+            .map(|(y, row)| {
+                let v = y as f32 * inv;
+                let mut local_min = f32::INFINITY;
+                let mut local_max = f32::NEG_INFINITY;
+                for (x, out) in row.iter_mut().enumerate() {
+                    let u = x as f32 * inv;
+                    let cx = (u - 0.5) * 2.0;
+                    let cy = (v - 0.5) * 2.0;
 
-            // Two low-frequency warp fields break the lattice look.
-            let wx = noise.fbm2(
-                u * params.warp_frequency * 1.7 + 11.3,
-                v * params.warp_frequency * 1.7 - 4.2,
-                4,
-                2.0,
-                0.5,
-            );
-            let wy = noise.fbm2(
-                u * params.warp_frequency * 1.7 - 7.1,
-                v * params.warp_frequency * 1.7 + 3.7,
-                4,
-                2.0,
-                0.5,
-            );
-            let qx = u * params.frequency + wx * params.warp_strength;
-            let qy = v * params.frequency + wy * params.warp_strength;
+                    // Two low-frequency warp fields break the lattice look.
+                    let wx = noise.fbm2(
+                        u * params.warp_frequency * 1.7 + 11.3,
+                        v * params.warp_frequency * 1.7 - 4.2,
+                        4,
+                        2.0,
+                        0.5,
+                    );
+                    let wy = noise.fbm2(
+                        u * params.warp_frequency * 1.7 - 7.1,
+                        v * params.warp_frequency * 1.7 + 3.7,
+                        4,
+                        2.0,
+                        0.5,
+                    );
+                    let qx = u * params.frequency + wx * params.warp_strength;
+                    let qy = v * params.frequency + wy * params.warp_strength;
 
-            let base = noise.fbm01(qx, qy, octaves, params.lacunarity, params.gain);
-            let ridge = noise.ridged2(
-                qx * 1.3 + 5.2,
-                qy * 1.3 - 2.4,
-                octaves,
-                params.lacunarity,
-                params.gain,
-            );
-            let mut h = base * (1.0 - params.ridge_strength) + ridge * params.ridge_strength;
+                    let base = noise.fbm01(qx, qy, octaves, params.lacunarity, params.gain);
+                    let ridge = noise.ridged2(
+                        qx * 1.3 + 5.2,
+                        qy * 1.3 - 2.4,
+                        octaves,
+                        params.lacunarity,
+                        params.gain,
+                    );
+                    let mut h =
+                        base * (1.0 - params.ridge_strength) + ridge * params.ridge_strength;
 
-            // Continent/island mask with a noisy coastline.
-            if params.continent > 0.0 {
-                let warp = coast_noise.fbm2(u * 3.1 + 9.0, v * 3.1 - 2.0, 3, 2.0, 0.5) * 0.12;
-                let d = ((cx * cx + cy * cy).sqrt() + warp).max(0.0);
-                let mask = 1.0 - smoothstep(0.42, 1.0, d);
-                h *= 1.0 - params.continent + params.continent * mask;
-            }
+                    // Continent/island mask with a noisy coastline.
+                    if params.continent > 0.0 {
+                        let warp =
+                            coast_noise.fbm2(u * 3.1 + 9.0, v * 3.1 - 2.0, 3, 2.0, 0.5) * 0.12;
+                        let d = ((cx * cx + cy * cy).sqrt() + warp).max(0.0);
+                        let mask = 1.0 - smoothstep(0.42, 1.0, d);
+                        h *= 1.0 - params.continent + params.continent * mask;
+                    }
 
-            heights[y * size + x] = h;
-            min = min.min(h);
-            max = max.max(h);
-        }
-    }
+                    *out = h;
+                    local_min = local_min.min(h);
+                    local_max = local_max.max(h);
+                }
+                (local_min, local_max)
+            })
+            .reduce(
+                || (f32::INFINITY, f32::NEG_INFINITY),
+                |a, b| (a.0.min(b.0), a.1.max(b.1)),
+            )
+    });
 
     // Normalise before adding craters and terraces, which are expressed in
     // normalised units.
     let range = (max - min).max(1e-9);
-    for h in &mut heights {
-        *h = (*h - min) / range;
-    }
+    vf_core::compute::install(|| {
+        heights.par_iter_mut().for_each(|h| {
+            *h = (*h - min) / range;
+        });
+    });
 
     if params.crater > 0.0 {
         add_craters(&mut heights, size, params.crater, params.seed);
@@ -86,23 +101,28 @@ pub fn generate(params: &ModernParams) -> Result<HeightField> {
     }
     if params.terrace_steps > 1 {
         let steps = params.terrace_steps as f32;
-        for h in &mut heights {
-            let q = (*h * steps).round() / steps;
-            *h += (q - *h) * 0.62;
-        }
+        vf_core::compute::install(|| {
+            heights.par_iter_mut().for_each(|h| {
+                let q = (*h * steps).round() / steps;
+                *h += (q - *h) * 0.62;
+            });
+        });
     }
 
     // Renormalise after craters/terraces, then scale to metres.
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &h in &heights {
-        min = min.min(h);
-        max = max.max(h);
-    }
+    let (min, max) = vf_core::compute::install(|| {
+        heights.par_iter().map(|&h| (h, h)).reduce(
+            || (f32::INFINITY, f32::NEG_INFINITY),
+            |a, b| (a.0.min(b.0), a.1.max(b.1)),
+        )
+    });
     let range = (max - min).max(1e-9);
-    for h in &mut heights {
-        *h = (*h - min) / range * params.vertical_scale.max(0.0);
-    }
+    let scale = params.vertical_scale.max(0.0);
+    vf_core::compute::install(|| {
+        heights.par_iter_mut().for_each(|h| {
+            *h = (*h - min) / range * scale;
+        });
+    });
 
     let spacing = DEFAULT_WORLD_EXTENT_M / (size - 1) as f64;
     let mut hf = HeightField::new(size, size, spacing, spacing, heights)?;
@@ -112,17 +132,23 @@ pub fn generate(params: &ModernParams) -> Result<HeightField> {
 
 fn apply_border_falloff(heights: &mut [f32], size: usize, strength: f32) {
     let start = 1.0 - strength.clamp(0.0, 1.0) * 0.55;
-    for y in 0..size {
-        let v = y as f32 / (size - 1).max(1) as f32 - 0.5;
-        for x in 0..size {
-            let u = x as f32 / (size - 1).max(1) as f32 - 0.5;
-            // Radial taper: the square grid corners sink below the sea and the
-            // visible land reads as a rounded island rather than a cut block.
-            let radius = (u * u + v * v).sqrt() * 2.0;
-            let taper = 1.0 - smoothstep(start, 1.0, radius);
-            heights[y * size + x] *= taper;
-        }
-    }
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(size)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let v = y as f32 / (size - 1).max(1) as f32 - 0.5;
+                for (x, h) in row.iter_mut().enumerate() {
+                    let u = x as f32 / (size - 1).max(1) as f32 - 0.5;
+                    // Radial taper: the square grid corners sink below the sea and
+                    // the visible land reads as a rounded island rather than a cut
+                    // block.
+                    let radius = (u * u + v * v).sqrt() * 2.0;
+                    let taper = 1.0 - smoothstep(start, 1.0, radius);
+                    *h *= taper;
+                }
+            });
+    });
 }
 
 fn add_craters(heights: &mut [f32], size: usize, amount: f32, seed: u64) {

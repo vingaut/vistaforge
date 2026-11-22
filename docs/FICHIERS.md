@@ -198,3 +198,29 @@ les deux fichiers d'un coup.
 - L'addon Blender importe les animations de caméra/empty, pas les courbes
   Bézier VistaForge comme poignées éditables : il les échantillonne image par
   image. Le `.vfcam`, lui, conserve les poignées et l'ease d'origine.
+
+## 7. Maillages 3D : `.vfm`, OBJ, STL, GLB
+
+Le module **Maillage 3D** ajoute quatre sorties, indépendantes du `.vfproj` :
+
+| Extension | Contenu | Usage |
+| --- | --- | --- |
+| `.vfm` | Format natif binaire : positions, normales, UV, couleurs RGBA (alpha = masque), topologie n-gon (`corners`/`starts`), slots de matériau, métadonnées (nom, roche, qualité, graine, note). | Sauvegarde d'atelier, rechargement exact. |
+| `.obj` | N-gons, normales, UV. | Blender, Maya, ZBrush. |
+| `.stl` | Triangles, normales plates. | Impression 3D, slicer. |
+| `.glb` | Triangles, couleurs, un primitive par matériau. | Blender, moteurs temps réel. |
+
+Le `.vfm` commence par la signature `VFM1`, un numéro de version (`u32`, actuellement
+`1`), puis les tableaux. Les limites de sécurité sont 32 M de sommets et 128 M de
+coins. Un fichier corrompu est refusé avec une erreur explicite, jamais chargé
+partiellement.
+
+```powershell
+vistaforge mesh --project demo/canyon.vfproj --out demo/sculpture.vfm
+vistaforge mesh --project demo/canyon.vfproj --out demo/sculpture.obj
+vistaforge mesh --project demo/canyon.vfproj --out demo/sculpture.stl
+vistaforge mesh --project demo/canyon.vfproj --out demo/sculpture.glb
+```
+
+L'interface expose les mêmes boutons dans **Maillage 3D > Vue et export**.
+

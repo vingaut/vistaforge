@@ -4,6 +4,7 @@
 pub mod brush;
 pub mod world;
 
+use rayon::prelude::*;
 use vf_core::{HeightField, HeightFieldError, Sun};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,27 +39,31 @@ pub fn resample(
     if width == hf.width() && height == hf.height() {
         return Ok(hf.clone());
     }
-    let mut heights = Vec::with_capacity(width * height);
+    let mut heights = vec![0.0f32; width * height];
     let sx = (hf.width() - 1) as f64 / (width - 1) as f64;
     let sy = (hf.height() - 1) as f64 / (height - 1) as f64;
-    for y in 0..height {
-        let fy = y as f64 * sy;
-        for x in 0..width {
-            let fx = x as f64 * sx;
-            let value = match filter {
-                ResampleFilter::Nearest => hf.sample_nearest(fx, fy),
-                ResampleFilter::Bilinear => hf.sample_bilinear(fx, fy),
-                ResampleFilter::Bicubic => {
-                    if hf.mask().is_some() {
-                        hf.sample_bilinear(fx, fy)
-                    } else {
-                        sample_bicubic(hf, fx, fy)
-                    }
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let fy = y as f64 * sy;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let fx = x as f64 * sx;
+                    *value = match filter {
+                        ResampleFilter::Nearest => hf.sample_nearest(fx, fy),
+                        ResampleFilter::Bilinear => hf.sample_bilinear(fx, fy),
+                        ResampleFilter::Bicubic => {
+                            if hf.mask().is_some() {
+                                hf.sample_bilinear(fx, fy)
+                            } else {
+                                sample_bicubic(hf, fx, fy)
+                            }
+                        }
+                    };
                 }
-            };
-            heights.push(value);
-        }
-    }
+            });
+    });
     let spacing_x = hf.spacing().0 * sx;
     let spacing_y = hf.spacing().1 * sy;
     let mut out = HeightField::new(width, height, spacing_x, spacing_y, heights)?;
@@ -66,14 +71,16 @@ pub fn resample(
     out.set_origin(ox, oy);
     out.set_nodata(hf.nodata());
     if let Some(src_mask) = hf.mask() {
-        let mut mask = Vec::with_capacity(width * height);
-        for y in 0..height {
-            let syi = (y as f64 * sy).round() as usize;
-            for x in 0..width {
-                let sxi = (x as f64 * sx).round() as usize;
-                mask.push(src_mask[syi * hf.width() + sxi]);
-            }
-        }
+        let mut mask = vec![false; width * height];
+        vf_core::compute::install(|| {
+            mask.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+                let syi = (y as f64 * sy).round() as usize;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let sxi = (x as f64 * sx).round() as usize;
+                    *value = src_mask[syi * hf.width() + sxi];
+                }
+            });
+        });
         out.set_mask(Some(mask))?;
     }
     Ok(out)
@@ -118,54 +125,64 @@ pub fn smooth(hf: &HeightField, radius: usize, iterations: usize) -> HeightField
         let kernel = gaussian_kernel(radius);
         let half = radius as isize;
         let (w, h) = (src.width(), src.height());
-        for y in 0..h {
-            for x in 0..w {
-                if !src.is_valid(x, y) {
-                    continue;
-                }
-                let mut acc = 0.0f32;
-                let mut weight = 0.0f32;
-                for (k, &kw) in kernel.iter().enumerate() {
-                    let sx = x as isize + k as isize - half;
-                    if sx < 0 || sx >= w as isize {
-                        continue;
+        {
+            let dst = out.heights_mut();
+            vf_core::compute::install(|| {
+                dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                    for (x, value) in row.iter_mut().enumerate() {
+                        if !src.is_valid(x, y) {
+                            continue;
+                        }
+                        let mut acc = 0.0f32;
+                        let mut weight = 0.0f32;
+                        for (k, &kw) in kernel.iter().enumerate() {
+                            let sx = x as isize + k as isize - half;
+                            if sx < 0 || sx >= w as isize {
+                                continue;
+                            }
+                            let sx = sx as usize;
+                            if !src.is_valid(sx, y) {
+                                continue;
+                            }
+                            acc += src.get(sx, y) * kw;
+                            weight += kw;
+                        }
+                        if weight > 1e-6 {
+                            *value = acc / weight;
+                        }
                     }
-                    let sx = sx as usize;
-                    if !src.is_valid(sx, y) {
-                        continue;
-                    }
-                    acc += src.get(sx, y) * kw;
-                    weight += kw;
-                }
-                if weight > 1e-6 {
-                    out.set(x, y, acc / weight);
-                }
-            }
+                });
+            });
         }
         let intermediate = out.clone();
-        for y in 0..h {
-            for x in 0..w {
-                if !intermediate.is_valid(x, y) {
-                    continue;
-                }
-                let mut acc = 0.0f32;
-                let mut weight = 0.0f32;
-                for (k, &kw) in kernel.iter().enumerate() {
-                    let sy = y as isize + k as isize - half;
-                    if sy < 0 || sy >= h as isize {
-                        continue;
+        {
+            let dst = out.heights_mut();
+            vf_core::compute::install(|| {
+                dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                    for (x, value) in row.iter_mut().enumerate() {
+                        if !intermediate.is_valid(x, y) {
+                            continue;
+                        }
+                        let mut acc = 0.0f32;
+                        let mut weight = 0.0f32;
+                        for (k, &kw) in kernel.iter().enumerate() {
+                            let sy = y as isize + k as isize - half;
+                            if sy < 0 || sy >= h as isize {
+                                continue;
+                            }
+                            let sy = sy as usize;
+                            if !intermediate.is_valid(x, sy) {
+                                continue;
+                            }
+                            acc += intermediate.get(x, sy) * kw;
+                            weight += kw;
+                        }
+                        if weight > 1e-6 {
+                            *value = acc / weight;
+                        }
                     }
-                    let sy = sy as usize;
-                    if !intermediate.is_valid(x, sy) {
-                        continue;
-                    }
-                    acc += intermediate.get(x, sy) * kw;
-                    weight += kw;
-                }
-                if weight > 1e-6 {
-                    out.set(x, y, acc / weight);
-                }
-            }
+                });
+            });
         }
     }
     out
@@ -264,12 +281,18 @@ pub fn normalize(hf: &mut HeightField, vertical_scale: f32) {
 
 /// Per-vertex normals, row-major, matching the heightfield layout.
 pub fn vertex_normals(hf: &HeightField, vertical_scale: f32) -> Vec<[f32; 3]> {
-    let mut normals = Vec::with_capacity(hf.sample_count());
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            normals.push(hf.normal_at(x, y, vertical_scale));
-        }
-    }
+    let mut normals = vec![[0.0f32; 3]; hf.sample_count()];
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        normals
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, normal) in row.iter_mut().enumerate() {
+                    *normal = hf.normal_at(x, y, vertical_scale);
+                }
+            });
+    });
     normals
 }
 
@@ -279,18 +302,21 @@ pub fn curvature(hf: &HeightField) -> Vec<f32> {
     let (sx, sy) = hf.spacing();
     let sx = sx as f32;
     let sy = sy as f32;
-    let mut out = Vec::with_capacity(hf.sample_count());
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            let xm = x.saturating_sub(1);
-            let xp = (x + 1).min(hf.width() - 1);
-            let ym = y.saturating_sub(1);
-            let yp = (y + 1).min(hf.height() - 1);
-            let dxx = (hf.get(xp, y) - 2.0 * hf.get(x, y) + hf.get(xm, y)) / (sx * sx);
-            let dyy = (hf.get(x, yp) - 2.0 * hf.get(x, y) + hf.get(x, ym)) / (sy * sy);
-            out.push(dxx + dyy);
-        }
-    }
+    let mut out = vec![0.0f32; hf.sample_count()];
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        out.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+            for (x, value) in row.iter_mut().enumerate() {
+                let xm = x.saturating_sub(1);
+                let xp = (x + 1).min(hf.width() - 1);
+                let ym = y.saturating_sub(1);
+                let yp = (y + 1).min(hf.height() - 1);
+                let dxx = (hf.get(xp, y) - 2.0 * hf.get(x, y) + hf.get(xm, y)) / (sx * sx);
+                let dyy = (hf.get(x, yp) - 2.0 * hf.get(x, y) + hf.get(x, ym)) / (sy * sy);
+                *value = dxx + dyy;
+            }
+        });
+    });
     out
 }
 
@@ -310,34 +336,37 @@ pub fn horizon_ao(hf: &HeightField, max_distance_m: f32) -> Vec<f32> {
     let (sx, sy) = hf.spacing();
     let sx = sx as f32;
     let sy = sy as f32;
-    let mut ao = Vec::with_capacity(hf.sample_count());
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            let z0 = hf.get(x, y);
-            let mut occlusion = 0.0f32;
-            for (dx, dy) in DIRS {
-                let mut max_slope = 0.0f32;
-                let mut dist = 3.0f32;
-                while dist <= max_distance_m {
-                    let px = x as f32 + dx * dist / sx;
-                    let py = y as f32 + dy * dist / sy;
-                    if px < 0.0
-                        || py < 0.0
-                        || px > (hf.width() - 1) as f32
-                        || py > (hf.height() - 1) as f32
-                    {
-                        break;
+    let mut ao = vec![1.0f32; hf.sample_count()];
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        ao.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+            for (x, value) in row.iter_mut().enumerate() {
+                let z0 = hf.get(x, y);
+                let mut occlusion = 0.0f32;
+                for (dx, dy) in DIRS {
+                    let mut max_slope = 0.0f32;
+                    let mut dist = 3.0f32;
+                    while dist <= max_distance_m {
+                        let px = x as f32 + dx * dist / sx;
+                        let py = y as f32 + dy * dist / sy;
+                        if px < 0.0
+                            || py < 0.0
+                            || px > (hf.width() - 1) as f32
+                            || py > (hf.height() - 1) as f32
+                        {
+                            break;
+                        }
+                        let h = hf.sample_bilinear(px as f64, py as f64);
+                        max_slope = max_slope.max((h - z0) / dist);
+                        dist *= 1.7;
                     }
-                    let h = hf.sample_bilinear(px as f64, py as f64);
-                    max_slope = max_slope.max((h - z0) / dist);
-                    dist *= 1.7;
+                    occlusion += max_slope.atan() / std::f32::consts::FRAC_PI_2;
                 }
-                occlusion += max_slope.atan() / std::f32::consts::FRAC_PI_2;
+                let occ = (occlusion / DIRS.len() as f32).clamp(0.0, 1.0);
+                *value = 1.0 - occ * 0.85;
             }
-            let occ = (occlusion / DIRS.len() as f32).clamp(0.0, 1.0);
-            ao.push(1.0 - occ * 0.85);
-        }
-    }
+        });
+    });
     ao
 }
 
@@ -369,34 +398,37 @@ pub fn horizon_ao_fine(hf: &HeightField, max_distance_m: f32) -> Vec<f32> {
     let sy = sy as f32;
     let start = (sx.max(sy) * 0.9).max(2.0);
     let max_distance_m = max_distance_m.max(start * 1.5);
-    let mut ao = Vec::with_capacity(hf.sample_count());
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            let z0 = hf.get(x, y);
-            let mut occlusion = 0.0f32;
-            for (dx, dy) in DIRS {
-                let mut max_slope = 0.0f32;
-                let mut dist = start;
-                while dist <= max_distance_m {
-                    let px = x as f32 + dx * dist / sx;
-                    let py = y as f32 + dy * dist / sy;
-                    if px < 0.0
-                        || py < 0.0
-                        || px > (hf.width() - 1) as f32
-                        || py > (hf.height() - 1) as f32
-                    {
-                        break;
+    let mut ao = vec![1.0f32; hf.sample_count()];
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        ao.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+            for (x, value) in row.iter_mut().enumerate() {
+                let z0 = hf.get(x, y);
+                let mut occlusion = 0.0f32;
+                for (dx, dy) in DIRS {
+                    let mut max_slope = 0.0f32;
+                    let mut dist = start;
+                    while dist <= max_distance_m {
+                        let px = x as f32 + dx * dist / sx;
+                        let py = y as f32 + dy * dist / sy;
+                        if px < 0.0
+                            || py < 0.0
+                            || px > (hf.width() - 1) as f32
+                            || py > (hf.height() - 1) as f32
+                        {
+                            break;
+                        }
+                        let h = hf.sample_bilinear(px as f64, py as f64);
+                        max_slope = max_slope.max((h - z0) / dist);
+                        dist *= 1.45;
                     }
-                    let h = hf.sample_bilinear(px as f64, py as f64);
-                    max_slope = max_slope.max((h - z0) / dist);
-                    dist *= 1.45;
+                    occlusion += max_slope.atan() / std::f32::consts::FRAC_PI_2;
                 }
-                occlusion += max_slope.atan() / std::f32::consts::FRAC_PI_2;
+                let occ = (occlusion / DIRS.len() as f32).clamp(0.0, 1.0);
+                *value = 1.0 - occ * 0.9;
             }
-            let occ = (occlusion / DIRS.len() as f32).clamp(0.0, 1.0);
-            ao.push(1.0 - occ * 0.9);
-        }
-    }
+        });
+    });
     ao
 }
 
@@ -442,16 +474,21 @@ pub fn hillshade(hf: &HeightField, params: HillshadeParams) -> GrayImage {
     let l = [l.x as f32, l.y as f32, l.z as f32];
     let ambient = params.ambient.clamp(0.0, 1.0);
     let mut pixels = vec![0u8; hf.width() * hf.height()];
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            let n = hf.normal_at(x, y, params.vertical_exaggeration);
-            let ndl = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0);
-            let shade = ambient + (1.0 - ambient) * ndl;
-            let value = (shade.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            let dst_y = hf.height() - 1 - y;
-            pixels[dst_y * hf.width() + x] = value;
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        pixels
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(dst_y, row)| {
+                let y = hf.height() - 1 - dst_y;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let n = hf.normal_at(x, y, params.vertical_exaggeration);
+                    let ndl = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0);
+                    let shade = ambient + (1.0 - ambient) * ndl;
+                    *value = (shade.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                }
+            });
+    });
     GrayImage {
         width: hf.width(),
         height: hf.height(),
@@ -501,40 +538,46 @@ pub fn hillshade_sculpt(
     let (sx, sy) = hf.spacing();
     let mut pixels = vec![0u8; width * height];
     let inv = 1.0 / factor as f64;
-    for y in 0..height {
-        let gy = (y as f64 + 0.5) * inv - 0.5;
-        for x in 0..width {
-            let gx = (x as f64 + 0.5) * inv - 0.5;
-            let dx = (hf.sample_bilinear(gx + 1.0, gy) - hf.sample_bilinear(gx - 1.0, gy))
-                / (2.0 * sx) as f32;
-            let dy = (hf.sample_bilinear(gx, gy + 1.0) - hf.sample_bilinear(gx, gy - 1.0))
-                / (2.0 * sy) as f32;
-            let nx = -dx * exaggeration;
-            let ny = -dy * exaggeration;
-            let nz = 1.0f32;
-            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-12);
-            let ndl = ((nx * l[0] + ny * l[1] + nz * l[2]) / len).max(0.0);
-            let mut shade = ambient + (1.0 - ambient) * ndl;
-            if contour_step_m > 0.0 {
-                // Height contours with a one-pixel soft edge. The height is
-                // sampled at the same sub-cell position as the normal, so the
-                // lines follow the real surface instead of the grid.
-                let h = f64::from(hf.sample_bilinear(gx, gy));
-                let step = f64::from(contour_step_m.max(0.01));
-                let unit = h / step;
-                let phase = unit - unit.floor();
-                let distance = phase.min(1.0 - phase);
-                let major = (unit.round() as i64).rem_euclid(5) == 0;
-                let width = if major { 0.16f64 } else { 0.09f64 };
-                if distance < width {
-                    let strength = if major { 0.34f64 } else { 0.20f64 };
-                    shade *= (1.0 - strength * (1.0 - distance / width)) as f32;
+    vf_core::compute::install(|| {
+        pixels
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(dst_y, row)| {
+                let y = height - 1 - dst_y;
+                let gy = (y as f64 + 0.5) * inv - 0.5;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let gx = (x as f64 + 0.5) * inv - 0.5;
+                    let dx = (hf.sample_bilinear(gx + 1.0, gy) - hf.sample_bilinear(gx - 1.0, gy))
+                        / (2.0 * sx) as f32;
+                    let dy = (hf.sample_bilinear(gx, gy + 1.0) - hf.sample_bilinear(gx, gy - 1.0))
+                        / (2.0 * sy) as f32;
+                    let nx = -dx * exaggeration;
+                    let ny = -dy * exaggeration;
+                    let nz = 1.0f32;
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-12);
+                    let ndl = ((nx * l[0] + ny * l[1] + nz * l[2]) / len).max(0.0);
+                    let mut shade = ambient + (1.0 - ambient) * ndl;
+                    if contour_step_m > 0.0 {
+                        // Height contours with a one-pixel soft edge. The
+                        // height is sampled at the same sub-cell position as
+                        // the normal, so the lines follow the real surface
+                        // instead of the grid.
+                        let h = f64::from(hf.sample_bilinear(gx, gy));
+                        let step = f64::from(contour_step_m.max(0.01));
+                        let unit = h / step;
+                        let phase = unit - unit.floor();
+                        let distance = phase.min(1.0 - phase);
+                        let major = (unit.round() as i64).rem_euclid(5) == 0;
+                        let contour_width = if major { 0.16f64 } else { 0.09f64 };
+                        if distance < contour_width {
+                            let strength = if major { 0.34f64 } else { 0.20f64 };
+                            shade *= (1.0 - strength * (1.0 - distance / contour_width)) as f32;
+                        }
+                    }
+                    *value = (shade.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                 }
-            }
-            let dst_y = height - 1 - y;
-            pixels[dst_y * width + x] = (shade.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        }
-    }
+            });
+    });
     GrayImage {
         width,
         height,

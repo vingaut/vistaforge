@@ -219,6 +219,7 @@ impl HelpTopic {
                 "Aide flottante : une carte reste ouverte après le premier survol. Vous pouvez la déplacer, la faire défiler et cliquer dans son sommaire.",
                 "Épingler fige la fiche : le survol d'autres réglages ne la remplace plus. ×, Échap ou F1 la ferment.",
                 "Annuler/Rétablir : Ctrl+Z et Ctrl+Y (ou Ctrl+Maj+Z) dans l'application ; la profondeur et la mémoire se règlent dans Préférences.",
+                "Calcul : Préférences → Calcul (CPU / GPU) choisit les cœurs utilisés (appliqué immédiatement) et l'adaptateur GPU (au prochain démarrage).",
                 "Les opérations longues s'exécutent en arrière-plan avec une jauge de progression : l'interface reste utilisable.",
             ],
             Self::Workspace => &[

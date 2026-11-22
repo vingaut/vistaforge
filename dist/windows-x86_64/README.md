@@ -6,15 +6,22 @@ construits depuis la source de ce dépôt avec `cargo build --release -p vf-cli
 
 | Binaire | Rôle | Taille |
 |---|---|---|
-| `vistaforge.exe` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, MCP tools. | 5,4 Mo |
-| `vistaforge-app.exe` | Interface graphique `egui` + viewport GPU wgpu (Vulkan/DX12) et aperçu CPU. | 21,9 Mo |
-| `vistaforge-mcp.exe` | Serveur MCP stdio (29 outils). | 4,2 Mo |
+| `vistaforge.exe` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, **maillage 3D** (`mesh`), MCP tools. | 10,6 Mo |
+| `vistaforge-app.exe` | Interface graphique `egui` + viewport GPU wgpu (Vulkan/DX12) et aperçu CPU, avec l'espace **Maillage 3D** (curseur de pinceau, gizmo d'orientation) et le **moteur de calcul** (CPU N cœurs / un GPU / tous les GPU). | 22,9 Mo |
+| `vistaforge-mcp.exe` | Serveur MCP stdio (29 outils). | 4,4 Mo |
 
 Construits le 22 novembre 2026 depuis `master`, release `v0.2.0` (interface
 GPU/CPU unifiée, tafoni/bancs/joints/oolithes, presets rocheux enrichis,
-résolutions 2048–8192). Toolchain épinglée
-`1.99.1-x86_64-pc-windows-msvc`, profil `release` (`lto = "thin"`,
-`codegen-units = 1`, `panic = "abort"`).
+résolutions 2048–8192, module **Maillage 3D** : sculpture, remesh quads/voxel,
+fracture, physique, parois et export GLB/OBJ/STL/VFM ; curseur de pinceau avec
+normale moyenne et zone d'effet, gizmo d'orientation cliquable, aperçu allégé
+pendant les interactions, **moteur des transformations géométriques au choix
+(CPU 1..N cœurs, un adaptateur GPU, ou tous les GPU)**, remesh déterministe).
+La CLI embarque le moteur GPU (`vf-compute`), d'où sa taille plus élevée : la
+bibliothèque `wgpu` est liée statiquement et les pilotes sont chargés à
+l'exécution.
+Toolchain épinglée `1.99.1-x86_64-pc-windows-msvc`, profil `release`
+(`lto = "thin"`, `codegen-units = 1`, `panic = "abort"`).
 
 ## Utilisation
 
@@ -31,11 +38,51 @@ cd dist\windows-x86_64
 .\vistaforge-mcp.exe --workspace C:\chemin\vers\projets
 ```
 
+Maillage 3D depuis le CLI :
+
+```powershell
+.\vistaforge.exe mesh --project demo\canyon.vfproj --source wall `
+  --wall sandstone-canyon --rock canyon --out paroi.glb --render paroi.png
+```
+
 Le viewport GPU utilise wgpu (Vulkan, repli DX12) par défaut. Sans pilote
 compatible :
 
 ```powershell
 $env:VISTAFORGE_RENDERER = "glow"; .\vistaforge-app.exe
+```
+
+## Budget de calcul (CPU / GPU)
+
+Dans l'interface, **Préférences → Calcul (CPU / GPU)** règle deux choses :
+
+- le **moteur des transformations géométriques** (normales, lissage de Taubin,
+  déplacement du détail, transformations, sculpture) : pool CPU de 1 à N cœurs,
+  un adaptateur GPU, ou tous les GPU détectés. Le changement est **immédiat** et
+  se retrouve aussi dans le sélecteur **Calcul** du panneau Maillage 3D ;
+- le **pool de threads partagé** : génération, érosion, modificateurs, géologie,
+  maillage, fracture, voxel, aperçus et rendu final. Il s'applique sans
+  redémarrer, et le résultat ne dépend pas du nombre de cœurs.
+
+Sur un poste récent, le CPU est plus rapide que le GPU pour ces noyaux (chaque
+appel GPU transfère la topologie) ; le GPU aide quand peu de cœurs sont alloués
+ou sur une machine à peu de cœurs. Mesures dans
+[`docs/GPU.md`](../../docs/GPU.md#cpu-ou-gpu--ce-que-disent-les-mesures).
+
+```powershell
+# Limiter la CLI à 8 threads (le résultat est identique)
+.\vistaforge.exe --threads 8 terrain generate --mode modern --size 2048 --erode --out monde.vfproj
+
+# Forcer le GPU (ou tous les GPU) pour les calculs de maillage
+.\vistaforge.exe --compute gpu mesh --project demo\canyon.vfproj --resolution 160 --out canyon.glb
+.\vistaforge.exe --compute all --verbose mesh --project demo\canyon.vfproj --resolution 160 --out canyon.glb
+
+# Mêmes réglages par variable d'environnement, pour l'interface aussi
+$env:VISTAFORGE_THREADS = "8"
+$env:VISTAFORGE_COMPUTE = "gpu"                    # ou "cpu", "all"
+$env:VISTAFORGE_COMPUTE_GPU = "NVIDIA GeForce RTX 4070"
+$env:VISTAFORGE_GPU = "NVIDIA GeForce RTX 4070"   # aperçu 3D, ou "auto", "off"
+.\vistaforge-app.exe
 ```
 
 ## Prérequis

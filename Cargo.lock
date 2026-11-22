@@ -136,6 +136,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -988,6 +997,7 @@ version = "0.30.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
 dependencies = [
+ "bytemuck",
  "serde_core",
 ]
 
@@ -2884,6 +2894,7 @@ dependencies = [
  "image",
  "serde_json",
  "tracing-subscriber",
+ "vf-compute",
  "vf-core",
  "vf-export",
  "vf-flight",
@@ -2893,7 +2904,22 @@ dependencies = [
  "vf-procgen",
  "vf-render",
  "vf-scene",
+ "vf-sculpt",
  "vf-terrain",
+]
+
+[[package]]
+name = "vf-compute"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "pollster",
+ "rayon",
+ "serde",
+ "thiserror 2.0.21",
+ "vf-core",
+ "wgpu",
 ]
 
 [[package]]
@@ -2901,6 +2927,7 @@ name = "vf-core"
 version = "0.2.0"
 dependencies = [
  "glam",
+ "rayon",
  "ron",
  "serde",
  "thiserror 2.0.21",
@@ -2931,6 +2958,7 @@ dependencies = [
  "vf-mesh",
  "vf-modifiers",
  "vf-procgen",
+ "vf-sculpt",
 ]
 
 [[package]]
@@ -2946,6 +2974,7 @@ dependencies = [
 name = "vf-geology"
 version = "0.2.0"
 dependencies = [
+ "rayon",
  "vf-core",
  "vf-procgen",
 ]
@@ -3013,6 +3042,7 @@ dependencies = [
 name = "vf-modifiers"
 version = "0.2.0"
 dependencies = [
+ "rayon",
  "vf-core",
  "vf-procgen",
  "vf-terrain",
@@ -3022,6 +3052,7 @@ dependencies = [
 name = "vf-procgen"
 version = "0.2.0"
 dependencies = [
+ "rayon",
  "vf-core",
  "vf-terrain",
 ]
@@ -3055,9 +3086,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "vf-sculpt"
+version = "0.2.0"
+dependencies = [
+ "approx",
+ "glam",
+ "image",
+ "rayon",
+ "serde",
+ "thiserror 2.0.21",
+ "vf-compute",
+ "vf-core",
+ "vf-detail",
+ "vf-mesh",
+ "vf-procgen",
+]
+
+[[package]]
 name = "vf-terrain"
 version = "0.2.0"
 dependencies = [
+ "rayon",
  "vf-core",
 ]
 
@@ -3069,8 +3118,10 @@ dependencies = [
  "eframe",
  "glam",
  "image",
+ "pollster",
  "ron",
  "serde",
+ "vf-compute",
  "vf-core",
  "vf-detail",
  "vf-export",
@@ -3083,6 +3134,7 @@ dependencies = [
  "vf-procgen",
  "vf-render",
  "vf-scene",
+ "vf-sculpt",
  "vf-terrain",
 ]
 

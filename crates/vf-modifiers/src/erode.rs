@@ -2,6 +2,7 @@
 
 use std::collections::BinaryHeap;
 
+use rayon::prelude::*;
 use vf_core::{ErosionParams, HeightField, Modifier, Result, Seed};
 
 use crate::{noise_for, rebuild, slope_at, smoothstep};
@@ -75,18 +76,23 @@ pub fn alluvium(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Hei
         let radius = ((1.0 + smoothing * 4.0) * cell).round().max(1.0) as usize;
         let smoothed = vf_terrain::smooth(&out, radius, 1);
         let mut heights = out.heights().to_vec();
-        for y in 0..out.height() {
-            for x in 0..out.width() {
-                if !out.is_valid(x, y) {
-                    continue;
-                }
-                let slope = slope_at(&out, x, y);
-                let weight = (1.0 - smoothstep(0.20, 0.70, slope)) * smoothing * 0.55;
-                let i = y * out.width() + x;
-                let z = heights[i];
-                heights[i] = z + (smoothed.heights()[i] - z) * weight;
-            }
-        }
+        let width = out.width();
+        vf_core::compute::install(|| {
+            heights
+                .par_chunks_mut(width)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    for (x, value) in row.iter_mut().enumerate() {
+                        if !out.is_valid(x, y) {
+                            continue;
+                        }
+                        let slope = slope_at(&out, x, y);
+                        let weight = (1.0 - smoothstep(0.20, 0.70, slope)) * smoothing * 0.55;
+                        let z = *value;
+                        *value = z + (smoothed.heights()[y * width + x] - z) * weight;
+                    }
+                });
+        });
         out = rebuild(&out, heights)?;
     }
 
@@ -124,25 +130,32 @@ pub fn snow(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<HeightF
     let (ox, oy, _, _) = crate::world_extent(hf);
     let (sx, sy) = hf.spacing();
     let mut heights = hf.heights().to_vec();
-    for y in 0..hf.height() {
-        for x in 0..hf.width() {
-            if !hf.is_valid(x, y) {
-                continue;
-            }
-            let wx = (ox + x as f64 * sx) as f32;
-            let wy = (oy + y as f64 * sy) as f32;
-            let i = y * hf.width() + x;
-            let z = hf.get(x, y);
-            let basin = (local_mean.heights()[i] - z).max(0.0);
-            // Basin depth fills flat-bottomed cirques; positive curvature
-            // catches bowls whose local mean equals their centre.
-            let hollow = (smoothstep(0.15, 2.5, basin)
-                + 0.65 * smoothstep(0.0, 0.012, curvature[i]))
-            .min(1.0);
-            let patch = 0.55 + 0.45 * noise.fbm01(wx / scale, wy / scale, 4, 2.0, 0.5);
-            heights[i] += amount * coverage * hollow * patch;
-        }
-    }
+    let width = hf.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, value) in row.iter_mut().enumerate() {
+                    if !hf.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = (ox + x as f64 * sx) as f32;
+                    let wy = (oy + y as f64 * sy) as f32;
+                    let i = y * width + x;
+                    let z = hf.get(x, y);
+                    let basin = (local_mean.heights()[i] - z).max(0.0);
+                    // Basin depth fills flat-bottomed cirques; positive
+                    // curvature catches bowls whose local mean equals their
+                    // centre.
+                    let hollow = (smoothstep(0.15, 2.5, basin)
+                        + 0.65 * smoothstep(0.0, 0.012, curvature[i]))
+                    .min(1.0);
+                    let patch = 0.55 + 0.45 * noise.fbm01(wx / scale, wy / scale, 4, 2.0, 0.5);
+                    *value += amount * coverage * hollow * patch;
+                }
+            });
+    });
     let mut out = rebuild(hf, heights)?;
     // Glaciation (negative amount) also broadens the valleys: a U-shaped
     // profile is smoother than the V-shaped river valley it replaces.
@@ -150,15 +163,20 @@ pub fn snow(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<HeightF
         let smoothed = vf_terrain::smooth(&out, 2, 1);
         let blend = (coverage * 0.25).clamp(0.0, 0.35);
         let mut mixed = out.heights().to_vec();
-        for y in 0..out.height() {
-            for x in 0..out.width() {
-                let slope = slope_at(&out, x, y);
-                let weight = blend * (1.0 - smoothstep(0.4, 0.9, slope));
-                let i = y * out.width() + x;
-                let z = mixed[i];
-                mixed[i] = z + (smoothed.heights()[i] - z) * weight;
-            }
-        }
+        let width = out.width();
+        vf_core::compute::install(|| {
+            mixed
+                .par_chunks_mut(width)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    for (x, value) in row.iter_mut().enumerate() {
+                        let slope = slope_at(&out, x, y);
+                        let weight = blend * (1.0 - smoothstep(0.4, 0.9, slope));
+                        let z = *value;
+                        *value = z + (smoothed.heights()[y * width + x] - z) * weight;
+                    }
+                });
+        });
         out = rebuild(&out, mixed)?;
     }
     Ok(out)
@@ -275,13 +293,19 @@ pub fn dunes(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Height
     let base = if smoothing > 0.0 {
         let smoothed = vf_terrain::smooth(hf, 2, 1);
         let mut mixed = hf.heights().to_vec();
-        for y in 0..hf.height() {
-            for x in 0..hf.width() {
-                let i = y * hf.width() + x;
-                mixed[i] =
-                    hf.heights()[i] + (smoothed.heights()[i] - hf.heights()[i]) * smoothing * 0.6;
-            }
-        }
+        let width = hf.width();
+        vf_core::compute::install(|| {
+            mixed
+                .par_chunks_mut(width)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    for (x, value) in row.iter_mut().enumerate() {
+                        let i = y * width + x;
+                        *value = hf.heights()[i]
+                            + (smoothed.heights()[i] - hf.heights()[i]) * smoothing * 0.6;
+                    }
+                });
+        });
         rebuild(hf, mixed)?
     } else {
         hf.clone()
@@ -291,37 +315,45 @@ pub fn dunes(hf: &HeightField, modifier: &Modifier, seed: Seed) -> Result<Height
     let mut heights = base.heights().to_vec();
     let (wind_x, wind_y) = (angle.cos(), angle.sin());
     let tau = std::f32::consts::TAU / wavelength;
-    for y in 0..base.height() {
-        for x in 0..base.width() {
-            if !base.is_valid(x, y) {
-                continue;
-            }
-            let wx = (ox + x as f64 * sx) as f32;
-            let wy = (oy + y as f64 * sy) as f32;
-            let slope = slope_at(&base, x, y);
-            // Dunes only form on sand-flat ground; cliffs keep their rock.
-            let mask = 1.0 - smoothstep(0.15, 0.50, slope);
-            if mask <= 0.0 {
-                continue;
-            }
-            let along = wx * wind_x + wy * wind_y;
-            let jitter = noise.fbm01(wx * 0.002, wy * 0.002, 3, 2.0, 0.5);
-            let phase = along * tau + jitter * 2.5;
-            // Asymmetric dune profile from the HighMap `wave_dune` function:
-            // a gentle stoss slope, a sharp crest, then a steep lee face.
-            let xp = (phase / std::f32::consts::TAU).rem_euclid(1.0);
-            let shaped = if xp < stoss {
-                let r = xp / stoss.max(1e-3);
-                r * r * (3.0 - 2.0 * r)
-            } else if xp < lee {
-                let r = (xp - lee) / (stoss - lee);
-                r * r * (2.0 - r)
-            } else {
-                0.0
-            };
-            heights[y * base.width() + x] += amplitude * (shaped - 0.45) * mask;
-        }
-    }
+    let width = base.width();
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, value) in row.iter_mut().enumerate() {
+                    if !base.is_valid(x, y) {
+                        continue;
+                    }
+                    let wx = (ox + x as f64 * sx) as f32;
+                    let wy = (oy + y as f64 * sy) as f32;
+                    let slope = slope_at(&base, x, y);
+                    // Dunes only form on sand-flat ground; cliffs keep their
+                    // rock.
+                    let mask = 1.0 - smoothstep(0.15, 0.50, slope);
+                    if mask <= 0.0 {
+                        continue;
+                    }
+                    let along = wx * wind_x + wy * wind_y;
+                    let jitter = noise.fbm01(wx * 0.002, wy * 0.002, 3, 2.0, 0.5);
+                    let phase = along * tau + jitter * 2.5;
+                    // Asymmetric dune profile from the HighMap `wave_dune`
+                    // function: a gentle stoss slope, a sharp crest, then a
+                    // steep lee face.
+                    let xp = (phase / std::f32::consts::TAU).rem_euclid(1.0);
+                    let shaped = if xp < stoss {
+                        let r = xp / stoss.max(1e-3);
+                        r * r * (3.0 - 2.0 * r)
+                    } else if xp < lee {
+                        let r = (xp - lee) / (stoss - lee);
+                        r * r * (2.0 - r)
+                    } else {
+                        0.0
+                    };
+                    *value += amplitude * (shaped - 0.45) * mask;
+                }
+            });
+    });
     rebuild(&base, heights)
 }
 

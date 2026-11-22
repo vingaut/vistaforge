@@ -41,6 +41,16 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Aperçu adaptatif** : pendant une interaction, l'aperçu CPU descend jusqu'à 25 % de sa
   résolution, puis se raffine progressivement (50 → 75 → 100 %) dès que la main s'arrête.
   La résolution cible est apprise du temps de rendu mesuré (budget ~45 ms).
+- **Budget de calcul réglable (CPU ou GPU)** : **Préférences → Calcul (CPU / GPU)** choisit
+  le moteur des transformations géométriques — pool CPU de 1 à N cœurs (ou automatique),
+  un adaptateur GPU, ou **tous les GPU à la fois** avec la plage de sommets répartie entre
+  eux. Normales, lissage de Taubin, déplacement du détail rocheux, transformations et
+  sculpture suivent immédiatement, sans redémarrer ; un adaptateur indisponible se replie
+  sur le CPU avec le message exact. Un second réglage règle le pool de threads commun à la
+  génération, l'érosion, les modificateurs, la géologie, les normales/AO/ombrages, le
+  maillage, la fracture, le voxel, les aperçus et le rendu final. `VISTAFORGE_THREADS`,
+  `VISTAFORGE_COMPUTE`, `VISTAFORGE_COMPUTE_GPU`, `--threads`, `--compute` et
+  `--compute-gpu` restent disponibles pour les scripts.
 - **Rendu CPU déterministe** : rasterisation tuilée multi-thread, z-buffer, PCF 5×5, AO
   multi-échelle à courbe HBAO, ombres 4096 en qualité High, parois verticales (`cliffs`), ciel
   dégradé + soleil + nuages 2.5D, eau avec Fresnel et écume, brume, tone mapping ACES,
@@ -51,6 +61,15 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Détail adaptatif** : maillage qui se densifie localement selon la forme
   (comme les couches adaptatives d'un slicer), tolérance en mètres, UV monde
   continues, export OBJ à quads pour Blender.
+- **Maillage 3D sculptable** : nouveau module qui transforme le terrain en maillage
+  n-gon éditable — 19 outils (marteau, burins, gouge, lime, argile, surplomb,
+  fusion/lave, impact, fracture, grain…), remesh triangles/quads/voxel avec budget,
+  fracture de Voronoï, impacts, métaballs, débris physiques, parois rocheuses avec
+  surplombs et neuf profils de roche. Export `.glb`, `.obj`, `.vfm`, `.stl`.
+  Curseur de pinceau en espace écran (croix, zone d'effet, normale moyenne,
+  rayon effectif), gizmo d'orientation cliquable dans la vue 3D et aperçu allégé
+  pendant les interactions.
+  Voir [`docs/MAILLAGE3D.md`](docs/MAILLAGE3D.md).
 - **Navigation** : orbite, zoom et **pan** (clic droit, molette ou Maj+glisser) ;
   bascule **GPU / CPU** et **aperçus Brouillon/Normal/Haute/Finale**. La caméra
   d'inspection est conservée lors des générations, imports, annulations et
@@ -98,7 +117,7 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 248 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 387 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|
@@ -110,18 +129,11 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 | Patagonie, tours verticales | ![Patagonie](docs/screenshots/patagonia.png) |
 | Crépuscule étoilé | ![Crépuscule](docs/screenshots/dusk.png) |
 
-## Binaires précompilés (Linux et Windows x86_64)
+## Binaires précompilés (Windows x86_64)
 
-Les exécutables `vistaforge`, `vistaforge-app` et `vistaforge-mcp` sont dans
-[`dist/linux-x86_64/`](dist/linux-x86_64/) et
-[`dist/windows-x86_64/`](dist/windows-x86_64/), avec leurs sommes SHA-256 :
-
-```bash
-cd dist/linux-x86_64
-./vistaforge --help
-./vistaforge-app
-./vistaforge-mcp --workspace .
-```
+Les exécutables `vistaforge.exe`, `vistaforge-app.exe` et `vistaforge-mcp.exe`
+sont dans [`dist/windows-x86_64/`](dist/windows-x86_64/), avec leurs sommes
+SHA-256 :
 
 ```powershell
 cd dist\windows-x86_64
@@ -131,8 +143,9 @@ cd dist\windows-x86_64
 ```
 
 Voir [`dist/README.md`](dist/README.md) pour les prérequis (Vulkan/DX12 ou
-OpenGL, glibc, runtime MSVC) et la procédure de vérification. macOS se
-compile depuis la source.
+OpenGL, runtime MSVC) et la procédure de vérification. **Linux et macOS se
+compilent depuis la source** (`cargo build --release -p vf-app -p vf-cli -p
+vf-mcp`) : les binaires Linux ne sont plus publiés, ils n'étaient plus à jour.
 
 ## Démarrage rapide
 
@@ -155,10 +168,6 @@ cargo run --release -p vf-app
 
 # Serveur MCP
 cargo run --release -p vf-mcp -- --workspace .
-
-# Depuis un clone, avec le binaire publié :
-chmod +x dist/linux-x86_64/vistaforge-mcp
-./dist/linux-x86_64/vistaforge-mcp --workspace ~/VistaForge
 ```
 
 Guide pas à pas pour un autre système et la configuration des clients :

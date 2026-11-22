@@ -211,6 +211,31 @@ fichiers dans le même dossier.
   PBR multi-UDIM ; le script Smart UV/remesh est là pour les cas difficiles.
 - L'atlas UV1 est par sommet : les triangles qui changent d'axe peuvent
   étirer une couture. Smart UV reste la solution propre pour un asset final.
-- Les surplombs maillés (P1.5) ne sont pas encore exportés comme objets
-  séparés ; `undercut` est cuit dans le heightfield.
+- Les surplombs du terrain heightfield restent cuits dans la heightmap ; pour de
+  vrais surplombs maillés, utiliser le module **Maillage 3D** (voir ci-dessous).
 - Le plan d'eau est un rectangle ; pas de rivière ni de lac vectoriel.
+
+## 7. Maillage 3D sculpté
+
+L'espace **Maillage 3D** produit un maillage n-gon indépendant du terrain, avec
+surplombs, fractures et parois. Son export GLB ne passe pas par la scène
+heightfield : `vf_export::scene_from_sculpt` écrit directement les positions,
+normales, UV, couleurs RGBA et un primitive par slot de matériau.
+
+```powershell
+# Depuis l'interface : panneau « Vue et export » > GLB
+# Ou en CLI :
+vistaforge mesh --project demo/canyon.vfproj --resolution 160 `
+  --remesh quads --edge 0.8 --rock sandstone `
+  --out demo/sculpture.glb
+```
+
+Dans Blender : `File > Import > glTF 2.0`. Le maillage arrive en Y-up (conversion
+glTF standard), les couleurs de sommets dans `COLOR_0`, et les quads du remesh
+sont conservés si l'on exporte en OBJ (`.obj`). Pour une paroi ou une fracture,
+préférer le mode Voxel avant l'export : le volume est alors étanche et
+directement imprimable.
+
+Le format natif `.vfm` conserve la topologie n-gon, le masque de sculpture et les
+matériaux ; il se recharge dans l'interface via `io::read_vfm`.
+

@@ -1,5 +1,9 @@
 # Sculpter finement les terrasses et les falaises
 
+> Pour les surplombs, les fractures et la sculpture volumique, voir le module
+> **[Maillage 3D](MAILLAGE3D.md)** : il travaille sur un maillage n-gon éditable
+> au lieu du heightfield.
+
 L'espace **Sculpter** travaille directement sur le heightfield. Un pinceau de
 80 m garde sa taille physique quand le terrain est rééchantillonné ; chaque
 trait est annulable et ne stocke que la région touchée.

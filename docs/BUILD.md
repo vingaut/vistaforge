@@ -70,6 +70,10 @@ Sous Windows, les binaires sont dans `target\release\` avec l'extension
 - **Rendu final** : CPU déterministe, multi-thread via `rayon`. Aucun GPU n'est
   requis pour exporter une image. Un terrain 1026² en 1920×1080 qualité haute se
   rend en quelques secondes sur un CPU de bureau.
+- **Calcul géométrique** : les transformations de maillage (normales, lissage,
+  déplacement de détail, transformations, sculpture) tournent sur le pool CPU ou
+  sur un/plusieurs GPU wgpu, au choix dans les préférences (`vf-compute`). Le GPU
+  accélère le remesh/sculpture interactive ; le repli CPU est automatique.
 - **Interface** : `eframe`/`egui` avec wgpu par défaut (Vulkan sous Linux/Windows,
   Metal sur macOS, DX12 en repli). Un pilote Vulkan/OpenGL 3.3+ est nécessaire
   pour la fenêtre. La vue 3D interactive utilise le GPU quand un adaptateur est

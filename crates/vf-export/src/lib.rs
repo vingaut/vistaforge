@@ -8,6 +8,7 @@
 
 pub mod animation;
 pub mod gltf;
+pub mod sculpt;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub use animation::{
     export_animation, import_animation,
 };
 pub use gltf::{CameraNode, GltfScene, Material, SunNode};
+pub use sculpt::{export_sculpt_glb, export_sculpt_mesh, scene_from_sculpt};
 
 /// Export parameters.
 #[derive(Debug, Clone, PartialEq)]

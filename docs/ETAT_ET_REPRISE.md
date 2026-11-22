@@ -5,9 +5,84 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-20** (simplification UI GPU/CPU, relief rocheux procédural, hautes résolutions — en cours).
+Dernière mise à jour : **2026-11-22** (maillage 3D : gizmo d'orientation, moteur de calcul CPU/GPU, déterminisme du remesh).
 
 > **Note du 20 novembre** : le comparateur avant/après a été **retiré** de l'interface. Les mentions ci-dessous sont historiques ; la vue se choisit désormais par un simple sélecteur **GPU / CPU** dans la barre d'outils. La suite (simplification, relief rocheux procédural, hautes résolutions) est décrite dans [`SESSION_2026-11-20.md`](SESSION_2026-11-20.md).
+
+---
+
+## 0duovicies. Session du 22 novembre — maillage 3D, gizmo et moteur de calcul
+
+> **État : livré, testé, non poussé.** `cargo test --workspace` : **387 tests
+> verts** ; `clippy -D warnings` et `cargo fmt --check` propres ; binaires
+> release reconstruits dans `dist/`.
+
+### 1. Module Maillage 3D (crates `vf-sculpt`, `vf-export`)
+
+Grande partie livrée en début de session (non journalisée plus tôt) :
+
+- `vf-sculpt` : maillage n-gon (`Mesh`), 19 outils de sculpture, topologie
+  dynamique, remesh triangles/quads/voxel, fracture SDF de Voronoï, impacts,
+  métaballs, débris avec physique déterministe, roche (9 profils), parois
+  rocheuses fermées, BVH, rendu CPU du viewport, export `.glb/.obj/.vfm/.stl`.
+- `vf-export::scene_from_sculpt` et `export_sculpt_mesh` pour Blender.
+- CLI `vistaforge mesh`, documentation [`MAILLAGE3D.md`](MAILLAGE3D.md).
+
+### 2. Gizmo d'orientation dans la vue Maillage 3D
+
+- `view_gizmo::show_basis` : le widget accepte désormais une base
+  (`forward/right/up`) au lieu d'un `vf_core::Camera` ; `show` reste le
+  raccourci pour la caméra du projet.
+- La vue 3D du maillage dessine le même cube CAO en haut à droite et applique le
+  clic à sa caméra d'orbite (`mesh3d_orbit_for`, yaw/pitch de chaque vue, pôle
+  ramené à 89°). Le pinceau est neutralisé sous le gizmo, un trait déjà commencé
+  continue, et le curseur s'efface sur le cube.
+- Case **Vue et export → Gizmo d'orientation**, HUD avec le moteur de calcul.
+
+### 3. Transformations géométriques : CPU (N cœurs) ou GPU
+
+- Nouveau crate **`vf-compute`** : noyaux de normales (angle et aire pondérés),
+  lissage de Taubin, déplacement le long des normales, transformation affine ;
+  deux moteurs — pool `rayon` partagé (1..N threads) ou pipelines WGSL sur un
+  ou plusieurs adaptateurs wgpu (`run_split` découpe la plage de sommets).
+- `vf_core::ComputeSettings` gagne `compute`, `compute_adapter`,
+  `compute_adapters`, persistés dans `compute.ron` ; `VISTAFORGE_COMPUTE`,
+  `VISTAFORGE_COMPUTE_GPU`, `--compute`, `--compute-gpu` (CLI et application).
+- Préférences : sélecteur CPU / GPU (un adaptateur) / GPU (tous), liste des
+  adaptateurs, statut du moteur, raison du repli ; le sélecteur **Calcul** du
+  panneau Maillage 3D bascule sans redémarrer. La CLI affiche le moteur en mode
+  `--verbose`.
+- Mesures et conseils d'usage dans [`GPU.md`](GPU.md#cpu-ou-gpu--ce-que-disent-les-mesures) :
+  le CPU reste plus rapide sur un poste récent, le GPU aide quand peu de cœurs
+  sont alloués ou pour libérer le CPU.
+
+### 4. Coût par appel GPU et déterminisme du remesh
+
+- **Énumération des adaptateurs mise en cache** (~130 ms par appel Vulkan) et
+  **tous les passes d'un noyau encodés dans une seule soumission**, copie de
+  retour incluse : un noyau coûtait 260 ms fixes, il coûte ~0,25 ms.
+- **Déterminisme** : `quadify` triait ses candidats par score seul ; à score
+  égal l'ordre venait d'un `HashMap` (graine aléatoire par processus), donc le
+  nombre de quads changeait d'un lancement à l'autre. Tri secondaire
+  `(f0, f1)` (`rank_pairs`). Même cause dans la subdivision d'arêtes
+  (`split_edges` ×2), les boucles de bord et les centres de `cap_boundary_edges`
+  qui créaient des sommets dans l'ordre du `HashMap` : clés triées.
+  Vérifié par trois lancements CLI identiques (aire et faces au bit près) et par
+  les tests `quad_candidates_are_ranked_independently_of_their_input_order` et
+  `a_flat_grid_quadifies_completely_and_repeatedly`.
+- **BVH** : les boîtes et centroïdes des triangles sont précalculés une fois sur
+  le pool (au lieu d'être recalculés à chaque niveau de l'arbre) et le test
+  `the_tree_does_not_depend_on_the_thread_count` verrouille le résultat.
+
+### 5. À suivre
+
+- Topologie résidente sur le GPU (clé de révision) pour supprimer le transfert
+  par appel, seul moyen de faire gagner le GPU sur les gros maillages.
+- Noyaux GPU pour le remesh et la projection sur la surface de référence.
+- Maillage 3D non exposé au MCP.
+- **Binaires Linux retirés de `dist/`** (ils dataient du 20 novembre, sans le
+  module 3D ni le moteur de calcul) ; Linux et macOS se compilent depuis la
+  source, voir [`BUILD.md`](BUILD.md). Seul `dist/windows-x86_64/` est publié.
 
 ---
 

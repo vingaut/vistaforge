@@ -8,6 +8,7 @@
 //!   `vf-scene`, `vf-terrain`, `vf-procgen` and `vf-render`.
 
 pub mod color;
+pub mod compute;
 pub mod detail;
 pub mod error;
 pub mod flight;
@@ -24,6 +25,7 @@ pub mod terrain_params;
 pub mod world;
 
 pub use color::Rgb;
+pub use compute::{ComputeBackend, ComputeSettings, GpuPower};
 pub use detail::{
     CraterField, DETAIL_PRESETS, DetailSettings, Exfoliation, Grooves, Ridges, Vesicles,
 };

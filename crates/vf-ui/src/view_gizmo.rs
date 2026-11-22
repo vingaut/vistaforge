@@ -66,8 +66,30 @@ pub fn rect_for(viewport: Rect) -> Option<Rect> {
     ))
 }
 
-/// Draw and interact with the gizmo.
+/// Draw and interact with the gizmo for the project camera.
 pub fn show(ui: &mut egui::Ui, viewport: Rect, camera: &Camera) -> GizmoResponse {
+    show_basis(
+        ui,
+        viewport,
+        camera.forward(),
+        camera.right(),
+        camera.true_up(),
+    )
+}
+
+/// Draw and interact with the gizmo for any camera basis.
+///
+/// The 3D mesh viewport has its own camera model, so it passes the basis of its
+/// sculpt camera here instead of building a `vf_core::Camera` just for the
+/// overlay. `forward` points from the eye toward the scene, `right` is the
+/// screen right and `up` the screen up.
+pub fn show_basis(
+    ui: &mut egui::Ui,
+    viewport: Rect,
+    forward: DVec3,
+    right: DVec3,
+    up: DVec3,
+) -> GizmoResponse {
     let Some(rect) = rect_for(viewport) else {
         return GizmoResponse {
             action: None,
@@ -76,9 +98,9 @@ pub fn show(ui: &mut egui::Ui, viewport: Rect, camera: &Camera) -> GizmoResponse
     };
     let response = ui.interact(rect, ui.scope_id().with("view-gizmo"), Sense::click());
 
-    let forward = camera.forward();
-    let right = camera.right();
-    let up = camera.true_up();
+    let forward = forward.normalize_or_zero();
+    let right = right.normalize_or_zero();
+    let up = up.normalize_or_zero();
     if forward.length_squared() < 0.5 || right.length_squared() < 0.5 || up.length_squared() < 0.5 {
         return GizmoResponse {
             action: None,
@@ -692,5 +714,53 @@ mod click_tests {
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let point = home_rect(rect_for(viewport).unwrap()).center();
         assert_eq!(click(&ctx, &camera, point), Some(GizmoAction::Home));
+    }
+
+    /// The 3D mesh viewport has its own camera model (`vf_sculpt`), so it hands
+    /// the gizmo a basis instead of a `vf_core::Camera`. The same click must hit
+    /// the same target.
+    #[test]
+    fn a_plain_basis_drives_the_same_targets() {
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        // Front framing expressed as the basis the mesh viewport forwards.
+        let forward = DVec3::Y;
+        let up_world = DVec3::Z;
+        let right = forward.cross(up_world).normalize();
+        let up = right.cross(forward).normalize();
+        let gizmo = rect_for(viewport).unwrap();
+        let mut result = None;
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(viewport),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let viewport = ui.max_rect();
+                let _ = ui.allocate_rect(viewport, Sense::click_and_drag());
+                let gizmo = show_basis(ui, viewport, forward, right, up);
+                if gizmo.action.is_some() {
+                    result = gizmo.action;
+                }
+            });
+            output.drop_without_applying_deltas();
+        };
+        // The Z axis endpoint sits above the cube centre when seen from a
+        // horizontal camera.
+        let point = Pos2::new(
+            gizmo.center().x,
+            gizmo.top() + GIZMO_CENTER_Y - AXIS_LENGTH * CUBE_HALF,
+        );
+        frame(vec![egui::Event::PointerMoved(point)]);
+        for pressed in [true, false] {
+            frame(vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert_eq!(result, Some(GizmoAction::View(ViewPreset::Top)));
     }
 }

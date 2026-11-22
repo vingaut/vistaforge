@@ -1,0 +1,30 @@
+[package]
+name = "vf-compute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Selectable compute backend (CPU thread pool or GPU) for VistaForge geometry kernels"
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+pollster = { workspace = true, optional = true }
+rayon.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+vf-core = { path = "../vf-core" }
+wgpu = { version = "30.0", default-features = false, features = [
+    "std",
+    "wgsl",
+    "vulkan",
+    "dx12",
+    "metal",
+], optional = true }
+
+[features]
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:pollster"]
+
+[lints]
+workspace = true

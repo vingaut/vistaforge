@@ -1,0 +1,2 @@
+# Checksums are consumed by `sha256sum -c` and must keep LF endings.
+dist/**/SHA256SUMS text eol=lf

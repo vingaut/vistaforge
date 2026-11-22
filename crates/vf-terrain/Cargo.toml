@@ -7,6 +7,7 @@ license.workspace = true
 description = "Heightfield operations, normals, resampling and hillshading"
 
 [dependencies]
+rayon.workspace = true
 vf-core = { path = "../vf-core" }
 
 [lints]

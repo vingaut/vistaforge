@@ -166,29 +166,31 @@ pub fn build(
     let mut normals = vec![[0.0f32; 3]; nx * ny];
     let mut uvs = vec![[0.0f32; 2]; nx * ny];
 
-    positions
-        .par_chunks_mut(nx)
-        .zip(normals.par_chunks_mut(nx))
-        .zip(uvs.par_chunks_mut(nx))
-        .enumerate()
-        .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
-            let gy = iy as f64 * y_step;
-            let y = origin_y + gy * spacing_y;
-            for ix in 0..nx {
-                let gx = ix as f64 * x_step;
-                let x = origin_x + gx * spacing_x;
-                let base_z = sampler.base_height(x, y);
-                let footprint = match view {
-                    Some(view) => view.footprint(x, y, base_z, sample_spacing),
-                    None => sample_spacing,
-                };
-                let z = sampler.height(x, y, footprint);
-                let normal = sampler.normal(x, y, footprint);
-                row_pos[ix] = [x as f32, y as f32, z];
-                row_nrm[ix] = normal;
-                row_uv[ix] = [(gx / cells_x) as f32, (gy / cells_y) as f32];
-            }
-        });
+    vf_core::compute::install(|| {
+        positions
+            .par_chunks_mut(nx)
+            .zip(normals.par_chunks_mut(nx))
+            .zip(uvs.par_chunks_mut(nx))
+            .enumerate()
+            .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
+                let gy = iy as f64 * y_step;
+                let y = origin_y + gy * spacing_y;
+                for ix in 0..nx {
+                    let gx = ix as f64 * x_step;
+                    let x = origin_x + gx * spacing_x;
+                    let base_z = sampler.base_height(x, y);
+                    let footprint = match view {
+                        Some(view) => view.footprint(x, y, base_z, sample_spacing),
+                        None => sample_spacing,
+                    };
+                    let z = sampler.height(x, y, footprint);
+                    let normal = sampler.normal(x, y, footprint);
+                    row_pos[ix] = [x as f32, y as f32, z];
+                    row_nrm[ix] = normal;
+                    row_uv[ix] = [(gx / cells_x) as f32, (gy / cells_y) as f32];
+                }
+            });
+    });
 
     let mut indices = Vec::with_capacity((nx - 1) * (ny - 1) * 2);
     for iy in 0..ny - 1 {
@@ -251,33 +253,35 @@ pub fn build_focus_patch(
     let mut positions = vec![[0.0f32; 3]; n * n];
     let mut normals = vec![[0.0f32; 3]; n * n];
     let mut uvs = vec![[0.0f32; 2]; n * n];
-    positions
-        .par_chunks_mut(n)
-        .zip(normals.par_chunks_mut(n))
-        .zip(uvs.par_chunks_mut(n))
-        .enumerate()
-        .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
-            let y = y0 + iy as f64 * step;
-            for ix in 0..n {
-                let x = x0 + ix as f64 * step;
-                let distance_to_edge = (x - x0)
-                    .min(x0 + size - x)
-                    .min(y - y0)
-                    .min(y0 + size - y)
-                    .max(0.0);
-                let fade = smoothstep(0.0, edge, distance_to_edge) as f32;
-                let base_z = sampler.base_height(x, y);
-                let footprint = match view {
-                    Some(view) => view.footprint(x, y, base_z, sample_spacing),
-                    None => sample_spacing,
-                };
-                let z = sampler.height_scaled(x, y, footprint, fade) + 0.04;
-                let normal = sampler.normal_scaled(x, y, footprint, fade);
-                row_pos[ix] = [x as f32, y as f32, z];
-                row_nrm[ix] = normal;
-                row_uv[ix] = [(ix as f32) / (n - 1) as f32, (iy as f32) / (n - 1) as f32];
-            }
-        });
+    vf_core::compute::install(|| {
+        positions
+            .par_chunks_mut(n)
+            .zip(normals.par_chunks_mut(n))
+            .zip(uvs.par_chunks_mut(n))
+            .enumerate()
+            .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
+                let y = y0 + iy as f64 * step;
+                for ix in 0..n {
+                    let x = x0 + ix as f64 * step;
+                    let distance_to_edge = (x - x0)
+                        .min(x0 + size - x)
+                        .min(y - y0)
+                        .min(y0 + size - y)
+                        .max(0.0);
+                    let fade = smoothstep(0.0, edge, distance_to_edge) as f32;
+                    let base_z = sampler.base_height(x, y);
+                    let footprint = match view {
+                        Some(view) => view.footprint(x, y, base_z, sample_spacing),
+                        None => sample_spacing,
+                    };
+                    let z = sampler.height_scaled(x, y, footprint, fade) + 0.04;
+                    let normal = sampler.normal_scaled(x, y, footprint, fade);
+                    row_pos[ix] = [x as f32, y as f32, z];
+                    row_nrm[ix] = normal;
+                    row_uv[ix] = [(ix as f32) / (n - 1) as f32, (iy as f32) / (n - 1) as f32];
+                }
+            });
+    });
 
     let mut indices = Vec::with_capacity((n - 1) * (n - 1) * 2);
     for iy in 0..n - 1 {
@@ -504,27 +508,30 @@ pub fn build_adaptive(
             let mut local_pos = vec![[0.0f32; 3]; nx * ny];
             let mut local_nrm = vec![[0.0f32; 3]; nx * ny];
             let mut local_uv = vec![[0.0f32; 2]; nx * ny];
-            local_pos
-                .par_chunks_mut(nx)
-                .zip(local_nrm.par_chunks_mut(nx))
-                .zip(local_uv.par_chunks_mut(nx))
-                .enumerate()
-                .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
-                    let gy = y0 as f64 + iy as f64 / subdiv as f64;
-                    let y = oy + gy * sy;
-                    for ix in 0..nx {
-                        let gx = x0 as f64 + ix as f64 / subdiv as f64;
-                        let x = ox + gx * sx;
-                        let base_z = sampler.base_height(x, y);
-                        let footprint =
-                            view.footprint(x, y, base_z, (sx.max(sy) / subdiv as f64) as f32);
-                        let z = sampler.height(x, y, footprint);
-                        let normal = sampler.normal(x, y, footprint);
-                        row_pos[ix] = [x as f32, y as f32, z];
-                        row_nrm[ix] = normal;
-                        row_uv[ix] = [(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32];
-                    }
-                });
+            vf_core::compute::install(|| {
+                local_pos
+                    .par_chunks_mut(nx)
+                    .zip(local_nrm.par_chunks_mut(nx))
+                    .zip(local_uv.par_chunks_mut(nx))
+                    .enumerate()
+                    .for_each(|(iy, ((row_pos, row_nrm), row_uv))| {
+                        let gy = y0 as f64 + iy as f64 / subdiv as f64;
+                        let y = oy + gy * sy;
+                        for ix in 0..nx {
+                            let gx = x0 as f64 + ix as f64 / subdiv as f64;
+                            let x = ox + gx * sx;
+                            let base_z = sampler.base_height(x, y);
+                            let footprint =
+                                view.footprint(x, y, base_z, (sx.max(sy) / subdiv as f64) as f32);
+                            let z = sampler.height(x, y, footprint);
+                            let normal = sampler.normal(x, y, footprint);
+                            row_pos[ix] = [x as f32, y as f32, z];
+                            row_nrm[ix] = normal;
+                            row_uv[ix] =
+                                [(gx / cells_x as f64) as f32, (gy / cells_y as f64) as f32];
+                        }
+                    });
+            });
             positions.extend_from_slice(&local_pos);
             normals.extend_from_slice(&local_nrm);
             uvs.extend_from_slice(&local_uv);

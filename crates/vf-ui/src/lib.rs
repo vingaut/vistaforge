@@ -21,7 +21,7 @@ mod timeline;
 mod view_gizmo;
 
 use eframe::egui;
-use glam::DVec3;
+use glam::{DVec3, Vec3};
 use vf_core::{
     AircraftPreset, Camera, CameraLink, CameraRig, ClassicParams, ErosionParams, HeightField,
     LegacyMeta, ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode,
@@ -49,6 +49,7 @@ enum Workspace {
     Rock,
     Detail,
     Sculpt,
+    Mesh3d,
     Animation,
     Erosion,
     Water,
@@ -61,12 +62,13 @@ enum Workspace {
 }
 
 impl Workspace {
-    const ALL: [Workspace; 14] = [
+    const ALL: [Workspace; 15] = [
         Self::Terrain,
         Self::Modifiers,
         Self::Rock,
         Self::Detail,
         Self::Sculpt,
+        Self::Mesh3d,
         Self::Animation,
         Self::Erosion,
         Self::Water,
@@ -92,6 +94,7 @@ impl Workspace {
             Self::Rock => "Roche",
             Self::Detail => "Détail",
             Self::Sculpt => "Sculpter",
+            Self::Mesh3d => "Maillage 3D",
             Self::Animation => "Animation",
             Self::Erosion => "Érosion",
             Self::Water => "Eau",
@@ -281,6 +284,7 @@ impl CaptureState {
             ("workspace_rock", Workspace::Rock),
             ("workspace_detail", Workspace::Detail),
             ("workspace_sculpt", Workspace::Sculpt),
+            ("workspace_mesh3d", Workspace::Mesh3d),
             ("workspace_erosion", Workspace::Erosion),
             ("workspace_water", Workspace::Water),
             ("workspace_materials", Workspace::Materials),
@@ -322,13 +326,205 @@ impl CaptureState {
     }
 }
 
-pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
+/// One selectable wgpu adapter, stored by stable key rather than by index.
+#[derive(Clone, Debug)]
+struct GpuChoice {
+    key: String,
+    label: String,
+}
+
+fn gpu_key(info: &eframe::wgpu::AdapterInfo) -> String {
+    format!("{:?}|{}", info.backend, info.name)
+}
+
+/// Match a saved adapter key (or a bare name from `VISTAFORGE_GPU`) against an
+/// enumerated adapter.
+fn gpu_key_matches(key: &str, wanted: &str) -> bool {
+    let key = key.to_lowercase();
+    let wanted = wanted.to_lowercase();
+    key == wanted
+        || key
+            .split_once('|')
+            .is_some_and(|(_, name)| name.contains(&wanted))
+}
+
+fn gpu_label(info: &eframe::wgpu::AdapterInfo) -> String {
+    let kind = match info.device_type {
+        eframe::wgpu::DeviceType::DiscreteGpu => "discret",
+        eframe::wgpu::DeviceType::IntegratedGpu => "intégré",
+        eframe::wgpu::DeviceType::VirtualGpu => "virtuel",
+        eframe::wgpu::DeviceType::Cpu => "logiciel",
+        eframe::wgpu::DeviceType::Other => "autre",
+    };
+    format!("{} — {:?} ({kind})", info.name, info.backend)
+}
+
+/// Enumerate the GPUs wgpu can see, for the preferences list.
+fn discover_gpus() -> Vec<GpuChoice> {
+    let mut descriptor = eframe::wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = eframe::wgpu::Backends::PRIMARY;
+    let instance = eframe::wgpu::Instance::new(descriptor);
+    let adapters = pollster::block_on(instance.enumerate_adapters(eframe::wgpu::Backends::PRIMARY));
+    let mut choices = Vec::new();
+    for adapter in adapters {
+        let info = adapter.get_info();
+        let key = gpu_key(&info);
+        if choices.iter().any(|choice: &GpuChoice| choice.key == key) {
+            continue;
+        }
+        choices.push(GpuChoice {
+            key,
+            label: gpu_label(&info),
+        });
+    }
+    choices
+}
+
+/// Build wgpu options that honour the saved adapter and power preference.
+fn wgpu_configuration(settings: &vf_core::ComputeSettings) -> eframe::WgpuConfiguration {
+    let mut config = eframe::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(mut setup) = config.wgpu_setup {
+        setup.power_preference = match settings.gpu_power {
+            vf_core::GpuPower::HighPerformance => eframe::wgpu::PowerPreference::HighPerformance,
+            vf_core::GpuPower::LowPower => eframe::wgpu::PowerPreference::LowPower,
+        };
+        if !settings.gpu_adapter.is_empty() {
+            let wanted = settings.gpu_adapter.to_lowercase();
+            setup.native_adapter_selector = Some(std::sync::Arc::new(
+                move |adapters: &[eframe::wgpu::Adapter],
+                      surface: Option<&eframe::wgpu::Surface<'_>>| {
+                    let compatible = |adapter: &&eframe::wgpu::Adapter| {
+                        surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+                    };
+                    let matches = |adapter: &&eframe::wgpu::Adapter| {
+                        gpu_key_matches(&gpu_key(&adapter.get_info()), &wanted)
+                    };
+                    adapters
+                        .iter()
+                        .find(|adapter| compatible(adapter) && matches(adapter))
+                        .or_else(|| adapters.iter().find(compatible))
+                        .cloned()
+                        .ok_or_else(|| "Aucun adaptateur GPU compatible".to_string())
+                },
+            ));
+        }
+        config.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(setup);
+    }
+    config
+}
+
+/// Default three-quarter framing of the 3D mesh viewport. The gizmo home button
+/// restores it.
+const MESH3D_HOME_YAW: f32 = 38.0;
+const MESH3D_HOME_PITCH: f32 = 24.0;
+
+/// Orbit yaw/pitch that makes the sculpt camera look along a standard axis.
+///
+/// The sculpt camera sits at `target + (cos yaw·cos pitch, sin yaw·cos pitch,
+/// sin pitch)·distance`, so the requested view direction is the opposite of the
+/// eye offset. `Perspective` is not an axis: the caller falls back to the home
+/// framing. Pitch is clamped just short of the poles, where the orbit basis
+/// degenerates.
+fn mesh3d_orbit_for(preset: vf_scene::ViewPreset) -> Option<(f32, f32)> {
+    use vf_scene::ViewPreset;
+    let direction = match preset {
+        ViewPreset::Perspective => return None,
+        // The variants document the view direction, not the eye position:
+        // `Front` looks north from the south, so the eye is at -Y.
+        ViewPreset::Front => glam::DVec3::Y,
+        ViewPreset::Back => glam::DVec3::NEG_Y,
+        ViewPreset::Left => glam::DVec3::X,
+        ViewPreset::Right => glam::DVec3::NEG_X,
+        ViewPreset::Top => glam::DVec3::NEG_Z,
+        ViewPreset::Bottom => glam::DVec3::Z,
+    };
+    let offset = -direction;
+    let yaw = offset.y.atan2(offset.x).to_degrees() as f32;
+    // `atan2` returns -180 for a due-west eye (because negating 0.0 gives
+    // -0.0); -180 and 180 are the same orbit, so keep the positive one.
+    let yaw = if yaw <= -180.0 { yaw + 360.0 } else { yaw };
+    let pitch = (offset.z.asin().to_degrees() as f32).clamp(-89.0, 89.0);
+    // Straight up or down the eye sits on the vertical axis: yaw only decides
+    // how a later orbit drag starts, so pin it to zero instead of leaving the
+    // `atan2(0, 0)` result (180°) in the status line.
+    if offset.z.abs() > 0.999 {
+        return Some((0.0, pitch));
+    }
+    Some((yaw, pitch))
+}
+
+/// Launch overrides for the geometry engine, from the command line.
+///
+/// The same knobs exist in the preferences (`compute.ron`), in `VISTAFORGE_COMPUTE`
+/// and in `VISTAFORGE_COMPUTE_GPU`; a command-line value wins for the run.
+#[derive(Debug, Clone, Default)]
+pub struct ComputeOverride {
+    /// `cpu`, `gpu` or `all`, as typed on the command line.
+    pub backend: Option<String>,
+    /// Adapter name or key, for `gpu` (or the first of `all`).
+    pub adapter: Option<String>,
+}
+
+impl ComputeOverride {
+    /// Fold the overrides into a settings value, warning about unusable text.
+    pub fn apply(&self, settings: &mut vf_core::ComputeSettings) {
+        if let Some(value) = &self.backend {
+            match vf_core::ComputeBackend::from_env_value(value) {
+                Some(backend) => settings.compute = backend,
+                None => eprintln!(
+                    "compute: unknown engine '{value}' (cpu, gpu, all); keeping {}",
+                    settings.compute.label()
+                ),
+            }
+        }
+        if let Some(adapter) = &self.adapter {
+            match settings.compute {
+                vf_core::ComputeBackend::GpuAll => {
+                    settings.compute_adapters = vec![adapter.clone()];
+                }
+                vf_core::ComputeBackend::Cpu => {
+                    settings.compute = vf_core::ComputeBackend::Gpu;
+                    settings.compute_adapter = adapter.clone();
+                }
+                vf_core::ComputeBackend::Gpu => settings.compute_adapter = adapter.clone(),
+            }
+        }
+    }
+}
+
+pub fn run(
+    initial: Option<PathBuf>,
+    threads: Option<usize>,
+    engine: ComputeOverride,
+) -> eframe::Result<()> {
+    // Compute preferences are loaded before eframe so the worker pool and the
+    // wgpu adapter are ready for the first frame.
+    let mut compute = vf_core::compute::load_settings().with_env_overrides();
+    if let Some(threads) = threads {
+        compute.cpu_threads = threads;
+    }
+    engine.apply(&mut compute);
+    if let Err(error) = vf_core::compute::configure(&compute) {
+        eprintln!("compute: impossible de régler le pool : {error}");
+    }
+    // Pick the engine the geometry kernels use (CPU pool, one GPU adapter or
+    // every adapter). Devices are opened lazily, so this stays cheap; the
+    // preferences panel can switch it later without a restart.
+    vf_compute::set_backend(vf_compute::BackendState::from_settings(&compute));
     // wgpu uses Vulkan on Linux/Windows and Metal on macOS. Set
     // VISTAFORGE_RENDERER=glow to fall back to the OpenGL UI renderer (and the
     // CPU-only preview) on machines where wgpu cannot initialise.
-    let renderer = match std::env::var("VISTAFORGE_RENDERER") {
-        Ok(value) if value.eq_ignore_ascii_case("glow") => eframe::Renderer::Glow,
-        _ => eframe::Renderer::Wgpu,
+    let forced_glow =
+        std::env::var("VISTAFORGE_RENDERER").is_ok_and(|value| value.eq_ignore_ascii_case("glow"));
+    let renderer = if forced_glow || !compute.gpu_enabled {
+        eframe::Renderer::Glow
+    } else {
+        eframe::Renderer::Wgpu
+    };
+    let gpus = if renderer == eframe::Renderer::Wgpu {
+        discover_gpus()
+    } else {
+        Vec::new()
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -336,12 +532,13 @@ pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
             .with_min_inner_size([1000.0, 640.0])
             .with_title("VistaForge"),
         renderer,
+        wgpu_options: wgpu_configuration(&compute),
         ..Default::default()
     };
     eframe::run_native(
         "VistaForge",
         options,
-        Box::new(move |cc| Ok(Box::new(VistaForgeApp::new(cc, initial)))),
+        Box::new(move |cc| Ok(Box::new(VistaForgeApp::new(cc, initial, compute, gpus)))),
     )
 }
 
@@ -403,6 +600,19 @@ struct PaintState {
     last: Option<(usize, usize)>,
     path: String,
     status: String,
+}
+
+#[derive(Clone, Copy)]
+struct Mesh3dHit {
+    point: Vec3,
+    /// Average of the smooth vertex normals of the contact triangle: the
+    /// direction drawn by the cursor arrow and used by the brush.
+    normal: Vec3,
+    /// Geometric normal of the triangle under the cursor.
+    face_normal: Vec3,
+    triangle: [u32; 3],
+    /// Radius actually stamped, after the coarse-mesh expansion rule.
+    footprint_m: f32,
 }
 
 impl PaintState {
@@ -620,6 +830,42 @@ struct VistaForgeApp {
     sculpt_cursor: Option<(f64, f64)>,
     sculpt_status: String,
 
+    mesh3d: Option<vf_sculpt::doc::SculptDocument>,
+    mesh3d_texture: Option<egui::TextureHandle>,
+    mesh3d_texture_size: (u32, u32),
+    mesh3d_dirty: bool,
+    mesh3d_stroke_active: bool,
+    mesh3d_shading: vf_sculpt::render::ShadingMode,
+    mesh3d_wireframe: bool,
+    /// CAD orientation gizmo in the top-right corner of the mesh viewport.
+    mesh3d_show_gizmo: bool,
+    mesh3d_ortho: bool,
+    mesh3d_yaw: f32,
+    mesh3d_pitch: f32,
+    mesh3d_distance: f32,
+    mesh3d_target: Vec3,
+    mesh3d_hit: Option<Mesh3dHit>,
+    mesh3d_footprint_m: f32,
+    /// Topology report is expensive (components, watertightness, volume) and
+    /// only decorative: cache it by geometry revision.
+    mesh3d_stats: Option<(u64, vf_sculpt::SculptStats)>,
+    /// Full-quality render is deferred until the mouse rests, so releasing a
+    /// stroke on a large mesh does not freeze the frame.
+    mesh3d_full_at: Option<std::time::Instant>,
+    mesh3d_status: String,
+    mesh3d_export_path: String,
+    mesh3d_wall_style: vf_sculpt::cliff::CliffStyle,
+    mesh3d_rock_name: String,
+    mesh3d_remesh_mode: vf_sculpt::remesh::RemeshMode,
+    mesh3d_remesh_edge: f32,
+    mesh3d_fracture_pattern: vf_sculpt::fracture::FracturePattern,
+    mesh3d_fracture_cell: f32,
+    mesh3d_fusion_radius: f32,
+    mesh3d_fusion_k: f32,
+    /// Height field derived from the sculpted mesh, used by the animation
+    /// workspace for camera collision and path presets.
+    anim_mesh_heightfield: Option<Arc<HeightField>>,
+
     rig_time: f32,
     rig_status: String,
 
@@ -668,13 +914,25 @@ struct VistaForgeApp {
 
     history: history::History,
     preferences_open: bool,
+    compute: vf_core::ComputeSettings,
+    /// Engine the geometry kernels use, with the adapters it can reach and the
+    /// reason for a fallback. Refreshed when the preference changes.
+    compute_engine: vf_compute::ComputeStatus,
+    gpu_choices: Vec<GpuChoice>,
+    compute_status: String,
+    active_gpu: String,
     help: help::HelpState,
     last_viewport_rect: egui::Rect,
     capture: Option<CaptureState>,
 }
 
 impl VistaForgeApp {
-    fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: Option<PathBuf>,
+        compute: vf_core::ComputeSettings,
+        gpu_choices: Vec<GpuChoice>,
+    ) -> Self {
         let mut status = String::new();
         let (project, heightfield, project_path) = if let Some(path) = initial {
             match vf_io::load_project(&path) {
@@ -698,6 +956,16 @@ impl VistaForgeApp {
             &project,
             &heightfield,
         );
+        let active_gpu = cc.wgpu_render_state.as_ref().map_or_else(
+            || "Aperçu CPU (OpenGL)".to_string(),
+            |state| gpu_label(&state.adapter.get_info()),
+        );
+        let compute_status = format!(
+            "{} threads actifs sur {} cœurs logiques",
+            vf_core::compute::current_threads(),
+            vf_core::ComputeSettings::logical_cores()
+        );
+        let compute_engine = vf_compute::status();
         let mut app = Self {
             project,
             heightfield,
@@ -705,6 +973,11 @@ impl VistaForgeApp {
             terrain_stats_hf: None,
             history,
             preferences_open: false,
+            compute,
+            compute_engine,
+            gpu_choices,
+            compute_status,
+            active_gpu,
             project_path: project_path.clone(),
             path_input: project_path
                 .as_ref()
@@ -777,6 +1050,36 @@ impl VistaForgeApp {
             sculpt_pan: egui::Vec2::ZERO,
             sculpt_cursor: None,
             sculpt_status: "Prêt. Clic gauche = sculpter, clic droit = déplacer.".into(),
+            mesh3d: None,
+            mesh3d_texture: None,
+            mesh3d_texture_size: (0, 0),
+            mesh3d_dirty: true,
+            mesh3d_stroke_active: false,
+            mesh3d_shading: vf_sculpt::render::ShadingMode::Rock,
+            mesh3d_wireframe: false,
+            mesh3d_show_gizmo: true,
+            mesh3d_ortho: false,
+            mesh3d_yaw: MESH3D_HOME_YAW,
+            mesh3d_pitch: MESH3D_HOME_PITCH,
+            mesh3d_distance: 120.0,
+            mesh3d_target: Vec3::ZERO,
+            mesh3d_hit: None,
+            mesh3d_footprint_m: 0.0,
+            mesh3d_stats: None,
+            mesh3d_full_at: None,
+            mesh3d_status:
+                "Clic gauche : sculpter · clic droit ou Maj+gauche : orbite · molette : zoom."
+                    .into(),
+            mesh3d_export_path: "mesh-out/sculpture.glb".into(),
+            mesh3d_wall_style: vf_sculpt::cliff::CliffStyle::SeaCliff,
+            mesh3d_rock_name: "sandstone".into(),
+            mesh3d_remesh_mode: vf_sculpt::remesh::RemeshMode::Quads,
+            mesh3d_remesh_edge: 0.6,
+            mesh3d_fracture_pattern: vf_sculpt::fracture::FracturePattern::Voronoi,
+            mesh3d_fracture_cell: 4.0,
+            mesh3d_fusion_radius: 3.0,
+            mesh3d_fusion_k: 0.4,
+            anim_mesh_heightfield: None,
             rig_time: 0.0,
             rig_status: "Tracez le point de vue, puis réglez la cible et le profil de vol.".into(),
             anim_tab: animation_ui::AnimTab::Path,
@@ -3962,8 +4265,18 @@ impl VistaForgeApp {
         );
     }
 
+    /// Height field the animation workspace uses for collision and altitudes.
+    /// Falls back to the project terrain; a sculpted mesh can provide an
+    /// override so a flight follows overhangs and fractures.
+    fn animation_heightfield(&self) -> Arc<HeightField> {
+        self.anim_mesh_heightfield
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.heightfield))
+    }
+
     fn ensure_animation_workspace(&mut self, ctx: &egui::Context) {
-        if animation_ui::ensure_animation(&mut self.project.rig, &self.heightfield) {
+        let animation_heightfield = self.animation_heightfield();
+        if animation_ui::ensure_animation(&mut self.project.rig, &animation_heightfield) {
             self.project.mark_modified();
             self.anim_revision = self.anim_revision.wrapping_add(1);
             self.anim_camera_dirty = true;
@@ -4054,11 +4367,9 @@ impl VistaForgeApp {
             .as_ref()
             .is_none_or(|(revision, _)| *revision != self.anim_revision);
         if stale {
-            match vf_flight::rig::RigTrack::new(
-                &self.project.rig,
-                &self.heightfield,
-                self.project.seed,
-            ) {
+            let heightfield = self.animation_heightfield();
+            match vf_flight::rig::RigTrack::new(&self.project.rig, &heightfield, self.project.seed)
+            {
                 Ok(track) => self.anim_track = Some((self.anim_revision, track)),
                 Err(error) => {
                     self.rig_status = format!("Animation : {error}");
@@ -4494,8 +4805,8 @@ impl VistaForgeApp {
         if step.workspace == Workspace::Animation {
             self.ensure_animation_workspace(ctx);
             if step.compare && animation_ui::TimingFit::measure(&self.project.rig).is_strained() {
-                let _ =
-                    vf_flight::rig::preset_path(&mut self.project.rig, &self.heightfield, "demo");
+                let heightfield = self.animation_heightfield();
+                let _ = vf_flight::rig::preset_path(&mut self.project.rig, &heightfield, "demo");
                 self.rig_time = 0.0;
                 self.anim_editor.selection = None;
                 self.frame_animation_loop();
@@ -4978,11 +5289,8 @@ impl VistaForgeApp {
         ui.horizontal_wrapped(|ui| {
             for (name, label) in [("orbit", "Orbite"), ("ridge", "Crête"), ("dive", "Piqué")] {
                 if ui.button(label).clicked() {
-                    match vf_flight::rig::preset_path(
-                        &mut self.project.rig,
-                        &self.heightfield,
-                        name,
-                    ) {
+                    let heightfield = self.animation_heightfield();
+                    match vf_flight::rig::preset_path(&mut self.project.rig, &heightfield, name) {
                         Ok(()) => {
                             self.anim_editor.selection = None;
                             self.anim_edit_target = false;
@@ -6304,11 +6612,9 @@ impl VistaForgeApp {
             .as_ref()
             .is_none_or(|cache| cache.revision != self.anim_revision)
         {
-            let curves = animation_ui::profile_curves(
-                &self.project.rig,
-                &self.heightfield,
-                self.project.seed,
-            );
+            let heightfield = self.animation_heightfield();
+            let curves =
+                animation_ui::profile_curves(&self.project.rig, &heightfield, self.project.seed);
             self.anim_profile_cache = Some(animation_ui::ProfileCache {
                 revision: self.anim_revision,
                 curves,
@@ -6374,9 +6680,10 @@ impl VistaForgeApp {
                 )
                 .clicked()
             {
+                let heightfield = self.animation_heightfield();
                 match vf_flight::rig::preset_path(
                     &mut self.project.rig,
-                    &self.heightfield,
+                    &heightfield,
                     "demo",
                 ) {
                     Ok(()) => {
@@ -6694,8 +7001,8 @@ impl VistaForgeApp {
         let rig = self.project.rig.clone();
         let total = rig.frame_count();
         let mut project = self.project.clone();
-        let heightfield = Arc::clone(&self.heightfield);
         let options = self.full_options();
+        let heightfield = self.animation_heightfield();
         let seed = self.project.seed;
         let fps = rig.fps.max(1);
         let (sender, receiver) = mpsc::channel();
@@ -6878,6 +7185,7 @@ impl VistaForgeApp {
                 Workspace::Rock => self.rock_ui(ui, ctx),
                 Workspace::Detail => self.detail_ui(ui, ctx),
                 Workspace::Sculpt => self.sculpt_panel_ui(ui, ctx),
+                Workspace::Mesh3d => self.mesh3d_panel_ui(ui, ctx),
                 Workspace::Animation => self.animation_panel_ui(ui, ctx),
                 Workspace::Erosion => self.erosion_ui(ui),
                 Workspace::Water => self.water_ui(ui),
@@ -8739,6 +9047,1152 @@ impl VistaForgeApp {
         );
     }
 
+    fn mesh3d_create_from_terrain(&mut self) {
+        let settings = vf_sculpt::terrain::TerrainMeshSettings {
+            resolution: 256,
+            close_slab: true,
+            floor_z: self.heightfield.min_max().0 - 25.0,
+            uv_scale_m: 8.0,
+            refine_steep: false,
+            max_edge_m: 1.0,
+            max_vertices: 500_000,
+        };
+        let mut document =
+            vf_sculpt::doc::SculptDocument::from_heightfield(&self.heightfield, settings);
+        document.name = self
+            .project_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Sculpture".into());
+        self.mesh3d_distance = (document.mesh.bounds().size().length() * 1.35).max(8.0);
+        self.mesh3d_target = document.mesh.bounds().center();
+        // A 3 m brush on a 15 km terrain with ~80 m faces selects no vertex
+        // and looks broken. Start at roughly one cell so the first click is
+        // visible; the cursor and the panel explain the effective radius.
+        let size = document.mesh.bounds().size();
+        let cell = (size.x.max(size.y) / 256.0).max(0.05);
+        document.brush.radius_m = (cell * 1.8).clamp(3.0, 120.0);
+        let radius = document.brush.radius_m;
+        self.mesh3d = Some(document);
+        self.mesh3d_dirty = true;
+        self.mesh3d_stats = None;
+        self.mesh3d_full_at = None;
+        self.mesh3d_status = format!(
+            "Maillage créé depuis le terrain. Rayon initial ajusté à {radius:.1} m (taille des faces). Clic gauche pour sculpter."
+        );
+    }
+
+    fn mesh3d_fit_camera(&mut self) {
+        if let Some(document) = &self.mesh3d {
+            let bounds = document.mesh.bounds();
+            if !bounds.is_empty() {
+                self.mesh3d_target = bounds.center();
+                self.mesh3d_distance = (bounds.size().length() * 1.25).max(5.0);
+                self.mesh3d_dirty = true;
+            }
+        }
+    }
+
+    /// Apply a click on the orientation gizmo to the 3D mesh camera.
+    fn apply_mesh3d_gizmo(&mut self, action: view_gizmo::GizmoAction) {
+        let (label, yaw, pitch) = match action {
+            view_gizmo::GizmoAction::Home => {
+                ("défaut".to_string(), MESH3D_HOME_YAW, MESH3D_HOME_PITCH)
+            }
+            view_gizmo::GizmoAction::View(preset) => {
+                let (yaw, pitch) =
+                    mesh3d_orbit_for(preset).unwrap_or((MESH3D_HOME_YAW, MESH3D_HOME_PITCH));
+                (preset.label().to_lowercase(), yaw, pitch)
+            }
+        };
+        self.mesh3d_yaw = yaw;
+        self.mesh3d_pitch = pitch;
+        self.mesh3d_dirty = true;
+        self.mesh3d_status = format!("Vue {label} : yaw {yaw:.0}°, pitch {pitch:.0}°.");
+    }
+
+    fn mesh3d_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let _ = ctx;
+        if self.mesh3d.is_none() {
+            ui.label(
+                egui::RichText::new(
+                    "Le module 3D transforme le terrain en maillage éditable : surplombs, \
+                     fractures, impacts, fusion et parois rocheuses deviennent possibles.",
+                )
+                .small(),
+            );
+            if ui
+                .button("Créer le maillage depuis le terrain")
+                .on_hover_text(
+                    "Convertit le heightfield courant en maillage fermé, prêt à sculpter.",
+                )
+                .clicked()
+            {
+                self.mesh3d_create_from_terrain();
+            }
+            return;
+        }
+        let stats = match self.mesh3d_stats {
+            Some((revision, stats))
+                if self
+                    .mesh3d
+                    .as_ref()
+                    .is_some_and(|doc| doc.stats_revision() == revision) =>
+            {
+                stats
+            }
+            _ => {
+                let stats = self
+                    .mesh3d
+                    .as_ref()
+                    .map(|doc| doc.stats())
+                    .unwrap_or_default();
+                if let Some(document) = &self.mesh3d {
+                    self.mesh3d_stats = Some((document.stats_revision(), stats));
+                }
+                stats
+            }
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{} · {} faces · {}",
+                stats.vertices,
+                stats.faces,
+                if stats.watertight {
+                    "étanche"
+                } else {
+                    "ouvert"
+                }
+            ))
+            .small()
+            .strong(),
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "{:.1} m² · {:.1} m³ · {:.1} Mo · {} débris",
+                stats.area_m2,
+                stats.volume_m3,
+                stats.memory_bytes as f64 / 1_048_576.0,
+                stats.debris
+            ))
+            .small()
+            .weak(),
+        );
+        // Engine used by the geometry kernels. It is switchable here because
+        // this is where the cost is paid: sculpting, remeshing and fracture all
+        // go through the same pool or GPU.
+        let mut engine = vf_compute::BackendState::from_settings(&self.compute);
+        let previous_engine = engine.backend;
+        ui.horizontal(|ui| {
+            ui.label("Calcul");
+            egui::ComboBox::from_id_salt("mesh3d-engine")
+                .selected_text(engine.backend.label())
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for backend in vf_core::ComputeBackend::ALL {
+                        ui.selectable_value(&mut engine.backend, backend, backend.label())
+                            .on_hover_text(backend.tooltip());
+                    }
+                });
+            ui.label(
+                egui::RichText::new(self.compute_engine.summary())
+                    .small()
+                    .weak(),
+            )
+            .on_hover_text(
+                "Moteur des normales, du lissage de Taubin, des déplacements de détail, \
+                 des transformations et de la sculpture. Préférences → Calcul (CPU / GPU) \
+                 choisit l'adaptateur, ou tous les GPU à la fois.",
+            );
+        });
+        if engine.backend != previous_engine {
+            vf_compute::set_backend(engine.clone());
+            engine.write_to(&mut self.compute);
+            self.compute_engine = vf_compute::status();
+            vf_core::compute::save_settings(&self.compute);
+            self.mesh3d_status = format!("Calcul : {}", self.compute_engine.summary());
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("Annuler").clicked() {
+                if let Some(doc) = self.mesh3d.as_mut() {
+                    doc.undo();
+                }
+                self.mesh3d_dirty = true;
+            }
+            if ui.small_button("Rétablir").clicked() {
+                if let Some(doc) = self.mesh3d.as_mut() {
+                    doc.redo();
+                }
+                self.mesh3d_dirty = true;
+            }
+            if ui.small_button("Cadrer").clicked() {
+                self.mesh3d_fit_camera();
+            }
+            if ui.small_button("Recréer").clicked() {
+                self.mesh3d_create_from_terrain();
+            }
+        });
+
+        let footprint_hint = self.mesh3d_footprint_m;
+        let header = egui::CollapsingHeader::new("Pinceau de sculpture")
+            .default_open(true)
+            .show(ui, |ui| {
+                let Some(document) = self.mesh3d.as_mut() else {
+                    return;
+                };
+                egui::Grid::new("mesh3d-tools")
+                    .num_columns(3)
+                    .spacing([4.0, 4.0])
+                    .show(ui, |ui| {
+                        for (index, tool) in vf_sculpt::sculpt::ToolKind::ALL.iter().enumerate() {
+                            let selected = document.brush.tool == *tool;
+                            if ui
+                                .selectable_label(selected, tool.label())
+                                .on_hover_text(tool.description())
+                                .clicked()
+                            {
+                                document.brush.tool = *tool;
+                            }
+                            if index % 3 == 2 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                egui::Grid::new("mesh3d-brush")
+                    .num_columns(2)
+                    .spacing([8.0, 3.0])
+                    .show(ui, |ui| {
+                        ui.label("Rayon");
+                        ui.add(
+                            egui::DragValue::new(&mut document.brush.radius_m)
+                                .speed(0.05)
+                                .range(0.05..=250.0)
+                                .suffix(" m"),
+                        );
+                        ui.end_row();
+                        ui.label("Force");
+                        ui.add(
+                            egui::Slider::new(&mut document.brush.strength, 0.0..=1.0)
+                                .show_value(true),
+                        );
+                        ui.end_row();
+                        ui.label("Dureté");
+                        ui.add(
+                            egui::Slider::new(&mut document.brush.hardness, 0.0..=1.0)
+                                .show_value(true),
+                        );
+                        ui.end_row();
+                        ui.label("Grain");
+                        ui.add(
+                            egui::Slider::new(&mut document.brush.grain, 0.0..=1.0)
+                                .show_value(true),
+                        );
+                        ui.end_row();
+                        ui.label("Symétrie");
+                        egui::ComboBox::from_id_salt("mesh3d-symmetry")
+                            .selected_text(match document.brush.symmetry {
+                                vf_sculpt::sculpt::Symmetry::None => "Aucune",
+                                vf_sculpt::sculpt::Symmetry::X => "X",
+                                vf_sculpt::sculpt::Symmetry::Y => "Y",
+                                vf_sculpt::sculpt::Symmetry::Xy => "X + Y",
+                                vf_sculpt::sculpt::Symmetry::Radial(_) => "Radiale",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut document.brush.symmetry,
+                                    vf_sculpt::sculpt::Symmetry::None,
+                                    "Aucune",
+                                );
+                                ui.selectable_value(
+                                    &mut document.brush.symmetry,
+                                    vf_sculpt::sculpt::Symmetry::X,
+                                    "X",
+                                );
+                                ui.selectable_value(
+                                    &mut document.brush.symmetry,
+                                    vf_sculpt::sculpt::Symmetry::Y,
+                                    "Y",
+                                );
+                                ui.selectable_value(
+                                    &mut document.brush.symmetry,
+                                    vf_sculpt::sculpt::Symmetry::Xy,
+                                    "X + Y",
+                                );
+                                ui.selectable_value(
+                                    &mut document.brush.symmetry,
+                                    vf_sculpt::sculpt::Symmetry::Radial(6),
+                                    "Radiale 6",
+                                );
+                            });
+                        ui.end_row();
+                    });
+                if footprint_hint > document.brush.radius_m * 1.02 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Zone réelle {:.2} m : le rayon ({:.2} m) est plus petit qu'une arête du maillage. Le pinceau est élargi pour rester visible ; augmentez le rayon ou la résolution.",
+                            footprint_hint, document.brush.radius_m
+                        ))
+                        .small()
+                        .color(egui::Color32::from_rgb(255, 196, 96)),
+                    );
+                }
+                ui.checkbox(&mut document.brush.dynamic_topology, "Topologie dynamique")
+                    .on_hover_text("Subdivise localement sous le pinceau pour garder le détail.");
+                if document.brush.tool == vf_sculpt::sculpt::ToolKind::Fracture {
+                    ui.horizontal(|ui| {
+                        ui.label("Fracture");
+                        egui::ComboBox::from_id_salt("mesh3d-fracture-brush")
+                            .selected_text(document.brush.fracture.label())
+                            .show_ui(ui, |ui| {
+                                for kind in vf_sculpt::sculpt::FractureKind::ALL {
+                                    ui.selectable_value(
+                                        &mut document.brush.fracture,
+                                        kind,
+                                        kind.label(),
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::DragValue::new(&mut document.brush.fracture_count)
+                                .range(1..=64)
+                                .prefix("× "),
+                        );
+                    });
+                }
+                if document.brush.tool == vf_sculpt::sculpt::ToolKind::Strata {
+                    ui.add(
+                        egui::Slider::new(&mut document.brush.layer_m, 0.05..=20.0)
+                            .text("Banc (m)"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut document.brush.layer_count, 1..=32).text("Bancs"),
+                    );
+                }
+                if document.brush.tool == vf_sculpt::sculpt::ToolKind::Melt {
+                    ui.add(egui::Slider::new(&mut document.brush.melt, 0.0..=1.0).text("Fusion"));
+                }
+            });
+        self.help.register(
+            header.header_response.rect.union(
+                header
+                    .body_response
+                    .as_ref()
+                    .map_or(egui::Rect::NOTHING, |body| body.rect),
+            ),
+            help::HelpTopic::Sculpt,
+        );
+
+        let header = egui::CollapsingHeader::new("Roche et détail")
+            .default_open(false)
+            .show(ui, |ui| {
+                let Some(document) = self.mesh3d.as_mut() else {
+                    return;
+                };
+                let presets = vf_sculpt::rock::RockProfile::all_presets();
+                egui::ComboBox::from_id_salt("mesh3d-rock")
+                    .selected_text(document.rock.surface.label())
+                    .show_ui(ui, |ui| {
+                        for (name, profile) in &presets {
+                            if ui
+                                .selectable_label(
+                                    document.rock.surface == profile.surface,
+                                    profile.surface.label(),
+                                )
+                                .clicked()
+                            {
+                                document.rock = *profile;
+                                self.mesh3d_rock_name = (*name).to_string();
+                            }
+                        }
+                    });
+                if ui
+                    .button("Appliquer le détail de roche")
+                    .on_hover_text(
+                        "Bancs, joints, exfoliation, vésicules, tafoni et grain sur tout le maillage.",
+                    )
+                    .clicked()
+                {
+                    let moved = document.apply_rock_detail(self.seed);
+                    self.mesh3d_status = format!("{moved} sommets déplacés par le détail rocheux.");
+                    self.mesh3d_dirty = true;
+                }
+                if ui.button("Teinter selon la roche").clicked() {
+                    vf_sculpt::rock::tint_by_profile(&mut document.mesh, document.rock, self.seed);
+                    self.mesh3d_dirty = true;
+                }
+                if ui
+                    .button("Subdiviser puis détailler")
+                    .on_hover_text("Subdivision adaptative puis application du profil : le zoom reste net.")
+                    .clicked()
+                {
+                    let settings = vf_sculpt::rock::RockDetailSettings {
+                        profile: document.rock,
+                        adaptive: true,
+                        max_edge_m: 0.45,
+                        max_vertices: 1_500_000,
+                        use_mask: false,
+                    };
+                    let refined = vf_sculpt::rock::adaptive_detail(
+                        &document.mesh,
+                        document.rock,
+                        settings,
+                        self.seed,
+                    );
+                    document.replace_mesh(refined);
+                    self.mesh3d_dirty = true;
+                }
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Remesh")
+            .default_open(false)
+            .show(ui, |ui| {
+                let Some(document) = self.mesh3d.as_mut() else {
+                    return;
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Mode");
+                    egui::ComboBox::from_id_salt("mesh3d-remesh")
+                        .selected_text(document.quality.label())
+                        .show_ui(ui, |ui| {
+                            for quality in vf_sculpt::doc::QualityLevel::ALL {
+                                ui.selectable_value(
+                                    &mut document.quality,
+                                    quality,
+                                    quality.label(),
+                                );
+                            }
+                        });
+                });
+                ui.add(
+                    egui::DragValue::new(&mut self.mesh3d_remesh_edge)
+                        .speed(0.02)
+                        .range(0.02..=20.0)
+                        .prefix("arête ")
+                        .suffix(" m"),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Remesher").clicked() {
+                        let mode = self.mesh3d_remesh_mode;
+                        if let Some(report) = document.remesh(mode, self.mesh3d_remesh_edge) {
+                            self.mesh3d_status = format!(
+                                "Remesh : {} → {} faces en {} ms.",
+                                report.before.faces, report.after.faces, report.elapsed_ms
+                            );
+                            self.mesh3d_dirty = true;
+                        }
+                    }
+                    if ui.button("Voxel").clicked() && document.voxel_remesh() {
+                        self.mesh3d_status = "Remesh voxel terminé.".into();
+                        self.mesh3d_dirty = true;
+                    }
+                    if ui.button("Quads").clicked() {
+                        let before = document.mesh.face_count();
+                        document.mesh = vf_sculpt::remesh::quadify(&document.mesh, 35.0);
+                        document.rebuild_bvh();
+                        self.mesh3d_status =
+                            format!("Quads : {before} → {} faces.", document.mesh.face_count());
+                        self.mesh3d_dirty = true;
+                    }
+                });
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Fracture et impacts")
+            .default_open(false)
+            .show(ui, |ui| {
+                let Some(document) = self.mesh3d.as_mut() else {
+                    return;
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Motif");
+                    egui::ComboBox::from_id_salt("mesh3d-fracture-pattern")
+                        .selected_text(self.mesh3d_fracture_pattern.label())
+                        .show_ui(ui, |ui| {
+                            for pattern in vf_sculpt::fracture::FracturePattern::ALL {
+                                ui.selectable_value(
+                                    &mut self.mesh3d_fracture_pattern,
+                                    pattern,
+                                    pattern.label(),
+                                );
+                            }
+                        });
+                });
+                ui.add(
+                    egui::DragValue::new(&mut self.mesh3d_fracture_cell)
+                        .speed(0.1)
+                        .range(0.5..=100.0)
+                        .prefix("cellule ")
+                        .suffix(" m"),
+                );
+                if ui
+                    .button("Fracturer et ajouter les débris")
+                    .on_hover_text(
+                        "Cellules de Voronoï solides, puis chute physique sur le maillage.",
+                    )
+                    .clicked()
+                {
+                    let settings = vf_sculpt::fracture::FractureSettings {
+                        pattern: self.mesh3d_fracture_pattern,
+                        cell_m: self.mesh3d_fracture_cell,
+                        seed: self.seed,
+                        ..vf_sculpt::fracture::FractureSettings::default()
+                    };
+                    let result = document.fracture(settings);
+                    document.add_debris(&result.pieces);
+                    self.mesh3d_status = format!(
+                        "{} morceaux · {:.1} m³.",
+                        result.pieces.len(),
+                        result.volume_m3
+                    );
+                    self.mesh3d_dirty = true;
+                }
+                if ui
+                    .button("Simuler la chute")
+                    .on_hover_text("Physique déterministe : rebonds, frottement, tas de débris.")
+                    .clicked()
+                {
+                    let report = document
+                        .settle_debris(vf_sculpt::physics::PhysicsSettings::default(), 1.0 / 60.0);
+                    self.mesh3d_status = format!(
+                        "Physique : {} pas, {} corps endormis.",
+                        report.steps, report.sleeping
+                    );
+                    self.mesh3d_dirty = true;
+                }
+                if ui.button("Fusionner les débris au maillage").clicked() {
+                    let debris = document.debris_mesh();
+                    if !debris.is_empty() {
+                        document.mesh.merge(&debris);
+                        document.rebuild_bvh();
+                        document.debris.clear();
+                        self.mesh3d_dirty = true;
+                    }
+                }
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Parois et surplombs")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::ComboBox::from_id_salt("mesh3d-wall-style")
+                    .selected_text(self.mesh3d_wall_style.label())
+                    .show_ui(ui, |ui| {
+                        for style in vf_sculpt::cliff::CliffStyle::ALL {
+                            ui.selectable_value(&mut self.mesh3d_wall_style, style, style.label());
+                        }
+                    });
+                if let Some(document) = self.mesh3d.as_mut() {
+                    if ui
+                        .button("Remplacer par une paroi")
+                        .on_hover_text("Paroi fermée avec bancs, encoches et surplombs réels.")
+                        .clicked()
+                    {
+                        let wall = vf_sculpt::cliff::wall(self.mesh3d_wall_style.settings());
+                        document.replace_mesh(wall);
+                        self.mesh3d_dirty = true;
+                    }
+                    if ui.button("Ajouter la paroi").clicked() {
+                        let wall = vf_sculpt::cliff::wall(self.mesh3d_wall_style.settings());
+                        document.mesh.merge(&wall);
+                        document.rebuild_bvh();
+                        self.mesh3d_dirty = true;
+                    }
+                }
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Fusion / métaballs")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Fond une sphère de matière dans le maillage avec un raccord lisse (métaballs). Cliquez d'abord la surface pour placer le blob.",
+                    )
+                    .small(),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.mesh3d_fusion_radius)
+                        .speed(0.1)
+                        .range(0.2..=80.0)
+                        .prefix("rayon "),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.mesh3d_fusion_k, 0.05..=1.5)
+                        .text("raccord")
+                        .fixed_decimals(2),
+                );
+                if let Some(document) = self.mesh3d.as_mut() {
+                    let center = self
+                        .mesh3d_hit
+                        .map(|hit| hit.point)
+                        .unwrap_or_else(|| document.mesh.bounds().center());
+                    if ui
+                        .button("Fondre un blob au pinceau")
+                        .on_hover_text(
+                            "Voxelise localement le maillage et la sphère, puis fusionne les deux champs.",
+                        )
+                        .clicked()
+                    {
+                        let settings = vf_sculpt::metaball::FusionSettings {
+                            cell_m: (document.mesh.bounds().size().length() / 240.0)
+                                .clamp(0.08, 0.8),
+                            smooth_k: self.mesh3d_fusion_k,
+                            max_voxels: 12_000_000,
+                            smooth_iterations: 1,
+                        };
+                        let before = document.mesh.face_count();
+                        document.mesh = vf_sculpt::metaball::fuse_blob(
+                            &document.mesh,
+                            center,
+                            self.mesh3d_fusion_radius,
+                            settings,
+                        );
+                        document.rebuild_bvh();
+                        self.mesh3d_status = format!(
+                            "Blob fusionné : {before} → {} faces.",
+                            document.mesh.face_count()
+                        );
+                        self.mesh3d_dirty = true;
+                    }
+                }
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Animation (hauteur de collision)")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "La caméra et les presets de vol suivent le terrain ou le dessus du maillage sculpté (surplombs et fractures compris).",
+                    )
+                    .small(),
+                );
+                let active = self.anim_mesh_heightfield.is_some();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Hauteur depuis le maillage")
+                        .on_hover_text(
+                            "Rééchantillonne le dessus du maillage sur la grille du projet, puis l'utilise pour l'animation.",
+                        )
+                        .clicked()
+                    {
+                        let reference = (*self.heightfield).clone();
+                        let heightfield = self
+                            .mesh3d
+                            .as_ref()
+                            .and_then(|document| {
+                                vf_sculpt::terrain::animation_heightfield(
+                                    &document.mesh,
+                                    reference,
+                                )
+                            });
+                        if let Some(heightfield) = heightfield {
+                            self.anim_mesh_heightfield = Some(Arc::new(heightfield));
+                            self.anim_revision = self.anim_revision.wrapping_add(1);
+                            self.mesh3d_status =
+                                "Hauteur d'animation mise à jour depuis le maillage.".into();
+                        } else {
+                            self.mesh3d_status =
+                                "Impossible de dériver une hauteur depuis ce maillage.".into();
+                        }
+                    }
+                    if ui.button("Revenir au terrain").clicked() {
+                        self.anim_mesh_heightfield = None;
+                        self.anim_revision = self.anim_revision.wrapping_add(1);
+                        self.mesh3d_status = "Animation : collision sur le terrain.".into();
+                    }
+                });
+                ui.label(if active {
+                    "Source active : maillage 3D"
+                } else {
+                    "Source active : terrain"
+                });
+            });
+        let _ = header;
+
+        let header = egui::CollapsingHeader::new("Vue et export")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Vue");
+                    egui::ComboBox::from_id_salt("mesh3d-shading")
+                        .selected_text(self.mesh3d_shading.label())
+                        .show_ui(ui, |ui| {
+                            for mode in vf_sculpt::render::ShadingMode::ALL {
+                                if ui
+                                    .selectable_value(&mut self.mesh3d_shading, mode, mode.label())
+                                    .clicked()
+                                {
+                                    self.mesh3d_dirty = true;
+                                }
+                            }
+                        });
+                });
+                if ui.checkbox(&mut self.mesh3d_wireframe, "Filaire").changed() {
+                    self.mesh3d_dirty = true;
+                }
+                if ui
+                    .checkbox(&mut self.mesh3d_ortho, "Orthographique")
+                    .changed()
+                {
+                    self.mesh3d_dirty = true;
+                }
+                ui.checkbox(&mut self.mesh3d_show_gizmo, "Gizmo d'orientation")
+                    .on_hover_text(
+                        "Cube cliquable en haut à droite : une face ou un axe cadre la vue, \
+                         la maison revient à la vue par défaut. Les flèches X/Y/Z déplacent \
+                         la caméra autour du maillage, pas le maillage.",
+                    );
+                if let Some(document) = self.mesh3d.as_mut() {
+                    ui.add(
+                        egui::DragValue::new(&mut document.brush.radius_m)
+                            .speed(0.05)
+                            .range(0.05..=250.0)
+                            .prefix("rayon "),
+                    );
+                }
+                ui.separator();
+                ui.label("Export");
+                ui.text_edit_singleline(&mut self.mesh3d_export_path);
+                ui.horizontal(|ui| {
+                    for format in ["glb", "obj", "vfm"] {
+                        if ui.button(format.to_uppercase()).clicked() {
+                            let mut path = std::path::PathBuf::from(&self.mesh3d_export_path);
+                            if path.extension().is_none() {
+                                path.set_extension(format);
+                            }
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if let Some(document) = &self.mesh3d {
+                                match vf_export::export_sculpt_mesh(
+                                    &path,
+                                    &document.mesh,
+                                    &document.name,
+                                ) {
+                                    Ok(written) => {
+                                        self.mesh3d_status =
+                                            format!("Exporté en {written}: {}", path.display());
+                                    }
+                                    Err(error) => self.mesh3d_status = error,
+                                }
+                            }
+                        }
+                    }
+                });
+                if ui.button("Enregistrer le .vfm").clicked() {
+                    let path =
+                        std::path::PathBuf::from(&self.mesh3d_export_path).with_extension("vfm");
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Some(document) = &self.mesh3d {
+                        let metadata = vf_sculpt::io::MeshMetadata {
+                            name: document.name.clone(),
+                            rock: document.rock.surface.name().into(),
+                            quality: document.quality as u8,
+                            seed: self.seed,
+                            note: String::new(),
+                        };
+                        match vf_sculpt::io::write_vfm(&path, &document.mesh, &metadata) {
+                            Ok(()) => {
+                                self.mesh3d_status = format!("Sauvegardé: {}", path.display());
+                            }
+                            Err(error) => self.mesh3d_status = error.to_string(),
+                        }
+                    }
+                }
+            });
+        let _ = header;
+
+        ui.separator();
+        ui.label(egui::RichText::new(&self.mesh3d_status).small().weak());
+    }
+
+    fn mesh3d_canvas_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.mesh3d.is_none() {
+            self.mesh3d_create_from_terrain();
+        }
+        let available = ui.available_size();
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+        let camera = vf_sculpt::render::Camera {
+            ortho: self.mesh3d_ortho,
+            ortho_height_m: self.mesh3d_distance * 1.2,
+            ..vf_sculpt::render::Camera::orbit(
+                self.mesh3d_target,
+                self.mesh3d_distance,
+                self.mesh3d_yaw,
+                self.mesh3d_pitch,
+            )
+        };
+        let modifiers = ui.input(|i| i.modifiers);
+        // The gizmo sits on top of the viewport: a click there snaps the view
+        // and must not sculpt, orbit or zoom the mesh underneath.
+        let gizmo_rect = if self.mesh3d_show_gizmo {
+            view_gizmo::rect_for(rect)
+        } else {
+            None
+        };
+        let pointer_over_gizmo = gizmo_rect.is_some_and(|gizmo| {
+            ui.input(|i| i.pointer.hover_pos())
+                .is_some_and(|pointer| gizmo.contains(pointer))
+        });
+        let orbit = !pointer_over_gizmo
+            && (response.dragged_by(egui::PointerButton::Secondary)
+                || response.dragged_by(egui::PointerButton::Middle)
+                || (response.dragged_by(egui::PointerButton::Primary) && modifiers.shift));
+        if orbit {
+            let delta = response.drag_delta();
+            self.mesh3d_yaw -= delta.x * 0.35;
+            self.mesh3d_pitch = (self.mesh3d_pitch + delta.y * 0.3).clamp(-88.0, 88.0);
+            self.mesh3d_dirty = true;
+        }
+        if response.hovered() && !pointer_over_gizmo {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.01 {
+                self.mesh3d_distance =
+                    (self.mesh3d_distance * (-scroll * 0.0015).exp()).clamp(0.5, 200_000.0);
+                self.mesh3d_dirty = true;
+            }
+        }
+        // Pick under the cursor.
+        let interactive = orbit || self.mesh3d_stroke_active;
+        let now = std::time::Instant::now();
+        if interactive && self.mesh3d_dirty {
+            self.mesh3d_full_at = Some(now + std::time::Duration::from_millis(350));
+        }
+        let full_ready = self.mesh3d_full_at.is_some_and(|deadline| now >= deadline);
+        let quality_scale = if interactive { 0.72 } else { 1.0 };
+        let render_width = ((rect.width() * quality_scale) as u32).clamp(64, 1280);
+        let render_height =
+            ((render_width as f32 * rect.height() / rect.width().max(1.0)) as u32).clamp(64, 900);
+        let hit = if pointer_over_gizmo {
+            // No hover cursor under the cube: the gizmo's own hover highlight
+            // is the only feedback there.
+            None
+        } else if let Some(document) = &self.mesh3d {
+            response.hover_pos().and_then(|pointer| {
+                let (origin, direction) = camera.ray(
+                    pointer.x - rect.min.x,
+                    pointer.y - rect.min.y,
+                    render_width,
+                    render_height,
+                );
+                let ray = vf_sculpt::Ray::new(origin, direction);
+                document
+                    .bvh
+                    .raycast(&document.mesh, &ray, 0.0, 1_000_000.0)
+                    .map(|hit| Mesh3dHit {
+                        point: hit.position,
+                        normal: document.mesh.triangle_smooth_normal(hit.triangle),
+                        face_normal: hit.normal,
+                        triangle: hit.triangle,
+                        footprint_m: document
+                            .brush
+                            .effective_radius_m(&document.mesh, hit.triangle),
+                    })
+            })
+        } else {
+            None
+        };
+        self.mesh3d_hit = hit;
+        self.mesh3d_footprint_m = hit.map(|hit| hit.footprint_m).unwrap_or(0.0);
+        if (self.mesh3d_dirty
+            || full_ready
+            || self.mesh3d_texture_size != (render_width, render_height))
+            && let Some(document) = &self.mesh3d
+        {
+            let use_fast = interactive || (self.mesh3d_full_at.is_some() && !full_ready);
+            let render_mesh = if use_fast {
+                document.render_mesh_fast()
+            } else {
+                document.render_mesh(35.0)
+            };
+            // The grid is part of the world-space image; the brush cursor is
+            // painted in screen space below so it follows the mouse without
+            // re-rendering the whole viewport at every pixel.
+            let mut overlay = vf_sculpt::render::Overlay::default();
+            overlay.grid(
+                document.mesh.bounds().size().length().max(20.0) * 0.7,
+                (document.mesh.bounds().size().length().max(20.0) / 14.0).max(1.0),
+                [90, 104, 118, 90],
+                document.mesh.bounds().min.z,
+            );
+            let settings = vf_sculpt::render::RenderSettings {
+                width: render_width,
+                height: render_height,
+                shading: self.mesh3d_shading,
+                wireframe: self.mesh3d_wireframe,
+                mask_overlay: self.mesh3d_shading == vf_sculpt::render::ShadingMode::Rock,
+                ..vf_sculpt::render::RenderSettings::default()
+            };
+            let image =
+                vf_sculpt::render::render_with_overlay(&render_mesh, &camera, settings, &overlay);
+            let color = egui::ColorImage::from_rgba_unmultiplied(
+                [image.width as usize, image.height as usize],
+                &image.pixels,
+            );
+            self.mesh3d_texture =
+                Some(ctx.load_texture("mesh3d-view", color, egui::TextureOptions::LINEAR));
+            self.mesh3d_texture_size = (render_width, render_height);
+            self.mesh3d_dirty = false;
+            if !use_fast {
+                self.mesh3d_full_at = None;
+            }
+        }
+        if let Some(texture) = &self.mesh3d_texture {
+            let painter = ui.painter_at(rect);
+            painter.image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            if let Some(hit) = hit {
+                let scale = egui::vec2(
+                    rect.width() / render_width as f32,
+                    rect.height() / render_height as f32,
+                );
+                let project = |point: Vec3| {
+                    camera
+                        .project(point, render_width, render_height)
+                        .map(|(x, y, _)| rect.min + egui::vec2(x * scale.x, y * scale.y))
+                };
+                let normal = hit.normal.normalize_or_zero();
+                let helper = if normal.z.abs() < 0.9 {
+                    Vec3::Z
+                } else {
+                    Vec3::X
+                };
+                let tangent = normal.cross(helper).normalize_or_zero();
+                let bitangent = normal.cross(tangent);
+                let ring_point = |radius: f32, angle: f32| {
+                    hit.point + (tangent * angle.cos() + bitangent * angle.sin()) * radius
+                };
+                // Screen-space disc: guaranteed visible even at grazing
+                // angles where the projected 3D ring is a thin sliver.
+                if let Some(center_screen) = project(hit.point) {
+                    // Take the larger of the two tangent axes: when one is
+                    // almost parallel to the view direction its projection
+                    // collapses, which made the ring look like a dot.
+                    let edge_tangent = project(ring_point(hit.footprint_m, 0.0))
+                        .map(|point| center_screen.distance(point))
+                        .unwrap_or(0.0);
+                    let edge_bitangent =
+                        project(ring_point(hit.footprint_m, std::f32::consts::FRAC_PI_2))
+                            .map(|point| center_screen.distance(point))
+                            .unwrap_or(0.0);
+                    let radius_px = edge_tangent.max(edge_bitangent).clamp(12.0, 4000.0);
+                    painter.circle_filled(
+                        center_screen,
+                        radius_px,
+                        egui::Color32::from_rgba_unmultiplied(255, 168, 56, 60),
+                    );
+                    painter.circle_stroke(
+                        center_screen,
+                        radius_px,
+                        egui::Stroke::new(2.4, egui::Color32::from_rgb(255, 202, 96)),
+                    );
+                    for i in 0..8 {
+                        let angle = std::f32::consts::TAU * i as f32 / 8.0;
+                        let a =
+                            center_screen + egui::vec2(angle.cos(), angle.sin()) * radius_px * 0.90;
+                        let b = center_screen + egui::vec2(angle.cos(), angle.sin()) * radius_px;
+                        painter.line_segment(
+                            [a, b],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 202, 96)),
+                        );
+                    }
+                    let requested = self
+                        .mesh3d
+                        .as_ref()
+                        .map(|doc| doc.brush.radius_m)
+                        .unwrap_or(hit.footprint_m);
+                    if hit.footprint_m > requested * 1.02 {
+                        let inner = radius_px * requested / hit.footprint_m;
+                        painter.circle_stroke(
+                            center_screen,
+                            inner.clamp(1.0, (radius_px - 2.0).max(1.5)),
+                            egui::Stroke::new(
+                                1.2,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170),
+                            ),
+                        );
+                    }
+                }
+                // The normal is the average of the smooth normals at the
+                // contact face, not the flat triangle normal. On a floor seen
+                // from above it points at the viewer and projects to nothing,
+                // so fall back to the standard dot-in-a-ring glyph.
+                if let Some(base) = project(hit.point) {
+                    let arrow = egui::Stroke::new(2.4, egui::Color32::from_rgb(150, 228, 255));
+                    let tip_world = hit.point + normal * (hit.footprint_m * 1.35).max(2.0);
+                    let projected = project(tip_world).map(|tip| tip - base);
+                    if let Some(delta) = projected
+                        && delta.length() >= 8.0
+                    {
+                        let direction = delta.normalized();
+                        let length = delta.length().max(30.0);
+                        let tip = base + direction * length;
+                        painter.line_segment([base, tip], arrow);
+                        let side = egui::vec2(-direction.y, direction.x);
+                        painter.line_segment([tip, tip - direction * 9.0 + side * 4.0], arrow);
+                        painter.line_segment([tip, tip - direction * 9.0 - side * 4.0], arrow);
+                    } else {
+                        painter.circle_stroke(base, 11.0, arrow);
+                        painter.circle_filled(base, 3.2, arrow.color);
+                    }
+                    painter.circle_filled(base, 3.2, egui::Color32::from_rgb(255, 246, 196));
+                }
+            }
+            painter.text(
+                rect.left_top() + egui::vec2(12.0, 10.0),
+                egui::Align2::LEFT_TOP,
+                format!(
+                    "{} · {} · rayon {:.2} m · calcul {}",
+                    self.mesh3d
+                        .as_ref()
+                        .map(|doc| doc.brush.tool.label())
+                        .unwrap_or(""),
+                    self.mesh3d_shading.label(),
+                    self.mesh3d
+                        .as_ref()
+                        .map(|doc| doc.brush.radius_m)
+                        .unwrap_or(0.0),
+                    self.compute_engine.summary(),
+                ),
+                egui::FontId::monospace(13.0),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+            );
+            painter.text(
+                rect.left_bottom() + egui::vec2(12.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                &self.mesh3d_status,
+                egui::FontId::proportional(12.0),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190),
+            );
+            if let Some(hit) = hit
+                && let Some((sx, sy, _)) = camera.project(hit.point, render_width, render_height)
+            {
+                let scale = egui::vec2(
+                    rect.width() / render_width as f32,
+                    rect.height() / render_height as f32,
+                );
+                let cursor = rect.min + egui::vec2(sx * scale.x, sy * scale.y);
+                let stroke = egui::Stroke::new(
+                    1.6,
+                    egui::Color32::from_rgba_unmultiplied(255, 250, 205, 245),
+                );
+                painter.circle_stroke(cursor, 4.0, stroke);
+                painter.line_segment(
+                    [cursor - egui::vec2(8.0, 0.0), cursor + egui::vec2(8.0, 0.0)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [cursor - egui::vec2(0.0, 8.0), cursor + egui::vec2(0.0, 8.0)],
+                    stroke,
+                );
+                let deviation = hit.normal.angle_between(hit.face_normal).to_degrees();
+                let requested = self
+                    .mesh3d
+                    .as_ref()
+                    .map(|doc| doc.brush.radius_m)
+                    .unwrap_or(hit.footprint_m);
+                let (label, color) = if hit.footprint_m > requested * 1.02 {
+                    (
+                        format!(
+                            "N moy. · zone {:.2} m (élargie ; faces {:.2} m) · écart face {:.0}°",
+                            hit.footprint_m,
+                            self.mesh3d
+                                .as_ref()
+                                .map(|doc| doc.mesh.triangle_max_edge(hit.triangle))
+                                .unwrap_or(0.0),
+                            deviation
+                        ),
+                        egui::Color32::from_rgb(255, 196, 96),
+                    )
+                } else {
+                    (
+                        format!(
+                            "N moy. · zone {:.2} m · écart face {:.0}°",
+                            hit.footprint_m, deviation
+                        ),
+                        egui::Color32::from_rgba_unmultiplied(220, 245, 255, 230),
+                    )
+                };
+                let galley = painter.layout_no_wrap(label, egui::FontId::monospace(12.0), color);
+                let mut label_pos = cursor + egui::vec2(15.0, 12.0);
+                label_pos.x = label_pos
+                    .x
+                    .min(rect.right() - galley.size().x - 8.0)
+                    .max(rect.left() + 8.0);
+                label_pos.y = label_pos
+                    .y
+                    .min(rect.bottom() - galley.size().y - 8.0)
+                    .max(rect.top() + 8.0);
+                painter.galley(label_pos, galley, color);
+            }
+        }
+        // Orientation gizmo (top right). It reads the sculpt camera basis, so
+        // the cube always shows the view the mesh is drawn with.
+        if self.mesh3d_show_gizmo {
+            let gizmo = view_gizmo::show_basis(
+                ui,
+                rect,
+                camera.forward().as_dvec3(),
+                camera.right().as_dvec3(),
+                camera.true_up().as_dvec3(),
+            );
+            // The full-surface viewport response can win the click hit-test;
+            // fall back to the gizmo's hover target in that case.
+            let action = gizmo.action.or_else(|| {
+                if response.clicked() && pointer_over_gizmo {
+                    gizmo.hovered
+                } else {
+                    None
+                }
+            });
+            if let Some(action) = action {
+                self.apply_mesh3d_gizmo(action);
+            }
+        }
+        // Sculpt with the primary button (unless orbiting). A stroke already in
+        // progress continues over the gizmo so a drag across it does not stop
+        // halfway.
+        if !orbit && (!pointer_over_gizmo || self.mesh3d_stroke_active) {
+            if response.dragged_by(egui::PointerButton::Primary)
+                && let Some(hit) = hit
+                && let Some(document) = self.mesh3d.as_mut()
+            {
+                if !self.mesh3d_stroke_active {
+                    self.mesh3d_stroke_active = document.stroke_begin(self.seed);
+                }
+                if self.mesh3d_stroke_active && document.stroke_stamp(hit.point, hit.normal) {
+                    self.mesh3d_dirty = true;
+                }
+            }
+            if (response.drag_stopped() || response.clicked())
+                && let Some(document) = self.mesh3d.as_mut()
+            {
+                if self.mesh3d_stroke_active {
+                    document.stroke_end();
+                    self.mesh3d_stroke_active = false;
+                    self.mesh3d_dirty = true;
+                }
+                if response.clicked()
+                    && let Some(hit) = hit
+                {
+                    let seed = self.seed;
+                    document.apply_stamp(hit.point, hit.normal, seed);
+                    self.mesh3d_dirty = true;
+                }
+            }
+        }
+    }
+
     fn leave_animation_shot_for_orbit(&mut self) {
         if self.workspace == Workspace::Animation
             && self.anim_view == animation_ui::AnimViewMode::Camera
@@ -9119,6 +10573,15 @@ impl VistaForgeApp {
         let mut help_enabled = self.help.enabled;
         let mut history_settings = self.history.settings().clone();
         let stats = self.history.stats();
+        let mut compute = self.compute.clone();
+        let compute_status = self.compute_status.clone();
+        let engine_status = self.compute_engine.clone();
+        let engine_adapters = self.compute_engine.adapter_choices.clone();
+        let mut engine = vf_compute::BackendState::from_settings(&self.compute);
+        let mut engine_changed = false;
+        let active_gpu = self.active_gpu.clone();
+        let logical_cores = vf_core::ComputeSettings::logical_cores();
+        let mut apply_compute = false;
         let mut clear_history = false;
         let mut reset_history = false;
         let mut open_help_workspace = false;
@@ -9126,8 +10589,16 @@ impl VistaForgeApp {
             .open(&mut open)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .default_width(430.0)
+            .default_width(480.0)
             .show(ctx, |ui| {
+                let max_height = (ctx.content_rect().height() - 120.0).max(320.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .min_scrolled_height(max_height.min(640.0))
+                    .scroll_bar_visibility(
+                        egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                    )
+                    .show(ui, |ui| {
                 ui.heading("Aide");
                 ui.label(
                     egui::RichText::new(
@@ -9207,6 +10678,262 @@ impl VistaForgeApp {
                     }
                 });
                 ui.separator();
+                ui.heading("Calcul (CPU / GPU)");
+                ui.label(
+                    egui::RichText::new(
+                        "Moteur des transformations géométriques : normales, lissage de Taubin, \
+                         déplacement du détail rocheux, transformations et sculpture du maillage. \
+                         Choisissez le pool de threads du CPU, un adaptateur GPU, ou tous les \
+                         adaptateurs à la fois. Le relief, l'érosion, les aperçus et le rendu final \
+                         restent sur le pool partagé ; les deux réglages s'appliquent sans redémarrer.",
+                    )
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    for backend in vf_core::ComputeBackend::ALL {
+                        if ui
+                            .selectable_value(&mut engine.backend, backend, backend.label())
+                            .on_hover_text(backend.tooltip())
+                            .changed()
+                        {
+                            engine_changed = true;
+                        }
+                    }
+                });
+                match engine.backend {
+                    vf_core::ComputeBackend::Cpu => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Normales, lissage, déplacements et sculpture sur {} thread(s) du pool.",
+                                compute.resolved_threads()
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    vf_core::ComputeBackend::Gpu => {
+                        ui.horizontal(|ui| {
+                            ui.label("Adaptateur");
+                            let selected = engine_adapters
+                                .iter()
+                                .find(|(key, _)| gpu_key_matches(key, &engine.adapter))
+                                .map_or("Automatique (le premier détecté)", |(_, label)| {
+                                    label.as_str()
+                                });
+                            egui::ComboBox::from_id_salt("compute_engine_adapter")
+                                .selected_text(selected)
+                                .width(320.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_value(
+                                            &mut engine.adapter,
+                                            String::new(),
+                                            "Automatique (le premier détecté)",
+                                        )
+                                        .changed()
+                                    {
+                                        engine_changed = true;
+                                    }
+                                    for (key, label) in &engine_adapters {
+                                        if ui
+                                            .selectable_value(
+                                                &mut engine.adapter,
+                                                key.clone(),
+                                                label.as_str(),
+                                            )
+                                            .changed()
+                                        {
+                                            engine_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        if engine_adapters.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Aucun adaptateur de calcul détecté : le CPU prend le relais.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    }
+                    vf_core::ComputeBackend::GpuAll => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Sommets répartis entre les adaptateurs cochés (aucun coché = tous).",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        if engine_adapters.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Aucun adaptateur de calcul détecté : le CPU prend le relais.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        }
+                        for (key, label) in &engine_adapters {
+                            let mut checked = engine.adapters.iter().any(|want| want == key);
+                            if ui.checkbox(&mut checked, label).changed() {
+                                if checked {
+                                    engine.adapters.push(key.clone());
+                                } else {
+                                    engine.adapters.retain(|want| want != key);
+                                }
+                                engine_changed = true;
+                            }
+                        }
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(format!("Moteur actif : {}", engine_status.summary()))
+                        .small()
+                        .weak(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Sur un poste récent, le pool CPU est souvent le plus rapide : chaque \
+                         appel GPU transfère la topologie par le bus. Le GPU aide surtout quand \
+                         peu de cœurs sont alloués, sur une machine à peu de cœurs, ou pour \
+                         libérer le CPU pendant une opération longue.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if let Some(error) = vf_compute::last_error() {
+                    ui.label(
+                        egui::RichText::new(format!("Dernier repli CPU : {error}"))
+                            .small()
+                            .weak(),
+                    );
+                }
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Pool de threads partagé").small().strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Relief, érosion, modificateurs, géologie, occlusion, maillage, fracture, aperçus et rendu final.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                let logical = logical_cores;
+                let mut automatic = compute.cpu_threads == 0;
+                if ui
+                    .checkbox(&mut automatic, "Automatique (tous les cœurs logiques)")
+                    .changed()
+                {
+                    compute.cpu_threads = if automatic { 0 } else { logical };
+                }
+                if !automatic {
+                    ui.horizontal(|ui| {
+                        ui.label("Cœurs de calcul");
+                        ui.add(
+                            egui::Slider::new(&mut compute.cpu_threads, 1..=logical)
+                                .text(format!("sur {logical}")),
+                        );
+                    });
+                } else {
+                    ui.label(format!(
+                        "{} threads seront utilisés sur {logical} cœurs logiques.",
+                        compute.resolved_threads()
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Appliquer maintenant")
+                        .on_hover_text(
+                            "Reconstruit le pool de threads ; les prochaines opérations l'utilisent.",
+                        )
+                        .clicked()
+                    {
+                        apply_compute = true;
+                    }
+                    if ui.button("Tous les cœurs").clicked() {
+                        compute.cpu_threads = 0;
+                        apply_compute = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!("Pool actif : {compute_status}"))
+                        .small()
+                        .weak(),
+                );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Aperçu 3D du terrain (wgpu)").small().strong(),
+                );
+                ui.checkbox(
+                    &mut compute.gpu_enabled,
+                    "Utiliser le GPU pour l'aperçu 3D (wgpu)",
+                );
+                ui.add_enabled_ui(compute.gpu_enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Adaptateur");
+                        let selected = self
+                            .gpu_choices
+                            .iter()
+                            .find(|choice| gpu_key_matches(&choice.key, &compute.gpu_adapter))
+                            .map_or("Automatique", |choice| choice.label.as_str());
+                        egui::ComboBox::from_id_salt("compute_gpu_adapter")
+                            .selected_text(selected)
+                            .width(280.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut compute.gpu_adapter,
+                                    String::new(),
+                                    "Automatique (recommandé)",
+                                );
+                                for choice in &self.gpu_choices {
+                                    ui.selectable_value(
+                                        &mut compute.gpu_adapter,
+                                        choice.key.clone(),
+                                        &choice.label,
+                                    );
+                                }
+                            });
+                    });
+                    if self.gpu_choices.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Aucun adaptateur wgpu détecté : l'aperçu CPU reste disponible.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Profil");
+                        egui::ComboBox::from_id_salt("compute_gpu_power")
+                            .selected_text(compute.gpu_power.label())
+                            .show_ui(ui, |ui| {
+                                for power in
+                                    [vf_core::GpuPower::HighPerformance, vf_core::GpuPower::LowPower]
+                                {
+                                    ui.selectable_value(
+                                        &mut compute.gpu_power,
+                                        power,
+                                        power.label(),
+                                    );
+                                }
+                            });
+                    });
+                });
+                ui.label(
+                    egui::RichText::new(format!("GPU de cette session : {active_gpu}"))
+                        .small()
+                        .weak(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Le choix de l'aperçu 3D et son activation s'appliquent au prochain démarrage. Le moteur de calcul géométrique ci-dessus, lui, bascule immédiatement.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.separator();
                 ui.label(
                     egui::RichText::new(
                         "Raccourcis : Ctrl+Z annuler · Ctrl+Y ou Ctrl+Maj+Z rétablir · F1 aide flottante · Échap ferme la carte.",
@@ -9214,6 +10941,7 @@ impl VistaForgeApp {
                     .small()
                     .weak(),
                 );
+                    });
             });
         self.preferences_open = open;
         if help_enabled != self.help.enabled {
@@ -9237,6 +10965,38 @@ impl VistaForgeApp {
             self.history
                 .set_settings(history_settings, &self.project, &self.heightfield);
             history::save_settings(&persisted);
+        }
+
+        let gpu_changed = compute.gpu_enabled != self.compute.gpu_enabled
+            || compute.gpu_adapter != self.compute.gpu_adapter
+            || compute.gpu_power != self.compute.gpu_power;
+        if engine_changed {
+            // Applying is immediate: `set_backend` drops the cached devices and
+            // the next kernel opens the requested adapters itself.
+            vf_compute::set_backend(engine.clone());
+            engine.write_to(&mut compute);
+            self.compute_engine = vf_compute::status();
+        }
+        if apply_compute {
+            match vf_core::compute::configure_threads(compute.cpu_threads) {
+                Ok(threads) => {
+                    self.compute_status =
+                        format!("{threads} threads actifs sur {logical_cores} cœurs logiques");
+                }
+                Err(error) => {
+                    self.compute_status = format!("échec du réglage : {error}");
+                }
+            }
+        }
+        self.compute = compute;
+        if apply_compute || gpu_changed || engine_changed {
+            vf_core::compute::save_settings(&self.compute);
+        }
+        if gpu_changed {
+            self.compute_status = format!(
+                "{} — le GPU choisi s'appliquera au prochain démarrage",
+                self.compute_status
+            );
         }
     }
 }
@@ -9352,7 +11112,7 @@ impl eframe::App for VistaForgeApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .button("Préférences")
-                        .on_hover_text("Aide, historique, limites de mémoire")
+                        .on_hover_text("Aide, historique, mémoire et calcul (CPU / GPU)")
                         .clicked()
                     {
                         self.preferences_open = true;
@@ -9507,6 +11267,8 @@ impl eframe::App for VistaForgeApp {
                     self.help.browse_page_ui(ui, &ctx, &context);
                 } else if self.workspace == Workspace::Sculpt {
                     self.sculpt_canvas_ui(ui, &ctx);
+                } else if self.workspace == Workspace::Mesh3d {
+                    self.mesh3d_canvas_ui(ui, &ctx);
                 } else {
                     self.viewport_ui(ui);
                 }
@@ -9818,6 +11580,7 @@ fn help_topic_for_workspace(workspace: Workspace) -> help::HelpTopic {
         Workspace::Rock => help::HelpTopic::Rock,
         Workspace::Detail => help::HelpTopic::Detail,
         Workspace::Sculpt => help::HelpTopic::Sculpt,
+        Workspace::Mesh3d => help::HelpTopic::Sculpt,
         Workspace::Animation => help::HelpTopic::Path,
         Workspace::Erosion => help::HelpTopic::Erosion,
         Workspace::Water => help::HelpTopic::Water,
@@ -9980,5 +11743,38 @@ mod preview_tests {
         let image = image::open(&path).unwrap().to_rgba8();
         assert_eq!((image.width(), image.height()), (256, 256));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mesh viewport's orbit camera places the eye opposite the view
+    /// direction; the gadget must snap to the same faces as the main viewport.
+    #[test]
+    fn mesh_gizmo_snaps_to_the_standard_views() {
+        use vf_scene::ViewPreset;
+        let angle = |preset| mesh3d_orbit_for(preset).expect("axis preset");
+        let close = |actual: f32, expected: f32| {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "expected {expected}, got {actual}"
+            );
+        };
+        // Front looks north (+Y), so the eye sits south (-Y): yaw -90°, pitch 0.
+        let (yaw, pitch) = angle(ViewPreset::Front);
+        close(yaw, -90.0);
+        close(pitch, 0.0);
+        let (yaw, pitch) = angle(ViewPreset::Back);
+        close(yaw, 90.0);
+        close(pitch, 0.0);
+        // Left looks east (+X) from the west, Right the opposite.
+        let (yaw, _) = angle(ViewPreset::Left);
+        close(yaw, 180.0);
+        let (yaw, _) = angle(ViewPreset::Right);
+        close(yaw, 0.0);
+        // Top looks down, so the eye is above: pitch stops just short of the pole.
+        let (yaw, pitch) = angle(ViewPreset::Top);
+        close(yaw, 0.0);
+        close(pitch, 89.0);
+        let (_, pitch) = angle(ViewPreset::Bottom);
+        close(pitch, -89.0);
+        assert!(mesh3d_orbit_for(ViewPreset::Perspective).is_none());
     }
 }

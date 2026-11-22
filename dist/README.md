@@ -5,39 +5,40 @@ depuis la source de ce dépôt avec `cargo build --release` :
 
 | Plateforme | Dossier | Compilation |
 |---|---|---|
-| Linux x86_64 | [`linux-x86_64/`](linux-x86_64/README.md) | Rust 1.99.1, binaires `strip`és |
 | Windows x86_64 | [`windows-x86_64/`](windows-x86_64/README.md) | Rust 1.99.1 MSVC, version 0.2.0 |
 
-Chaque dossier contient les trois exécutables et un `SHA256SUMS` :
+Les binaires **Linux ne sont plus publiés** : ceux du dépôt avaient pris du
+retard sur le code (module Maillage 3D, moteur de calcul CPU/GPU) et une version
+périmée vaut moins qu'une compilation locale. Sur Linux et macOS, recompilez
+depuis la source — la toolchain est épinglée et s'installe automatiquement :
+
+```bash
+git clone https://github.com/vingaut/vistaforge.git
+cd vistaforge
+cargo build --release -p vf-cli -p vf-mcp -p vf-app
+
+./target/release/vistaforge --version
+./target/release/vistaforge-app
+./target/release/vistaforge-mcp --workspace /chemin/vers/projets
+```
+
+Chaque dossier livré contient les trois exécutables et un `SHA256SUMS` :
 
 | Binaire | Rôle |
 |---|---|
-| `vistaforge` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, MCP tools. |
-| `vistaforge-app` | Interface graphique `egui` + viewport GPU wgpu (Vulkan) et aperçu CPU. |
+| `vistaforge` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, maillage 3D (`mesh`). |
+| `vistaforge-app` | Interface graphique `egui` + viewport GPU wgpu (Vulkan/DX12) et aperçu CPU. |
 | `vistaforge-mcp` | Serveur MCP stdio (29 outils). |
 
-Tailles Linux : CLI 6,8 Mo, interface 27 Mo, serveur MCP 5,3 Mo, binaires
-`strip`és. Tailles Windows (non `strip`és) : CLI 5,4 Mo, interface 21,9 Mo,
-serveur MCP 4,2 Mo. Les binaires Linux ont été reconstruits le 20 novembre
-2026 (version 0.1.0, à reconstruire sur Linux pour aligner sur 0.2.0) et les
-binaires Windows le 22 novembre 2026 (version 0.2.0) depuis l'arbre de travail
-courant (interface GPU/CPU unifiée, tafoni/bancs/joints/oolithes, presets
-rocheux enrichis, résolutions 2048–8192, caméra conservée, aperçus
-Brouillon → Finale).
+Tailles Windows (non `strip`és) : CLI 10,6 Mo, interface 22,9 Mo, serveur MCP
+4,4 Mo. Les binaires Windows ont été reconstruits le 22 novembre 2026
+(version 0.2.0) depuis l'arbre de travail courant : module **Maillage 3D**,
+gizmo d'orientation, moteur de calcul au choix (CPU N cœurs / un GPU / tous les
+GPU), remesh déterministe, interface GPU/CPU unifiée, presets rocheux enrichis
+et résolutions 2048–8192. La CLI embarque `wgpu` pour le calcul GPU, d'où sa
+taille.
 
 ## Utilisation
-
-```bash
-cd dist/linux-x86_64
-./vistaforge --version
-./vistaforge --help
-
-# Interface
-./vistaforge-app
-
-# Serveur MCP
-./vistaforge-mcp --workspace /chemin/vers/projets
-```
 
 ```powershell
 cd dist\windows-x86_64
@@ -54,35 +55,33 @@ cd dist\windows-x86_64
 Le viewport GPU utilise wgpu (Vulkan, repli DX12 sous Windows) par défaut.
 Sans pilote compatible :
 
-```bash
-VISTAFORGE_RENDERER=glow ./vistaforge-app
-```
-
 ```powershell
 $env:VISTAFORGE_RENDERER = "glow"; .\vistaforge-app.exe
+
+# Même chose sous Linux/macOS après compilation depuis la source :
+VISTAFORGE_RENDERER=glow ./target/release/vistaforge-app
 ```
 
 ## Prérequis
 
-- Linux x86_64, glibc ≥ 2.39 (construit sur Ubuntu 24.04, glibc 2.43).
 - Windows 10/11 x86_64 (binaires MSVC ; `vcruntime140.dll` requis).
-- Pour l'interface : pilote Vulkan (recommandé) ou OpenGL/DX12, X11 ou
-  Wayland sous Linux.
-- Les fonctions DEM/heightmap ne demandent aucune bibliothèque externe.
+- Pour l'interface : pilote Vulkan (recommandé), DX12 ou OpenGL.
+- Linux/macOS depuis la source : voir [`docs/BUILD.md`](../docs/BUILD.md)
+  (X11 ou Wayland, `libvulkan1` + pilote Vulkan recommandés).
+- Les fonctions DEM/heightmap et le rendu CPU ne demandent aucune bibliothèque
+  externe.
 
 ## Vérifier l'intégrité
 
-```bash
-sha256sum -c SHA256SUMS            # Linux, et Git Bash sous Windows
-```
-
 ```powershell
 Get-FileHash * -Algorithm SHA256   # PowerShell
+
+sha256sum -c SHA256SUMS            # Git Bash sous Windows
 ```
 
 ## Notes
 
 - Ces binaires sont produits localement, sans signature de code.
 - Les captures, projets `.vfproj` et corpus de recherche ne sont pas inclus.
-- Pour macOS, recompiler depuis la source (`cargo build --release -p vf-app
-  -p vf-cli -p vf-mcp`).
+- Les prérequis, le budget de calcul et les variables d'environnement sont
+  détaillés dans [`windows-x86_64/README.md`](windows-x86_64/README.md).

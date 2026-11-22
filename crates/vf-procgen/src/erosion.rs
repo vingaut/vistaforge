@@ -1,5 +1,6 @@
 //! Deterministic hydraulic droplet erosion and thermal talus relaxation.
 
+use rayon::prelude::*;
 use vf_core::{ErosionParams, HeightField, Result, Seed};
 
 /// Erode a heightfield in place and return a new field with the same metadata.
@@ -40,8 +41,69 @@ pub fn erode(hf: &HeightField, params: &ErosionParams, seed: Seed) -> Result<Hei
     Ok(out)
 }
 
+/// Extra heightfield copies used to split the hydraulic pass. The count
+/// depends on the grid size, never on the number of worker threads, so a given
+/// seed produces the same terrain on every machine.
+const MAX_HYDRAULIC_BATCHES: usize = 8;
+const HYDRAULIC_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
+
 fn hydraulic(heights: &mut [f32], width: usize, height: usize, params: &ErosionParams, seed: Seed) {
     if width < 3 || height < 3 || params.droplets == 0 {
+        return;
+    }
+    let grid_bytes = heights.len().saturating_mul(std::mem::size_of::<f32>());
+    let batches = (HYDRAULIC_MEMORY_BUDGET / grid_bytes.max(1)).clamp(1, MAX_HYDRAULIC_BATCHES);
+    if batches == 1 {
+        hydraulic_batch(heights, width, height, params, seed, params.droplets);
+        return;
+    }
+
+    // Each batch erodes an independent copy from the same base surface, then
+    // the deltas are summed. Summing preserves the material budget: every
+    // droplet still removes/deposits its own sediment, while the batches run in
+    // parallel.
+    let base = heights.to_vec();
+    let per_batch = params.droplets / batches as u32;
+    let remainder = params.droplets % batches as u32;
+    let results: Vec<Vec<f32>> = vf_core::compute::install(|| {
+        (0..batches)
+            .into_par_iter()
+            .map(|batch| {
+                let mut local = base.clone();
+                let droplets = per_batch + u32::from((batch as u32) < remainder);
+                hydraulic_batch(
+                    &mut local,
+                    width,
+                    height,
+                    params,
+                    seed.derive(&format!("hydraulic-{batch}")),
+                    droplets,
+                );
+                local
+            })
+            .collect()
+    });
+
+    vf_core::compute::install(|| {
+        heights
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, value)| {
+                let delta: f32 = results.iter().map(|local| local[index] - base[index]).sum();
+                *value = base[index] + delta;
+            });
+    });
+}
+
+fn hydraulic_batch(
+    heights: &mut [f32],
+    width: usize,
+    height: usize,
+    params: &ErosionParams,
+    seed: Seed,
+    droplets: u32,
+) {
+    if droplets == 0 {
         return;
     }
     let mut rng = seed.rng();
@@ -55,7 +117,7 @@ fn hydraulic(heights: &mut [f32], width: usize, height: usize, params: &ErosionP
     let deposition_rate = f64::from(params.deposition_rate.clamp(0.0, 1.0));
     let evaporation = f64::from(params.evaporation.clamp(0.0, 1.0));
 
-    for _ in 0..params.droplets {
+    for _ in 0..droplets {
         let mut pos_x = 1.0 + rng.next_f64() * max_x;
         let mut pos_y = 1.0 + rng.next_f64() * max_y;
         let mut dir_x = 0.0f64;
@@ -203,40 +265,51 @@ fn thermal(
     _seed: Seed,
 ) {
     let talus = angle_deg.to_radians().tan().max(1e-4);
-    let mut delta = vec![0.0f32; data.len()];
+    let mut next = vec![0.0f32; data.len()];
+    const NEIGHBOURS: [(i32, i32); 8] = [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
     for _ in 0..iterations.max(1) {
-        delta.fill(0.0);
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                let h = data[y * width + x];
-                for (dx, dy) in [
-                    (-1i32, -1i32),
-                    (0, -1),
-                    (1, -1),
-                    (-1, 0),
-                    (1, 0),
-                    (-1, 1),
-                    (0, 1),
-                    (1, 1),
-                ] {
-                    let nx = (x as i32 + dx) as usize;
-                    let ny = (y as i32 + dy) as usize;
-                    let nh = data[ny * width + nx];
-                    let distance = ((dx * dx + dy * dy) as f32).sqrt();
-                    let diff = h - nh;
-                    if diff > talus * distance {
-                        let move_amount = (diff - talus * distance) * 0.125;
-                        let i = y * width + x;
-                        let j = ny * width + nx;
-                        delta[i] -= move_amount;
-                        delta[j] += move_amount;
+        // Jacobi relaxation: every cell sums the material it pushes to and
+        // receives from its eight neighbours using the same `data` snapshot,
+        // so rows can be processed in parallel without races.
+        vf_core::compute::install(|| {
+            next.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    let i = y * width + x;
+                    if x == 0 || y == 0 || x + 1 >= width || y + 1 >= height {
+                        *out = data[i];
+                        continue;
                     }
+                    let h = data[i];
+                    let mut change = 0.0f32;
+                    for (dx, dy) in NEIGHBOURS {
+                        let nx = (x as i32 + dx) as usize;
+                        let ny = (y as i32 + dy) as usize;
+                        let nh = data[ny * width + nx];
+                        let distance = ((dx * dx + dy * dy) as f32).sqrt();
+                        let diff = h - nh;
+                        let threshold = talus * distance;
+                        if diff > threshold {
+                            change -= (diff - threshold) * 0.125;
+                        }
+                        let incoming = nh - h;
+                        if incoming > threshold {
+                            change += (incoming - threshold) * 0.125;
+                        }
+                    }
+                    *out = h + change;
                 }
-            }
-        }
-        for (h, d) in data.iter_mut().zip(&delta) {
-            *h += *d;
-        }
+            });
+        });
+        data.copy_from_slice(&next);
     }
 }
 

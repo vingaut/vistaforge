@@ -18,6 +18,7 @@ image.workspace = true
 serde_json.workspace = true
 tracing-subscriber.workspace = true
 vf-core = { path = "../vf-core" }
+vf-compute = { path = "../vf-compute" }
 vf-export = { path = "../vf-export" }
 vf-geology = { path = "../vf-geology" }
 vf-flight = { path = "../vf-flight" }
@@ -26,6 +27,7 @@ vf-modifiers = { path = "../vf-modifiers" }
 vf-procgen = { path = "../vf-procgen" }
 vf-render = { path = "../vf-render" }
 vf-scene = { path = "../vf-scene" }
+vf-sculpt = { path = "../vf-sculpt" }
 vf-terrain = { path = "../vf-terrain" }
 
 [lints]

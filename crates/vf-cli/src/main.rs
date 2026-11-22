@@ -23,6 +23,15 @@ struct Cli {
     /// Print more detail about each operation.
     #[arg(long, global = true)]
     verbose: bool,
+    /// Worker threads (0 = all logical cores). Also VISTAFORGE_THREADS.
+    #[arg(long, global = true, value_name = "N")]
+    threads: Option<usize>,
+    /// Geometry engine: `cpu`, `gpu` or `all` (every GPU). Also VISTAFORGE_COMPUTE.
+    #[arg(long, global = true, value_name = "ENGINE")]
+    compute: Option<String>,
+    /// Adapter name or key for `--compute gpu` (every adapter for `all`).
+    #[arg(long, global = true, value_name = "ADAPTER")]
+    compute_gpu: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -71,6 +80,73 @@ enum Command {
         #[command(subcommand)]
         command: RigCommand,
     },
+    /// Build, remesh, fracture and export a 3D sculpt mesh.
+    Mesh(MeshArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MeshSource {
+    Terrain,
+    Wall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum MeshRemesh {
+    Triangles,
+    Quads,
+    Voxel,
+}
+
+#[derive(Debug, Args)]
+struct MeshArgs {
+    /// Project providing the terrain and its extent.
+    #[arg(long)]
+    project: PathBuf,
+    /// Build the mesh from the heightfield or from a procedural rock wall.
+    #[arg(long, value_enum, default_value_t = MeshSource::Terrain)]
+    source: MeshSource,
+    /// Wall preset: sea-cliff, slate-quarry, schist-wall, basalt-columns,
+    /// sandstone-canyon.
+    #[arg(long, default_value = "sea-cliff")]
+    wall: String,
+    /// Terrain mesh resolution (cells along the longest side).
+    #[arg(long, default_value_t = 160)]
+    resolution: u32,
+    #[arg(long, value_enum)]
+    remesh: Option<MeshRemesh>,
+    #[arg(long, default_value_t = 0.6)]
+    edge: f32,
+    /// Hard face budget for the remesh.
+    #[arg(long, default_value_t = 400_000)]
+    max_faces: usize,
+    /// Rock profile: granite, basalt, limestone, sandstone, schist, chalk,
+    /// volcanic, canyon, patagonia.
+    #[arg(long)]
+    rock: Option<String>,
+    /// Fracture pattern: voronoi, radial, layered, columnar, shear.
+    #[arg(long)]
+    fracture: Option<String>,
+    #[arg(long, default_value_t = 4.0)]
+    cell: f32,
+    /// Settle the fracture debris with the deterministic physics solver.
+    #[arg(long)]
+    physics: bool,
+    /// Render a preview PNG.
+    #[arg(long)]
+    render: Option<PathBuf>,
+    #[arg(long, default_value_t = 960)]
+    width: u32,
+    #[arg(long, default_value_t = 540)]
+    height: u32,
+    #[arg(long, default_value_t = 38.0)]
+    yaw: f32,
+    #[arg(long, default_value_t = 22.0)]
+    pitch: f32,
+    #[arg(long)]
+    wireframe: bool,
+    /// Output mesh: .glb, .obj, .vfm or .stl.
+    #[arg(long)]
+    out: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -840,6 +916,48 @@ impl From<QualityArg> for Quality {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let threads = cli.threads.unwrap_or_else(|| {
+        std::env::var("VISTAFORGE_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if let Err(error) = vf_core::compute::configure_threads(threads) {
+        eprintln!("warning: cannot configure compute pool: {error}");
+    } else if cli.verbose {
+        eprintln!(
+            "compute: {} worker threads",
+            vf_core::compute::current_threads()
+        );
+    }
+    // Geometry kernels (normals, smoothing, detail displacement, transforms)
+    // follow the engine preference; the flags override it for one run.
+    let mut engine = vf_compute::BackendState::from_settings(
+        &vf_core::compute::load_settings().with_env_overrides(),
+    );
+    if let Some(value) = &cli.compute {
+        match vf_core::ComputeBackend::from_env_value(value) {
+            Some(backend) => engine.backend = backend,
+            None => eprintln!(
+                "warning: unknown --compute value '{value}' (cpu, gpu, all); keeping {}",
+                engine.backend.label()
+            ),
+        }
+    }
+    if let Some(adapter) = &cli.compute_gpu {
+        match engine.backend {
+            vf_core::ComputeBackend::GpuAll => engine.adapters = vec![adapter.clone()],
+            vf_core::ComputeBackend::Cpu => {
+                engine.backend = vf_core::ComputeBackend::Gpu;
+                engine.adapter = adapter.clone();
+            }
+            vf_core::ComputeBackend::Gpu => engine.adapter = adapter.clone(),
+        }
+    }
+    vf_compute::set_backend(engine);
+    if cli.verbose {
+        eprintln!("compute engine: {}", vf_compute::status().summary());
+    }
     if cli.verbose {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
@@ -870,7 +988,167 @@ fn run(command: Command) -> Result<()> {
         },
         Command::Blender { command } => run_blender(command),
         Command::Rig { command } => run_rig(command),
+        Command::Mesh(args) => run_mesh(&args),
     }
+}
+
+fn run_mesh(args: &MeshArgs) -> Result<()> {
+    let started = Instant::now();
+    let loaded = vf_io::load_project(&args.project)?;
+    let mut mesh = match args.source {
+        MeshSource::Terrain => {
+            let settings = vf_sculpt::terrain::TerrainMeshSettings {
+                resolution: args.resolution,
+                close_slab: true,
+                floor_z: loaded.heightfield.min_max().0 - 20.0,
+                uv_scale_m: 8.0,
+                refine_steep: false,
+                max_edge_m: 1.0,
+                max_vertices: 2_000_000,
+            };
+            vf_sculpt::terrain::from_heightfield(&loaded.heightfield, settings)
+        }
+        MeshSource::Wall => {
+            let style = match args.wall.as_str() {
+                "slate-quarry" | "slate" | "quarry" => vf_sculpt::cliff::CliffStyle::SlateQuarry,
+                "schist-wall" | "schist" => vf_sculpt::cliff::CliffStyle::SchistWall,
+                "basalt-columns" | "basalt" => vf_sculpt::cliff::CliffStyle::BasaltColumns,
+                "sandstone-canyon" | "canyon" => vf_sculpt::cliff::CliffStyle::SandstoneCanyon,
+                _ => vf_sculpt::cliff::CliffStyle::SeaCliff,
+            };
+            vf_sculpt::cliff::wall(style.settings())
+        }
+    };
+    if let Some(mode) = args.remesh {
+        let mode = match mode {
+            MeshRemesh::Triangles => vf_sculpt::remesh::RemeshMode::Triangles,
+            MeshRemesh::Quads => vf_sculpt::remesh::RemeshMode::Quads,
+            MeshRemesh::Voxel => vf_sculpt::remesh::RemeshMode::Voxel,
+        };
+        let settings = vf_sculpt::remesh::RemeshSettings {
+            mode,
+            target_edge_m: args.edge,
+            max_faces: args.max_faces,
+            ..vf_sculpt::remesh::RemeshSettings::default()
+        };
+        mesh = vf_sculpt::remesh::remesh(&mesh, settings);
+    }
+    if let Some(name) = &args.rock {
+        let surface = vf_sculpt::RockSurface::from_name(name)
+            .ok_or_else(|| anyhow::anyhow!("profil de roche inconnu: {name}"))?;
+        let profile = vf_sculpt::rock::RockProfile::preset(surface.name()).unwrap_or_else(|| {
+            vf_sculpt::rock::RockProfile {
+                surface,
+                ..vf_sculpt::rock::RockProfile::default()
+            }
+        });
+        let detail = vf_sculpt::rock::RockDetailSettings {
+            profile,
+            adaptive: args.source == MeshSource::Wall,
+            max_edge_m: 0.4,
+            max_vertices: 800_000,
+            use_mask: false,
+        };
+        mesh = vf_sculpt::rock::adaptive_detail(&mesh, profile, detail, loaded.project.seed.0);
+        vf_sculpt::rock::tint_by_profile(&mut mesh, profile, loaded.project.seed.0);
+    }
+    let mut fractured = 0usize;
+    if let Some(pattern) = &args.fracture {
+        let pattern = match pattern.as_str() {
+            "radial" => vf_sculpt::fracture::FracturePattern::Radial,
+            "layered" => vf_sculpt::fracture::FracturePattern::Layered,
+            "columnar" => vf_sculpt::fracture::FracturePattern::Columnar,
+            "shear" => vf_sculpt::fracture::FracturePattern::Shear,
+            _ => vf_sculpt::fracture::FracturePattern::Voronoi,
+        };
+        let settings = vf_sculpt::fracture::FractureSettings {
+            pattern,
+            cell_m: args.cell,
+            seed: loaded.project.seed.0,
+            ..vf_sculpt::fracture::FractureSettings::default()
+        };
+        let result = vf_sculpt::fracture::fracture(&mesh, settings);
+        fractured = result.pieces.len();
+        if args.physics && !result.pieces.is_empty() {
+            let mut world = vf_sculpt::physics::PhysicsWorld::new(
+                vf_sculpt::physics::PhysicsSettings::default(),
+            );
+            world.add_pieces(&result.pieces);
+            let bvh = vf_sculpt::Bvh::build(&mesh);
+            let report = world.settle(Some((&mesh, &bvh)), 1.0 / 60.0);
+            mesh.merge(&world.merged_mesh());
+            eprintln!(
+                "physique : {} pas, {} corps, pénétration max {:.3} m",
+                report.steps,
+                world.bodies.len(),
+                report.max_penetration_m
+            );
+        }
+    }
+    if let Some(parent) = args.out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let format = vf_export::export_sculpt_mesh(&args.out, &mesh, "sculpture")
+        .map_err(|error| anyhow::anyhow!(error))?;
+    if let Some(path) = &args.render {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let render_mesh = vf_sculpt::RenderMesh::from_mesh(&mesh, 35.0);
+        let bounds = mesh.bounds();
+        let (yaw, pitch, distance, target) = if args.source == MeshSource::Wall {
+            (
+                -52.0,
+                2.0,
+                bounds.size().x * 0.36,
+                glam::Vec3::new(
+                    bounds.min.x + bounds.size().x * 0.32,
+                    bounds.center().y,
+                    bounds.min.z + bounds.size().z * 0.55,
+                ),
+            )
+        } else {
+            (
+                args.yaw,
+                args.pitch,
+                bounds.size().length() * 1.15,
+                bounds.center(),
+            )
+        };
+        let camera = vf_sculpt::render::Camera::orbit(target, distance.max(5.0), yaw, pitch);
+        let image = vf_sculpt::render::render(
+            &render_mesh,
+            &camera,
+            vf_sculpt::render::RenderSettings {
+                width: args.width,
+                height: args.height,
+                wireframe: args.wireframe,
+                ..vf_sculpt::render::RenderSettings::default()
+            },
+        );
+        image
+            .save(&path.display().to_string())
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
+    let stats = mesh.stats();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "out": args.out,
+            "format": format,
+            "vertices": stats.vertices,
+            "faces": stats.faces,
+            "quads": stats.quads,
+            "triangles": stats.triangles,
+            "watertight": stats.watertight,
+            "area_m2": stats.area_m2,
+            "volume_m3": stats.volume_m3,
+            "fractured_pieces": fractured,
+            "render": args.render,
+            "elapsed_ms": started.elapsed().as_millis(),
+        }))?
+    );
+    Ok(())
 }
 
 fn run_dem(command: DemCommand) -> Result<()> {

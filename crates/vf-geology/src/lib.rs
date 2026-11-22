@@ -8,6 +8,7 @@
 //! What a heightfield cannot represent — overhangs, arches, caves — is out of
 //! scope here: the operators only carve or raise the single altitude per cell.
 
+use rayon::prelude::*;
 use vf_core::{Error, GeologySettings, HeightField, JointPattern, Result, Seed, Strata};
 use vf_procgen::Noise;
 
@@ -158,12 +159,17 @@ pub fn micro_detail(
     let (origin_x, origin_y) = hf.origin();
     let mut heights = hf.heights().to_vec();
     let mut steep = vec![0.0f32; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let n = hf.normal_at(x, y, 1.0);
-            steep[y * width + x] = (1.0 - n[2]).clamp(0.0, 1.0).powf(0.55);
-        }
-    }
+    vf_core::compute::install(|| {
+        steep
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for (x, value) in row.iter_mut().enumerate() {
+                    let n = hf.normal_at(x, y, 1.0);
+                    *value = (1.0 - n[2]).clamp(0.0, 1.0).powf(0.55);
+                }
+            });
+    });
     apply_detail(
         &mut heights,
         &steep,
@@ -589,7 +595,7 @@ fn apply_gullies(
     heights: &mut [f32],
     steep: &[f32],
     width: usize,
-    height: usize,
+    _height: usize,
     spacing_x: f64,
     spacing_y: f64,
     origin_x: f64,
@@ -601,23 +607,27 @@ fn apply_gullies(
     let noise = Noise::from_u64(seed.derive("gullies").0);
     let inv = 1.0 / gullies.spacing_m.max(5.0);
     let sharp = gullies.sharpness.clamp(0.05, 0.95);
-    for y in 0..height {
-        let wy = origin_y + y as f64 * spacing_y;
-        let row = y * width;
-        for x in 0..width {
-            let i = row + x;
-            if steep[i] < 0.12 {
-                continue;
-            }
-            let wx = origin_x + x as f64 * spacing_x;
-            // Ridged noise stretched north-south: the channels read as vertical
-            // flutes on a cliff face.
-            let n = noise.ridged2(wx as f32 * inv, wy as f32 * inv * 0.55, 2, 2.0, 0.5);
-            let channel = 1.0 - smoothstep(0.12, 0.32 + 0.4 * sharp, n);
-            let weight = 0.5 + 0.5 * steep[i];
-            heights[i] -= gullies.depth_m * channel * weight;
-        }
-    }
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let wy = origin_y + y as f64 * spacing_y;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let i = y * width + x;
+                    if steep[i] < 0.12 {
+                        continue;
+                    }
+                    let wx = origin_x + x as f64 * spacing_x;
+                    // Ridged noise stretched north-south: the channels read as
+                    // vertical flutes on a cliff face.
+                    let n = noise.ridged2(wx as f32 * inv, wy as f32 * inv * 0.55, 2, 2.0, 0.5);
+                    let channel = 1.0 - smoothstep(0.12, 0.32 + 0.4 * sharp, n);
+                    let weight = 0.5 + 0.5 * steep[i];
+                    *value -= gullies.depth_m * channel * weight;
+                }
+            });
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -625,7 +635,7 @@ fn apply_detail(
     heights: &mut [f32],
     steep: &[f32],
     width: usize,
-    height: usize,
+    _height: usize,
     spacing_x: f64,
     spacing_y: f64,
     origin_x: f64,
@@ -638,40 +648,45 @@ fn apply_detail(
     let crag = Noise::from_u64(seed.derive("detail-crag").0);
     let scale = settings.detail_scale_m.max(1.0);
     let amplitude = settings.detail_m;
-    for y in 0..height {
-        let wy = origin_y + y as f64 * spacing_y;
-        let row = y * width;
-        for x in 0..width {
-            let i = row + x;
-            if steep[i] < 0.02 {
-                continue;
-            }
-            let wx = origin_x + x as f64 * spacing_x;
-            // Broad undulation, then finer facets. The ridged term creates the
-            // sharp crags that a plain fBm rounds off.
-            let n1 = broad.fbm01(wx as f32 / scale, wy as f32 / scale, 3, 2.0, 0.5);
-            let n2 = fine.fbm01(
-                wx as f32 / (scale * 0.28),
-                wy as f32 / (scale * 0.28),
-                2,
-                2.0,
-                0.5,
-            );
-            let r = crag.ridged2(
-                wx as f32 / (scale * 0.45),
-                wy as f32 / (scale * 0.45),
-                2,
-                2.0,
-                0.5,
-            );
-            let relief = (n1 * 2.0 - 1.0) * 0.55 + (n2 * 2.0 - 1.0) * 0.25 + (r - 0.5) * 0.45;
-            // On a near-vertical wall a vertical displacement only makes
-            // streaks; the cliff's roughness belongs to the normal, not the
-            // heightfield.
-            let weight = steep[i] * (1.0 - smoothstep(0.55, 0.92, steep[i]));
-            heights[i] += amplitude * relief * weight;
-        }
-    }
+    vf_core::compute::install(|| {
+        heights
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let wy = origin_y + y as f64 * spacing_y;
+                for (x, value) in row.iter_mut().enumerate() {
+                    let i = y * width + x;
+                    if steep[i] < 0.02 {
+                        continue;
+                    }
+                    let wx = origin_x + x as f64 * spacing_x;
+                    // Broad undulation, then finer facets. The ridged term
+                    // creates the sharp crags that a plain fBm rounds off.
+                    let n1 = broad.fbm01(wx as f32 / scale, wy as f32 / scale, 3, 2.0, 0.5);
+                    let n2 = fine.fbm01(
+                        wx as f32 / (scale * 0.28),
+                        wy as f32 / (scale * 0.28),
+                        2,
+                        2.0,
+                        0.5,
+                    );
+                    let r = crag.ridged2(
+                        wx as f32 / (scale * 0.45),
+                        wy as f32 / (scale * 0.45),
+                        2,
+                        2.0,
+                        0.5,
+                    );
+                    let relief =
+                        (n1 * 2.0 - 1.0) * 0.55 + (n2 * 2.0 - 1.0) * 0.25 + (r - 0.5) * 0.45;
+                    // On a near-vertical wall a vertical displacement only
+                    // makes streaks; the cliff's roughness belongs to the
+                    // normal, not the heightfield.
+                    let weight = steep[i] * (1.0 - smoothstep(0.55, 0.92, steep[i]));
+                    *value += amplitude * relief * weight;
+                }
+            });
+    });
 }
 
 // --- Voronoi helpers -------------------------------------------------------

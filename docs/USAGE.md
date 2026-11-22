@@ -46,6 +46,48 @@ chaque démarrage.
 
 ![Préférences : aide et historique](screenshots/preferences.png)
 
+### Budget de calcul (CPU / GPU)
+
+La section **Calcul (CPU / GPU)** des **Préférences** règle trois choses
+distinctes :
+
+- **Moteur des transformations géométriques** : `CPU`, `GPU (un adaptateur)` ou
+  `GPU (tous les adaptateurs)`. Il couvre les normales, le lissage de Taubin, le
+  déplacement du détail rocheux, les transformations et la sculpture du maillage
+  3D. Le choix bascule **immédiatement** : inutile de redémarrer, la préférence
+  est enregistrée dans `compute.ron`.
+  - en mode GPU, la liste déroulante choisit l'adaptateur (ou « Automatique »,
+    le premier détecté). Sur un portable à double GPU, cela force le discret ou
+    l'intégré ;
+  - en mode **tous les adaptateurs**, les sommets sont répartis entre les GPU
+    cochés (aucun coché = tous les GPU détectés). Chaque périphérique traite une
+    plage contiguë, et le résultat est réassemblé dans l'ordre ;
+  - si l'adaptateur est introuvable, si le pilote refuse le périphérique ou si
+    le shader échoue, l'opération se poursuit sur le CPU et la ligne **Moteur
+    actif** des préférences affiche la raison du repli.
+- **Pool de threads partagé** : automatique (tous les cœurs logiques) ou de 1 à
+  N. Ce pool couvre la génération, l'érosion, les modificateurs, la géologie, les
+  normales/AO/ombrages, le maillage, la fracture, le voxel/SDF, les aperçus et le
+  rendu final. Il est reconstruit dès **Appliquer maintenant**, sans redémarrer.
+  Le résultat reste identique quel que soit le nombre de cœurs : les réductions
+  sont ordonnées et les découpages fixes.
+- **Aperçu 3D (wgpu)** : la case et l'adaptateur de l'aperçu GPU concernent le
+  viewport du terrain et s'appliquent au **prochain lancement**. Le rendu final
+  et les calculs de relief restent sur le CPU, chemin déterministe.
+- `VISTAFORGE_THREADS=N`, `VISTAFORGE_COMPUTE=cpu|gpu|all`,
+  `VISTAFORGE_COMPUTE_GPU=<nom>` et `VISTAFORGE_GPU=auto|off|<nom>` donnent les
+  mêmes réglages aux scripts ; la CLI accepte `--threads N`, `--compute` et
+  `--compute-gpu`, l'application `--threads`, `--compute` et `--compute-gpu`.
+  Les préférences de calcul sont enregistrées dans `compute.ron`, à côté de
+  `ui.ron`.
+
+> **Quel moteur pour les transformations ?** Sur un poste récent, le pool CPU
+> reste le plus rapide : chaque appel GPU transfère la topologie par le bus. Le
+> GPU devient intéressant quand peu de cœurs sont alloués (par exemple 4, pour
+> laisser respirer l'interface), sur une machine à peu de cœurs, ou pour libérer
+> le CPU pendant un remesh. Mesures dans
+> [`GPU.md`](GPU.md#cpu-ou-gpu--ce-que-disent-les-mesures).
+
 Les opérations lourdes (génération, ouverture/enregistrement, import/export
 DEM, export Blender ou trajectoire, rendu CPU, maillage GPU, ombrage du
 sculpteur) tournent en arrière-plan. Une **jauge de progression** apparaît en
@@ -386,7 +428,8 @@ Détails, contenu du dossier et limites : [`BLENDER.md`](BLENDER.md).
 
 - un **viewport** 3D avec orbite à la souris, zoom à la molette et gizmo CAO ;
 - une **barre de fonctions** : Terrain, Modificateurs, Roche, Détail, Sculpter,
-  Animation, Érosion, Eau, Matières, Lumière, Caméra, Rendu, Fichiers et Aide.
+  **Maillage 3D**, Animation, Érosion, Eau, Matières, Lumière, Caméra, Rendu,
+  Fichiers et Aide.
   Chaque famille ouvre un panneau latéral ; **Animation** contient le tracé, la
   caméra et le vol, sans onglet Vol séparé ; **Aide** ouvre la documentation
   complète sans dépendre du survol ;
@@ -420,6 +463,13 @@ projection orthographique), mais l'œil est exactement sur l'axe et le cadrage
 couvre le terrain. Le panneau **Caméra** expose les mêmes vues en boutons, les
 angles yaw/pitch, la distance et le FOV. Le gizmo peut être masqué par la case
 **Gizmo d'orientation**.
+
+La vue **Maillage 3D** possède le même gizmo, en haut à droite de son viewport
+(case **Vue et export → Gizmo d'orientation**). Il lit la caméra d'orbite du
+maillage : une face ou un axe recadre la sculpture sur cette direction, la
+maison revient à la vue d'ensemble. Un clic sur le gizmo ne sculpte jamais le
+maillage en dessous, et le curseur de pinceau s'efface tant que la souris est
+sur le cube.
 
 ### Aperçu adaptatif et viewport GPU
 

@@ -16,10 +16,22 @@ struct Args {
     workspace: PathBuf,
     #[arg(long)]
     verbose: bool,
+    /// Worker threads (0 = all logical cores). Also VISTAFORGE_THREADS.
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    let threads = args.threads.unwrap_or_else(|| {
+        std::env::var("VISTAFORGE_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    if let Err(error) = vf_core::compute::configure_threads(threads) {
+        eprintln!("warning: cannot configure compute pool: {error}");
+    }
     if args.verbose {
         let _ = tracing_subscriber::fmt()
             .with_writer(std::io::stderr)

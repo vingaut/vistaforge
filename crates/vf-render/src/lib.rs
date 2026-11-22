@@ -264,10 +264,11 @@ pub fn render_with_options(
     let ctx = ShadeCtx::new(project, hf, &scene, options, scene.shadow.as_ref());
 
     let jobs = raster::build_jobs(&scene, render_w, render_h);
-    let tiles: Vec<raster::TileOut> = jobs
-        .into_par_iter()
-        .map(|job| raster::render_tile(job, &scene, &ctx, render_w, render_h))
-        .collect();
+    let tiles: Vec<raster::TileOut> = vf_core::compute::install(|| {
+        jobs.into_par_iter()
+            .map(|job| raster::render_tile(job, &scene, &ctx, render_w, render_h))
+            .collect()
+    });
 
     let mut linear = vec![[0.0f32; 3]; render_w * render_h];
     for tile in tiles {

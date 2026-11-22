@@ -12,23 +12,22 @@ git clone https://github.com/vingaut/vistaforge.git
 cd vistaforge
 ```
 
-### Linux x86_64 : binaire déjà dans le dépôt
-
-```bash
-chmod +x dist/linux-x86_64/vistaforge-mcp
-./dist/linux-x86_64/vistaforge-mcp --version
-# vistaforge-mcp 0.1.0
-```
-
-Git conserve le bit exécutable (`100755`) ; si le dépôt a été téléchargé en ZIP,
-`chmod +x` est nécessaire.
-
 ### Windows x86_64 : binaire déjà dans le dépôt
 
 ```powershell
 .\dist\windows-x86_64\vistaforge-mcp.exe --version
 # vistaforge-mcp 0.2.0
 ```
+
+### Linux x86_64 : recompiler (les binaires Linux ne sont plus publiés)
+
+```bash
+cargo build --release -p vf-mcp
+./target/release/vistaforge-mcp --version
+```
+
+Le bit exécutable est conservé par Git pour les fichiers du dépôt ; après un
+téléchargement en ZIP, `chmod +x` reste nécessaire.
 
 ### macOS ou autre architecture : recompiler
 
@@ -75,7 +74,7 @@ La plupart des clients utilisent ce format :
 {
   "mcpServers": {
     "vistaforge": {
-      "command": "/CHEMIN/ABSOLU/vistaforge/dist/linux-x86_64/vistaforge-mcp",
+      "command": "/CHEMIN/ABSOLU/vistaforge/target/release/vistaforge-mcp",
       "args": ["--workspace", "/CHEMIN/ABSOLU/VistaForge"]
     }
   }
@@ -110,7 +109,7 @@ Desktop (quitter l'application, pas seulement fermer la fenêtre).
 
 ```bash
 claude mcp add vistaforge -- \
-  /CHEMIN/ABSOLU/vistaforge/dist/linux-x86_64/vistaforge-mcp \
+  /CHEMIN/ABSOLU/vistaforge/target/release/vistaforge-mcp \
   --workspace /CHEMIN/ABSOLU/VistaForge
 ```
 
@@ -120,7 +119,7 @@ Ou, dans un projet, un fichier `.mcp.json` :
 {
   "mcpServers": {
     "vistaforge": {
-      "command": "/CHEMIN/ABSOLU/vistaforge/dist/linux-x86_64/vistaforge-mcp",
+      "command": "/CHEMIN/ABSOLU/vistaforge/target/release/vistaforge-mcp",
       "args": ["--workspace", "/CHEMIN/ABSOLU/VistaForge"]
     }
   }
@@ -137,7 +136,7 @@ Ou, dans un projet, un fichier `.mcp.json` :
 
 ```bash
 npx -y @modelcontextprotocol/inspector \
-  /CHEMIN/ABSOLU/vistaforge/dist/linux-x86_64/vistaforge-mcp \
+  /CHEMIN/ABSOLU/vistaforge/target/release/vistaforge-mcp \
   --workspace /CHEMIN/ABSOLU/VistaForge
 ```
 
@@ -175,7 +174,7 @@ Outils principaux :
 | Symptôme | Cause / remède |
 |---|---|
 | Le client ne voit aucun outil | Le serveur n'est pas lancé : vérifier `command` et `args`, et que le binaire est exécutable. |
-| `Permission denied` | `chmod +x dist/linux-x86_64/vistaforge-mcp` (surtout après un ZIP). |
+| `Permission denied` | `chmod +x target/release/vistaforge-mcp` (recompilé depuis la source, ou après un ZIP). |
 | Le serveur semble « bloqué » dans un terminal | Normal : il attend du JSON-RPC sur stdin. Laissez le client MCP le lancer. |
 | `path escapes workspace` | Utiliser un chemin relatif au workspace ; les chemins absolus/`..` sont interdits. |
 | `project.list` est vide | Le workspace ne contient pas de `.vfproj` ; appeler `project.new`. |

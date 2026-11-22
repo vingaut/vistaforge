@@ -39,8 +39,8 @@ pub use ids::{ChunkId, LayerId, ProjectId};
 pub use modifiers::{Modifier, ModifierKind, ModifierStack, ParamSpec};
 pub use project::{LegacyMeta, Project, ProjectMeta, SCHEMA_VERSION, TerrainMeta};
 pub use rig::{
-    AircraftPreset, CameraLink, CameraRig, Constraints, MotionProfile, OpticalRig, Path3D, PathKey,
-    TargetMode, TargetRig,
+    AircraftPreset, CameraLink, CameraRig, Constraints, KeyAngles, MotionProfile, OpticalRig,
+    Path3D, PathKey, PursuitAngles, PursuitKey, TargetMode, TargetRig,
 };
 pub use scene::{
     Atmosphere, Camera, CloudSettings, Materials, Palette, Quality, ROCK_PRESETS, RenderMode,

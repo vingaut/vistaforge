@@ -23,9 +23,6 @@ use vf_material::{MaterialSampler, RockTexture};
 use wgpu::util::DeviceExt as _;
 
 const MAX_MESH_SEGMENTS: usize = 2049;
-/// The continuous detail sampler is much more expensive per vertex than the
-/// heightfield lookup; cap its preview resolution independently.
-const MAX_DETAIL_MESH_SEGMENTS: usize = 1025;
 const SCENE_SHADER: &str = include_str!("shaders/scene.wgsl");
 const BLIT_SHADER: &str = include_str!("shaders/blit.wgsl");
 
@@ -907,15 +904,17 @@ pub fn build_terrain_mesh(
     }
 
     let longest = width.max(height) - 1;
-    let segment_cap = if detail_sampler.is_some() {
-        MAX_DETAIL_MESH_SEGMENTS
-    } else {
-        MAX_MESH_SEGMENTS
-    };
-    let step = longest.div_ceil(segment_cap).max(1);
+    // One cap for both paths: enabling the detail pass used to halve the
+    // terrain resolution exactly when the user asked for more detail, which
+    // made the preview look *smoother* with detail on than with it off.
+    let step = longest.div_ceil(MAX_MESH_SEGMENTS).max(1);
     let cols = (width - 1).div_ceil(step) + 1;
     let rows = (height - 1).div_ceil(step) + 1;
     let sample = |x: usize, y: usize| f64::from(terrain.heights()[y * width + x]);
+    // The final render evaluates the detail at half a cell (`vf-mesh`
+    // `build_shape_adaptive`), not at twice the display step: use the same
+    // footprint so the preview attenuates the same wavelengths as the PNG.
+    let footprint = (0.5 * spacing_x.max(spacing_y)).max(0.05) as f32;
 
     let mut vertices = Vec::with_capacity(cols * rows);
     for row in 0..rows {
@@ -924,7 +923,6 @@ pub fn build_terrain_mesh(
             let x = (col * step).min(width - 1);
             let world_x = origin_x + x as f64 * spacing_x;
             let world_y = origin_y + y as f64 * spacing_y;
-            let footprint = ((step as f64) * spacing_x.max(spacing_y) * 2.0).max(0.1) as f32;
             let (z, normal) = if let Some(sampler) = &detail_sampler {
                 (
                     f64::from(sampler.height(world_x, world_y, footprint)),
@@ -932,10 +930,12 @@ pub fn build_terrain_mesh(
                 )
             } else {
                 let z = sample(x, y);
-                let xm = x.saturating_sub(step);
-                let xp = (x + step).min(width - 1);
-                let ym = y.saturating_sub(step);
-                let yp = (y + step).min(height - 1);
+                // Difference on the native grid: a ±step stencil smoothed away
+                // every ridge narrower than two display quads.
+                let xm = x.saturating_sub(1);
+                let xp = (x + 1).min(width - 1);
+                let ym = y.saturating_sub(1);
+                let yp = (y + 1).min(height - 1);
                 let dx = ((xp - xm) as f64 * spacing_x).max(f64::EPSILON);
                 let dy = ((yp - ym) as f64 * spacing_y).max(f64::EPSILON);
                 let dzdx = (sample(xp, y) - sample(xm, y)) / dx;

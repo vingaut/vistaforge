@@ -6,17 +6,20 @@ construits depuis la source de ce dépôt avec `cargo build --release -p vf-cli
 
 | Binaire | Rôle | Taille |
 |---|---|---|
-| `vistaforge.exe` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, **maillage 3D** (`mesh`), MCP tools. | 10,6 Mo |
-| `vistaforge-app.exe` | Interface graphique `egui` + viewport GPU wgpu (Vulkan/DX12) et aperçu CPU, avec l'espace **Maillage 3D** (curseur de pinceau, gizmo d'orientation) et le **moteur de calcul** (CPU N cœurs / un GPU / tous les GPU). | 22,9 Mo |
-| `vistaforge-mcp.exe` | Serveur MCP stdio (29 outils). | 4,4 Mo |
+| `vistaforge.exe` | CLI : génération, import/export DEM et heightmaps, rendu, animation, Blender, **maillage 3D** (`mesh`), MCP tools. | 10,7 Mo |
+| `vistaforge-app.exe` | Interface graphique `egui`, modules **Heightmap / Maillage 3D / Animation / Scène / Fichiers**, viewport GPU wgpu (Vulkan/DX12) et aperçu CPU, moteur de calcul (CPU N cœurs / un GPU / tous les GPU). | 23,0 Mo |
+| `vistaforge-mcp.exe` | Serveur MCP stdio (29 outils). | 4,5 Mo |
 
-Construits le 22 novembre 2026 depuis `master`, release `v0.2.0` (interface
-GPU/CPU unifiée, tafoni/bancs/joints/oolithes, presets rocheux enrichis,
-résolutions 2048–8192, module **Maillage 3D** : sculpture, remesh quads/voxel,
-fracture, physique, parois et export GLB/OBJ/STL/VFM ; curseur de pinceau avec
-normale moyenne et zone d'effet, gizmo d'orientation cliquable, aperçu allégé
-pendant les interactions, **moteur des transformations géométriques au choix
-(CPU 1..N cœurs, un adaptateur GPU, ou tous les GPU)**, remesh déterministe).
+Construits le 22 novembre 2026 depuis `master`, release `v0.2.0` : module
+**Maillage 3D** (sculpture, remesh quads/voxel, fracture, physique, parois,
+export GLB/OBJ/STL/VFM), **passage à sens unique heightmap → maillage** (le
+maillage reprend la finition complète du rendu à la résolution du heightmap),
+gizmo d'orientation, **terrain initial neutre** (aucun bruit ni modificateur par
+défaut), modules et sous-onglets cohérents (Roche + Détail fusionnés), et côté
+animation : **angles par clé**, **décalage de poursuite** intérieur/extérieur/
+haut/bas constant ou par keyframe, canal accélération avec limites et boutons
+±10 % par segment. Interface GPU/CPU unifiée, tafoni/bancs/joints/oolithes,
+presets rocheux enrichis, résolutions 2048–8192.
 La CLI embarque le moteur GPU (`vf-compute`), d'où sa taille plus élevée : la
 bibliothèque `wgpu` est liée statiquement et les pilotes sont chargés à
 l'exécution.

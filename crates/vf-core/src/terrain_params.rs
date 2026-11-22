@@ -323,16 +323,42 @@ pub struct DemSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TerrainSource {
-    Classic { params: ClassicParams },
-    Modern { params: ModernParams },
-    Dem { source: DemSource },
+    Classic {
+        params: ClassicParams,
+    },
+    Modern {
+        params: ModernParams,
+    },
+    /// Neutral starting surface: a constant altitude over the whole extent.
+    ///
+    /// A new project uses this so the heightmap starts with **no** procedural
+    /// noise, no geology and no erosion: every feature is then added on purpose
+    /// with the heightmap tools. `size` follows the same convention as
+    /// [`ClassicParams::size`].
+    Flat {
+        size: u32,
+        #[serde(default)]
+        height_m: f32,
+    },
+    Dem {
+        source: DemSource,
+    },
 }
 
 impl TerrainSource {
+    /// Neutral flat surface of `size` samples per side at altitude `height_m`.
+    pub fn flat(size: u32, height_m: f32) -> Self {
+        Self::Flat {
+            size: size.clamp(2, 8192),
+            height_m,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Classic { .. } => "classic",
             Self::Modern { .. } => "modern",
+            Self::Flat { .. } => "flat",
             Self::Dem { .. } => "dem",
         }
     }
@@ -341,6 +367,15 @@ impl TerrainSource {
         match self {
             Self::Classic { params } => params.validate(),
             Self::Modern { params } => params.validate(),
+            Self::Flat { size, height_m } => {
+                if !(2..=16_384).contains(size) {
+                    return Err("flat terrain size must be in 2..=16384".into());
+                }
+                if !height_m.is_finite() {
+                    return Err("flat terrain altitude must be finite".into());
+                }
+                Ok(())
+            }
             Self::Dem { source } => {
                 if !source.spacing_m.is_finite() || source.spacing_m <= 0.0 {
                     Err("DEM spacing must be finite and positive".into())

@@ -176,9 +176,10 @@ impl Project {
             name: name.into(),
             ..ProjectMeta::default()
         };
-        let source = TerrainSource::Classic {
-            params: ClassicParams::default().with_size_seed(size, seed.0),
-        };
+        // A new project starts from a neutral surface: no procedural noise, no
+        // geology, no erosion and an empty modifier stack. Everything the user
+        // sees is then something they asked for with a heightmap tool.
+        let source = TerrainSource::flat(size, 0.0);
         Self {
             schema_version: SCHEMA_VERSION,
             id: ProjectId::generate(seed.0, now),
@@ -210,6 +211,18 @@ impl Project {
     pub fn with_classic(mut self, params: ClassicParams) -> Self {
         self.seed = Seed::new(params.seed);
         self.source = TerrainSource::Classic { params };
+        self
+    }
+
+    /// Start from the neutral flat surface at altitude `height_m`.
+    pub fn with_flat(mut self, height_m: f32) -> Self {
+        let size = match &self.source {
+            TerrainSource::Classic { params } => params.size,
+            TerrainSource::Modern { params } => params.size,
+            TerrainSource::Flat { size, .. } => *size,
+            TerrainSource::Dem { .. } => 1026,
+        };
+        self.source = TerrainSource::flat(size, height_m);
         self
     }
 
@@ -388,8 +401,39 @@ mod tests {
         let p = Project::new("Test", Seed::new(7), 258);
         assert_eq!(p.schema_version, SCHEMA_VERSION);
         assert_eq!(p.seed, Seed::new(7));
-        assert_eq!(p.source.kind(), "classic");
+        // A new project is a neutral surface: nothing is applied behind the
+        // user's back, every effect must be added with a tool.
+        assert_eq!(p.source.kind(), "flat");
+        assert!(!p.geology.enabled);
+        assert!(!p.erosion_enabled);
+        assert!(!p.detail.enabled);
+        assert!(p.modifiers.items.is_empty());
         p.validate().unwrap_err(); // no terrain yet
+    }
+
+    #[test]
+    fn a_flat_source_validates_and_clamps() {
+        let source = TerrainSource::flat(65, 12.5);
+        assert_eq!(source.kind(), "flat");
+        assert!(source.validate().is_ok());
+        // The constructor clamps the size instead of failing.
+        assert!(TerrainSource::flat(0, 0.0).validate().is_ok());
+        assert!(
+            TerrainSource::Flat {
+                size: 1,
+                height_m: 0.0
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            TerrainSource::Flat {
+                size: 65,
+                height_m: f32::NAN
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

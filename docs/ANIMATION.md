@@ -83,8 +83,29 @@ quatre onglets.
 - Les clés situées au-delà de la fin restent affichées après le repère `fin` :
   elles ne sont simplement pas jouées.
 
-Le graph editor est le lien direct entre les réglages de profil et l'animation :
-changez de profil, la courbe de roulis se met à jour sans retoucher le tracé.
+Le mode **Graphe** affiche les canaux authorés (X/Y/Z de la caméra et de la
+cible) et les canaux simulés : vitesse, **accélération** et roulis. Les courbes
+simulées portent maintenant leurs **limites** en repères colorés — vitesse
+maximale et vitesse de croisière pour la vitesse, `±a` avant et accélération
+latérale pour l'accélération — ce qui donne une lecture immédiate au lieu d'un
+simple tracé. La plage verticale est figée pendant un glisser : la courbe ne se
+remet plus à l'échelle sous le curseur.
+
+Pour régler la vitesse, l'onglet **Réglages** contient le tableau des segments
+avec deux boutons par segment : `−` allonge le segment de 10 % (plus lent), `+`
+le raccourcit de 10 % (plus rapide), et `Ease` adoucit l'arrivée sur la clé de
+fin. Le temps du segment suivant est décalé d'autant, donc le reste du timing
+est préservé.
+
+### Angles dans les clés
+
+Chaque clé caméra peut porter une **orientation explicite** (case *Orientation
+explicite* dans le panneau de clé) : lacet, tangage et roulis en degrés. Sans
+angles, la clé vise la cible comme avant ; avec, la caméra est tournée de ces
+angles sur la clé, puis **revient progressivement à la visée** sur les clés
+voisines qui n'en portent pas — une seule clé orientée ne fait donc pas
+« sauter » le cadre. Le bouton *Revenir à la visée* remet les trois angles à
+zéro.
 
 ### Point de vue
 
@@ -103,7 +124,22 @@ La cible est optionnelle :
 Le viewport de conception dessine le **viseur** du point de vue (tronc de
 frustum depuis la caméra vers la cible) et la ligne caméra → cible. Le rendu utilise
 exactement la caméra échantillonnée à `t`, sans ces overlays. L'overlay utilise
-désormais le même calcul de cible que la simulation (offset inclus).
+désormais le même calcul de cible que la simulation (offset et décalage de
+poursuite inclus).
+
+### Décalage de poursuite (intérieur / extérieur / haut / bas)
+
+En mode **Avance sur courbe** ou **Retard sur courbe**, le panneau propose un
+**décalage de poursuite** : la direction caméra → cible est tournée autour de
+l'œil, sans changer la distance de mise au point.
+
+- boutons **Intérieur** / **Extérieur** / **Haut** / **Bas** / **Aucun** ;
+- lacet (positif = vers l'intérieur du virage) et tangage (positif = plus haut)
+  en degrés, ajustables ;
+- **constant** par défaut, ou **par keyframe** : une petite courbe de temps
+  (t, lacet, tangage) s'ajoute au décalage constant, ce qui permet de regarder
+  l'intérieur au début du virage puis l'extérieur en sortie. Le décalage suit le
+  point visé (donc `t + avance` ou `t − retard`), pas la caméra.
 
 Pour un tracé cible, deux boutons créent un lien éditable :
 **Copier le tracé de la caméra** (même courbe, offset nul) et **Copier + décalage**

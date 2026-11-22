@@ -15,7 +15,8 @@ pub enum PickTarget {
     ImportTerrain,
     ExportTerrain,
     Animation,
-    BlenderDir,
+    /// Output folder for a rendered animation sequence.
+    AnimationExportDir,
     Texture,
 }
 

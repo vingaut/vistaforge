@@ -23,9 +23,8 @@ mod view_gizmo;
 use eframe::egui;
 use glam::{DVec3, Vec3};
 use vf_core::{
-    AircraftPreset, Camera, CameraLink, CameraRig, ClassicParams, ErosionParams, HeightField,
-    LegacyMeta, ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode,
-    TerrainSource,
+    AircraftPreset, Camera, CameraLink, CameraRig, ClassicParams, HeightField, LegacyMeta,
+    ModifierKind, Palette, PathKey, Project, Quality, RenderMode, Seed, TargetMode, TerrainSource,
 };
 use vf_io::RgbaImage;
 use vf_render::{RenderOptions, RenderOutput, render_with_options};
@@ -45,14 +44,16 @@ const MAX_INTERACTIVE_SCALE: f32 = 0.8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workspace {
     Terrain,
-    Modifiers,
-    Rock,
-    Detail,
     Sculpt,
-    Mesh3d,
-    Animation,
+    Modifiers,
+    /// Rock geology and surface detail live in one tool: they both shape the
+    /// same heightfield, and separate tabs made the same controls look like
+    /// different features.
+    Rock,
     Erosion,
     Water,
+    Mesh3d,
+    Animation,
     Materials,
     Light,
     Camera,
@@ -61,17 +62,96 @@ enum Workspace {
     Help,
 }
 
+/// Top-level modules. Each one is a self-contained workflow; the panels inside
+/// a module are its sub-tabs. Heightmap and 3D mesh are deliberately separate:
+/// the heightmap is finished first, then sent to the mesh module once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Module {
+    Heightmap,
+    Mesh,
+    Animation,
+    Scene,
+    Files,
+    Help,
+}
+
+impl Module {
+    const ALL: [Module; 6] = [
+        Self::Heightmap,
+        Self::Mesh,
+        Self::Animation,
+        Self::Scene,
+        Self::Files,
+        Self::Help,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Heightmap => "Heightmap",
+            Self::Mesh => "Maillage 3D",
+            Self::Animation => "Animation",
+            Self::Scene => "Scène",
+            Self::Files => "Fichiers",
+            Self::Help => "Aide",
+        }
+    }
+
+    fn hover(self) -> &'static str {
+        match self {
+            Self::Heightmap => {
+                "Terrain, sculpture, modificateurs, roche, érosion, eau : tout se termine ici \
+                 avant l'envoi au maillage 3D."
+            }
+            Self::Mesh => "Sculpture du maillage final, fracture, parois, export Blender.",
+            Self::Animation => "Tracé caméra et cible, clés, vitesses, profils de vol.",
+            Self::Scene => "Matières, lumière, caméra, rendu final.",
+            Self::Files => "Projet, DEM, heightmaps, trajectoires.",
+            Self::Help => "Fiches contextuelles.",
+        }
+    }
+
+    /// Sub-tabs of this module, in order.
+    fn workspaces(self) -> &'static [Workspace] {
+        match self {
+            Self::Heightmap => &[
+                Workspace::Terrain,
+                Workspace::Sculpt,
+                Workspace::Modifiers,
+                Workspace::Rock,
+                Workspace::Erosion,
+                Workspace::Water,
+            ],
+            Self::Mesh => &[Workspace::Mesh3d],
+            Self::Animation => &[Workspace::Animation],
+            Self::Scene => &[
+                Workspace::Materials,
+                Workspace::Light,
+                Workspace::Camera,
+                Workspace::Render,
+            ],
+            Self::Files => &[Workspace::Files],
+            Self::Help => &[Workspace::Help],
+        }
+    }
+
+    fn of(workspace: Workspace) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|module| module.workspaces().contains(&workspace))
+            .unwrap_or(Self::Heightmap)
+    }
+}
+
 impl Workspace {
-    const ALL: [Workspace; 15] = [
+    const ALL: [Workspace; 14] = [
         Self::Terrain,
+        Self::Sculpt,
         Self::Modifiers,
         Self::Rock,
-        Self::Detail,
-        Self::Sculpt,
-        Self::Mesh3d,
-        Self::Animation,
         Self::Erosion,
         Self::Water,
+        Self::Mesh3d,
+        Self::Animation,
         Self::Materials,
         Self::Light,
         Self::Camera,
@@ -82,6 +162,11 @@ impl Workspace {
 
     fn parse(value: &str) -> Option<Self> {
         let normalized = value.trim().to_ascii_lowercase();
+        // Kept so older `VISTAFORGE_WORKSPACE=Détail` scripts still land on
+        // the merged tools instead of failing.
+        if normalized == "détail" || normalized == "detail" {
+            return Some(Self::Rock);
+        }
         Self::ALL
             .into_iter()
             .find(|workspace| workspace.label().to_ascii_lowercase() == normalized)
@@ -89,15 +174,14 @@ impl Workspace {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Terrain => "Terrain",
-            Self::Modifiers => "Modificateurs",
-            Self::Rock => "Roche",
-            Self::Detail => "Détail",
+            Self::Terrain => "Base",
             Self::Sculpt => "Sculpter",
-            Self::Mesh3d => "Maillage 3D",
-            Self::Animation => "Animation",
+            Self::Modifiers => "Modificateurs",
+            Self::Rock => "Roche & détail",
             Self::Erosion => "Érosion",
             Self::Water => "Eau",
+            Self::Mesh3d => "Maillage 3D",
+            Self::Animation => "Animation",
             Self::Materials => "Matières",
             Self::Light => "Lumière",
             Self::Camera => "Caméra",
@@ -110,15 +194,30 @@ impl Workspace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerrainMode {
+    /// Neutral base: constant altitude, nothing applied.
+    Flat,
     Classic,
     Modern,
 }
 
 impl TerrainMode {
+    const ALL: [TerrainMode; 3] = [Self::Flat, Self::Classic, Self::Modern];
+
     fn label(self) -> &'static str {
         match self {
+            Self::Flat => "Plat",
             Self::Classic => "Classic",
             Self::Modern => "Modern",
+        }
+    }
+
+    fn hover(self) -> &'static str {
+        match self {
+            Self::Flat => "Surface neutre à altitude constante : aucun bruit, aucun algorithme.",
+            Self::Classic => {
+                "Fractal classique (midpoint displacement), le style VistaPro d'origine."
+            }
+            Self::Modern => "Presets modernes : fBm, crêtes, warp, terrasses, cratères.",
         }
     }
 }
@@ -282,7 +381,6 @@ impl CaptureState {
             ("workspace_world", Workspace::Terrain),
             ("workspace_modifiers", Workspace::Modifiers),
             ("workspace_rock", Workspace::Rock),
-            ("workspace_detail", Workspace::Detail),
             ("workspace_sculpt", Workspace::Sculpt),
             ("workspace_mesh3d", Workspace::Mesh3d),
             ("workspace_erosion", Workspace::Erosion),
@@ -417,6 +515,177 @@ fn wgpu_configuration(settings: &vf_core::ComputeSettings) -> eframe::WgpuConfig
 /// restores it.
 const MESH3D_HOME_YAW: f32 = 38.0;
 const MESH3D_HOME_PITCH: f32 = 24.0;
+
+/// How the heightmap is turned into the starting 3D mesh.
+///
+/// The bridge is one-way: the heightmap is finalised here exactly like the
+/// final render (modifier stack, cliff pass, continuous detail) and the mesh
+/// takes over from that point. Nothing is written back, so the two modules
+/// cannot fight over the same surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MeshTransferSettings {
+    /// Vertices per heightfield cell for the uniform path, or the maximum
+    /// subdivision (blocks of `SHAPE_BLOCK` cells) for the adaptive one.
+    subdivision: u32,
+    /// Bake the continuous rock detail into real geometry.
+    detail: bool,
+    /// Adaptive tolerance for the meshed surface, metres: lower keeps more of
+    /// the fine relief (and costs vertices).
+    tolerance_m: f32,
+    /// Apply the cliff pass before meshing.
+    cliffs: bool,
+    /// Close the sheet into a printable slab (fracture, Blender, STL).
+    close_slab: bool,
+    /// Vertex budget; the builder coarsens rather than failing.
+    max_vertices: usize,
+    /// Slab floor, metres under the lowest point.
+    floor_margin_m: f32,
+}
+
+impl Default for MeshTransferSettings {
+    fn default() -> Self {
+        Self {
+            // One vertex per heightfield cell: the heightmap is already the
+            // reference surface, and the adaptive detail pass refines where
+            // the mesh needs it. Higher densities are opt-in (×2 … ×4).
+            subdivision: 1,
+            detail: true,
+            // 15 cm: below that the mesh is dominated by the heightfield's own
+            // resolution, and above it the fine relief of the render is lost.
+            tolerance_m: 0.15,
+            cliffs: true,
+            close_slab: true,
+            max_vertices: 4_000_000,
+            floor_margin_m: 25.0,
+        }
+    }
+}
+
+/// Finalise the heightmap like the final render and convert it to a sculpt
+/// mesh. Returns the mesh and a one-line account of what was baked.
+fn build_mesh_from_heightmap(
+    heightfield: &vf_core::HeightField,
+    project: &Project,
+    settings: MeshTransferSettings,
+    mut phase: impl FnMut(&str),
+) -> Result<(vf_sculpt::Mesh, String), String> {
+    phase("Cuisson de la pile de modificateurs…");
+    let modulated = if project.modifiers.active().next().is_some() {
+        Some(
+            vf_modifiers::apply(heightfield, &project.modifiers, project.seed)
+                .map_err(|error| format!("modificateurs : {error}"))?,
+        )
+    } else {
+        None
+    };
+    let base = modulated.as_ref().unwrap_or(heightfield);
+    phase("Pass falaises…");
+    let shaped = if settings.cliffs && project.render.cliffs {
+        Some(
+            vf_procgen::cliff::sharpen(
+                base,
+                project.seed,
+                project.render.cliff_warp,
+                project.render.cliff_warp_scale_m,
+            )
+            .map_err(|error| format!("falaises : {error}"))?,
+        )
+    } else {
+        None
+    };
+    let final_hf = shaped.as_ref().unwrap_or(base);
+    phase("Maillage adaptatif et détail continu…");
+    let detail = if settings.detail && project.detail.enabled {
+        project.detail.clone()
+    } else {
+        vf_core::DetailSettings::default()
+    };
+    let sampler = vf_detail::DetailSampler::new(final_hf, &detail, project.seed);
+    let budget = settings.max_vertices.max(16);
+    let subdivision = settings.subdivision.clamp(1, 4);
+    let data = if detail.enabled && detail.adaptive {
+        // The transfer asks for a *tight* tolerance: the render can afford a
+        // coarser adaptive surface because the shader hides the difference,
+        // but this mesh is the geometry the user will sculpt and export.
+        let tolerance = settings
+            .tolerance_m
+            .min(detail.adaptive_tolerance_m)
+            .clamp(0.02, 100.0);
+        vf_mesh::build_shape_adaptive(&sampler, subdivision, tolerance, budget)
+    } else {
+        vf_mesh::build(&sampler, subdivision, budget, None)
+    };
+    phase("Conversion en maillage sculptable…");
+    let mut mesh = vf_sculpt::terrain::from_mesh_data(&data);
+    if settings.close_slab {
+        let floor = final_hf.bounds().min[2] as f32 - settings.floor_margin_m.max(1.0);
+        mesh.close_slab(floor);
+    }
+    let summary = format!(
+        "{} · {} modificateur(s) · falaises {} · détail {}",
+        if modulated.is_some() {
+            "heightmap cuit"
+        } else {
+            "heightmap direct"
+        },
+        project.modifiers.active().count(),
+        if shaped.is_some() { "incluses" } else { "non" },
+        if detail.enabled {
+            format!("×{:.2} ({:.0} m)", detail.strength, detail.scale_m)
+        } else {
+            "non".to_string()
+        },
+    );
+    Ok((mesh, summary))
+}
+
+/// `1234567` → `1 234 567`, for the vertex/face counters.
+fn grouped(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Cheap fingerprint of the heightfield content, used to tell whether the mesh
+/// was built from the current heightmap. Sampling every 17th cell costs
+/// microseconds and catches in-place brush edits, which an `Arc` pointer would
+/// miss.
+fn heightfield_fingerprint(hf: &vf_core::HeightField) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(hf.width() as u64);
+    mix(hf.height() as u64);
+    let (spacing_x, spacing_y) = hf.spacing();
+    mix(spacing_x.to_bits());
+    mix(spacing_y.to_bits());
+    let heights = hf.heights();
+    // Small fields are hashed whole; a big one is sampled finely enough that a
+    // brush stroke is still seen (at most ~250 k samples per call).
+    let stride = (heights.len() / 250_000).max(1);
+    let mut index = 0;
+    while index < heights.len() {
+        mix(heights[index].to_bits() as u64);
+        index += stride;
+    }
+    hash
+}
+
+/// Where the current 3D mesh came from, for the staleness notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mesh3dSource {
+    fingerprint: u64,
+    summary: String,
+    size: (usize, usize),
+}
 
 /// Orbit yaw/pitch that makes the sculpt camera look along a standard axis.
 ///
@@ -822,6 +1091,8 @@ struct VistaForgeApp {
     sculpt_texture_dirty: bool,
     hillshade_revision: u64,
     hillshade_task: Option<HillshadeTask>,
+    /// Last live shading refresh during a stroke, for throttling.
+    sculpt_hillshade_at: Option<Instant>,
     sculpt_detail: u32,
     sculpt_exaggeration: f32,
     sculpt_contours_m: f32,
@@ -853,6 +1124,12 @@ struct VistaForgeApp {
     /// stroke on a large mesh does not freeze the frame.
     mesh3d_full_at: Option<std::time::Instant>,
     mesh3d_status: String,
+    /// Options used by the one-way heightmap → mesh transfer.
+    mesh3d_transfer: MeshTransferSettings,
+    /// Heightmap fingerprint the current mesh was built from.
+    mesh3d_source: Option<Mesh3dSource>,
+    /// Two-step confirmation before discarding the sculpted mesh.
+    mesh3d_confirm_reimport: bool,
     mesh3d_export_path: String,
     mesh3d_wall_style: vf_sculpt::cliff::CliffStyle,
     mesh3d_rock_name: String,
@@ -904,9 +1181,6 @@ struct VistaForgeApp {
     files_flip_y: bool,
     files_invert_height: bool,
     files_nodata: f32,
-    blender_export_dir: String,
-    blender_subdivision: u32,
-    blender_export_animation: bool,
     file_picker: file_picker::FilePicker,
     anim_export_dir: String,
     anim_export_task: Option<AnimationExportTask>,
@@ -1012,8 +1286,8 @@ impl VistaForgeApp {
             show_final_render: false,
             cpu_preview_forced: false,
             workspace: Workspace::Terrain,
-            mode: TerrainMode::Classic,
-            size: 258,
+            mode: TerrainMode::Flat,
+            size: 1026,
             seed: 1,
             preset: "alpine".into(),
             rock_preset: "none".into(),
@@ -1043,6 +1317,7 @@ impl VistaForgeApp {
             sculpt_texture_dirty: true,
             hillshade_revision: 0,
             hillshade_task: None,
+            sculpt_hillshade_at: None,
             sculpt_detail: 2,
             sculpt_exaggeration: 1.8,
             sculpt_contours_m: 5.0,
@@ -1068,8 +1343,11 @@ impl VistaForgeApp {
             mesh3d_stats: None,
             mesh3d_full_at: None,
             mesh3d_status:
-                "Clic gauche : sculpter · clic droit ou Maj+gauche : orbite · molette : zoom."
+                "Envoyez d'abord le heightmap final vers le maillage 3D : la sculpture partira de cette surface."
                     .into(),
+            mesh3d_transfer: MeshTransferSettings::default(),
+            mesh3d_source: None,
+            mesh3d_confirm_reimport: false,
             mesh3d_export_path: "mesh-out/sculpture.glb".into(),
             mesh3d_wall_style: vf_sculpt::cliff::CliffStyle::SeaCliff,
             mesh3d_rock_name: "sandstone".into(),
@@ -1118,9 +1396,6 @@ impl VistaForgeApp {
             files_flip_y: true,
             files_invert_height: false,
             files_nodata: -9999.0,
-            blender_export_dir: "blender-out".into(),
-            blender_subdivision: 2,
-            blender_export_animation: true,
             file_picker: file_picker::FilePicker::default(),
             anim_export_dir: "anim-out".into(),
             anim_export_task: None,
@@ -1212,6 +1487,11 @@ impl VistaForgeApp {
                 self.seed = params.seed;
                 self.preset = params.preset.clone();
                 self.vertical_scale = params.vertical_scale;
+            }
+            TerrainSource::Flat { size, .. } => {
+                self.mode = TerrainMode::Flat;
+                self.size = (*size).max(2);
+                self.seed = self.project.seed.0;
             }
             TerrainSource::Dem { .. } => {
                 self.size = self.heightfield.width() as u32;
@@ -1422,6 +1702,25 @@ impl VistaForgeApp {
 
     fn invalidate_terrain_stats(&mut self) {
         self.terrain_stats_hf = None;
+    }
+
+    /// Switch to the first panel of a module.
+    fn switch_module(&mut self, module: Module, ctx: &egui::Context) {
+        let target = Module::of(self.workspace);
+        let _ = target;
+        self.switch_workspace(module.workspaces()[0], ctx);
+    }
+
+    /// Workspace change, with the animation side effects in one place.
+    fn switch_workspace(&mut self, workspace: Workspace, ctx: &egui::Context) {
+        if self.workspace == Workspace::Animation && workspace != Workspace::Animation {
+            self.anim_playing = false;
+            self.anim_editor.trace = false;
+        }
+        self.workspace = workspace;
+        if workspace == Workspace::Animation {
+            self.ensure_animation_workspace(ctx);
+        }
     }
 
     fn mark_dirty(&mut self) {
@@ -1790,6 +2089,7 @@ impl VistaForgeApp {
         project.seed = seed;
         let size = self.size.clamp(2, 8192);
         project.source = match self.mode {
+            TerrainMode::Flat => TerrainSource::flat(size, 0.0),
             TerrainMode::Classic => TerrainSource::Classic {
                 params: ClassicParams {
                     seed: self.seed,
@@ -2116,7 +2416,6 @@ impl VistaForgeApp {
                     kind,
                     jobs::TaskKind::ImportTerrain
                         | jobs::TaskKind::ExportTerrain
-                        | jobs::TaskKind::Blender
                         | jobs::TaskKind::AnimationExport
                         | jobs::TaskKind::AnimationImport
                 ) {
@@ -2172,6 +2471,7 @@ impl VistaForgeApp {
                 self.status = format!(
                     "Généré {} {size}x{size} seed {seed} en {elapsed_ms} ms",
                     match self.mode {
+                        TerrainMode::Flat => "Plat",
                         TerrainMode::Classic => "Classic",
                         TerrainMode::Modern => "Modern",
                     }
@@ -2291,16 +2591,38 @@ impl VistaForgeApp {
                     "Terrain densifié : {old_width}² → {new_width}², cellule {new_cell:.2} m."
                 );
             }
-            jobs::TaskResult::BlenderExported { report, note } => {
-                self.files_status = format!(
-                    "Blender : {} sommets, {} triangles, {} matériaux → {}{}",
-                    report.vertices,
-                    report.triangles,
-                    report.materials,
-                    report.glb.display(),
-                    note.map_or_else(String::new, |note| format!(" · {note}"))
+            jobs::TaskResult::MeshTransferred {
+                document,
+                summary,
+                revision,
+            } => {
+                let mut document = *document;
+                document.name = self
+                    .project_path
+                    .as_ref()
+                    .and_then(|path| path.file_stem())
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_else(|| self.project.meta.name.clone());
+                let bounds = document.mesh.bounds();
+                let radius = document.brush.radius_m;
+                self.mesh3d_distance = (bounds.size().length() * 1.35).max(8.0);
+                self.mesh3d_target = bounds.center();
+                self.mesh3d_stats = None;
+                self.mesh3d_full_at = None;
+                self.mesh3d_source = Some(Mesh3dSource {
+                    fingerprint: revision,
+                    summary: summary.clone(),
+                    size: (self.heightfield.width(), self.heightfield.height()),
+                });
+                self.mesh3d = Some(document);
+                self.mesh3d_dirty = true;
+                self.mesh3d_confirm_reimport = false;
+                self.workspace = Workspace::Mesh3d;
+                self.mesh3d_status = format!(
+                    "Maillage reçu du heightmap · {summary} · rayon {radius:.1} m. \
+                     Le heightmap n'est plus modifié par ce module."
                 );
-                self.status = self.files_status.clone();
+                self.status = self.mesh3d_status.clone();
             }
             jobs::TaskResult::AnimationExported { report } => {
                 self.files_status = format!(
@@ -2433,9 +2755,10 @@ impl VistaForgeApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Mode");
-                    for mode in [TerrainMode::Classic, TerrainMode::Modern] {
+                    for mode in TerrainMode::ALL {
                         if ui
                             .selectable_label(self.mode == mode, mode.label())
+                            .on_hover_text(mode.hover())
                             .clicked()
                         {
                             self.mode = mode;
@@ -2443,6 +2766,16 @@ impl VistaForgeApp {
                         }
                     }
                 });
+                if self.mode == TerrainMode::Flat {
+                    ui.label(
+                        egui::RichText::new(
+                            "Surface neutre : aucun bruit, aucun algorithme. Ajoutez le relief \
+                             avec un preset, les pinceaux, les modificateurs ou l'érosion.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
                 ui.horizontal(|ui| {
                     ui.label("Size");
                     if ui
@@ -2527,7 +2860,7 @@ impl VistaForgeApp {
                             self.mark_dirty();
                         }
                     });
-                } else {
+                } else if self.mode == TerrainMode::Classic {
                     ui.add(
                         egui::Slider::new(&mut self.dimension, 0.0..=200.0)
                             .text("Fractal dimension"),
@@ -2559,10 +2892,6 @@ impl VistaForgeApp {
                         }
                     });
                 }
-                ui.checkbox(
-                    &mut self.project.erosion_enabled,
-                    "Hydraulic + thermal erosion",
-                );
                 ui.horizontal_wrapped(|ui| {
                     ui.checkbox(
                         &mut self.preserve_view,
@@ -2576,10 +2905,27 @@ impl VistaForgeApp {
                         self.mark_camera_dirty();
                     }
                 });
+                if self.project.erosion_enabled {
+                    ui.label(
+                        egui::RichText::new(
+                            "Érosion active : elle sera appliquée après la génération. \
+                             Réglez-la dans l'onglet Érosion.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
                 if ui
                     .add_sized(
                         [ui.available_width(), 28.0],
-                        egui::Button::new("Generate terrain"),
+                        egui::Button::new(match self.mode {
+                            TerrainMode::Flat => "Réinitialiser à plat",
+                            TerrainMode::Classic | TerrainMode::Modern => "Générer le relief",
+                        }),
+                    )
+                    .on_hover_text(
+                        "Remplace le heightmap courant. Les sculptures et cuissons déjà faites \
+                         sont perdues : enregistrez le projet avant si besoin.",
                     )
                     .clicked()
                 {
@@ -4764,9 +5110,16 @@ impl VistaForgeApp {
             return;
         }
         let frame = cap.frame;
+        let mesh_step = cap.steps[index].workspace == Workspace::Mesh3d;
         if frame == 0 {
             let step = cap.steps[index];
             self.capture_apply_step(step, ctx);
+        }
+        // The documentation capture shows a real 3D mesh: send the heightmap
+        // once when the tour reaches that step. The wait below holds the
+        // screenshot until the worker finished.
+        if mesh_step && self.mesh3d.is_none() && self.task.is_none() && frame > 2 {
+            self.transfer_heightmap_to_mesh3d(ctx);
         }
         if let Some(cap) = self.capture.as_mut() {
             cap.frame += 1;
@@ -5190,6 +5543,7 @@ impl VistaForgeApp {
                 if changed {
                     self.mark_animation_changed();
                 }
+                self.pursuit_angles_ui(ui);
             }
             TargetMode::Offset => {
                 ui.label(
@@ -5266,6 +5620,7 @@ impl VistaForgeApp {
                 if changed {
                     self.mark_animation_changed();
                 }
+                self.pursuit_angles_ui(ui);
             }
             TargetMode::Manual => {
                 ui.label(
@@ -5496,6 +5851,67 @@ impl VistaForgeApp {
                         key.in_handle = [0.0; 3];
                         key.out_handle = [0.0; 3];
                         changed = true;
+                    }
+                    // Explicit orientation: without it the key aims at the
+                    // target; with it the camera is turned by the authored
+                    // angles and fades back to the aim on the neighbouring
+                    // un-oriented keys.
+                    ui.add_space(4.0);
+                    let mut explicit = key.angles.is_some();
+                    if ui
+                        .checkbox(&mut explicit, "Orientation explicite")
+                        .on_hover_text(
+                            "Remplace la visée vers la cible par des angles fixés sur cette clé. \
+                             Entre deux clés sans angles, la caméra revient progressivement à la \
+                             visée.",
+                        )
+                        .changed()
+                    {
+                        key.angles = explicit.then(vf_core::KeyAngles::default);
+                        changed = true;
+                    }
+                    if let Some(angles) = &mut key.angles {
+                        ui.horizontal_wrapped(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut angles.yaw_deg)
+                                        .speed(0.5)
+                                        .range(-180.0..=180.0)
+                                        .prefix("lacet ")
+                                        .suffix("°"),
+                                )
+                                .on_hover_text("Positif = tourner à gauche.")
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut angles.pitch_deg)
+                                        .speed(0.5)
+                                        .range(-89.0..=89.0)
+                                        .prefix("tangage ")
+                                        .suffix("°"),
+                                )
+                                .on_hover_text("Positif = regarder plus haut.")
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut angles.roll_deg)
+                                        .speed(0.5)
+                                        .range(-180.0..=180.0)
+                                        .prefix("roulis ")
+                                        .suffix("°"),
+                                )
+                                .changed();
+                        });
+                        if ui
+                            .button("Revenir à la visée")
+                            .on_hover_text(
+                                "Remet les trois angles à zéro : la clé vise la cible comme avant.",
+                            )
+                            .clicked()
+                        {
+                            *angles = vf_core::KeyAngles::default();
+                            changed = true;
+                        }
                     }
                 }
                 if changed {
@@ -5797,6 +6213,21 @@ impl VistaForgeApp {
             curves.speed.push((t, sample.speed_mps));
             curves.bank.push((t, sample.roll_deg));
         }
+        // Acceleration is the finite difference of the simulated speed: it is
+        // the quantity the body limits act on, and drawing it makes the speed
+        // presets readable instead of abstract.
+        for window in 0..curves.speed.len() {
+            let (t, speed) = curves.speed[window];
+            let previous = curves.speed[window.saturating_sub(1)];
+            let next = curves.speed[(window + 1).min(curves.speed.len() - 1)];
+            let span = (next.0 - previous.0).max(1e-3);
+            let accel = if curves.speed.len() > 2 {
+                (next.1 - previous.1) / span
+            } else {
+                (speed - previous.1) / (t - previous.0).max(1e-3)
+            };
+            curves.accel.push((t, accel));
+        }
         self.anim_curve_cache = Some((self.anim_revision, curves));
     }
 
@@ -5804,7 +6235,9 @@ impl VistaForgeApp {
         let needs_curves = self.anim_timeline.mode == timeline::Mode::Graph
             && matches!(
                 self.anim_timeline.channel,
-                timeline::Channel::Speed | timeline::Channel::Bank
+                timeline::Channel::Speed
+                    | timeline::Channel::Acceleration
+                    | timeline::Channel::Bank
             );
         if needs_curves && !self.anim_timeline.is_dragging() {
             self.ensure_timeline_curves();
@@ -6113,15 +6546,20 @@ impl VistaForgeApp {
         } else {
             let max_speed = self.project.rig.body.max_speed_mps;
             let fps = self.project.rig.fps.max(1) as f32;
+            // Segment edits are deferred: the segments borrow the rig.
+            let mut retime: Option<(usize, f32)> = None;
+            let mut ease_segment: Option<usize> = None;
             egui::ScrollArea::vertical()
                 .max_height(150.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     egui::Grid::new("anim-segment-grid")
-                        .num_columns(5)
+                        .num_columns(6)
                         .striped(true)
                         .show(ui, |ui| {
-                            for header in ["Segment", "Longueur", "Durée", "Vitesse", "Images"] {
+                            for header in [
+                                "Segment", "Longueur", "Durée", "Vitesse", "Images", "Ajuster",
+                            ] {
                                 ui.label(egui::RichText::new(header).small().strong());
                             }
                             ui.end_row();
@@ -6146,10 +6584,47 @@ impl VistaForgeApp {
                                     },
                                 ));
                                 ui.label(format!("{:.0}", (segment.duration_s() * fps).round()));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("−")
+                                        .on_hover_text("Allonger ce segment de 10 % (plus lent).")
+                                        .clicked()
+                                    {
+                                        retime = Some((segment.index, 1.1));
+                                    }
+                                    if ui
+                                        .small_button("+")
+                                        .on_hover_text(
+                                            "Raccourcir ce segment de 10 % (plus rapide).",
+                                        )
+                                        .clicked()
+                                    {
+                                        retime = Some((segment.index, 0.9));
+                                    }
+                                    if ui
+                                        .small_button("Ease")
+                                        .on_hover_text(
+                                            "Adoucit l'arrivée sur la clé de fin (départ/arrêt \
+                                             progressif sur ce segment).",
+                                        )
+                                        .clicked()
+                                    {
+                                        ease_segment = Some(segment.index);
+                                    }
+                                });
                                 ui.end_row();
                             }
                         });
                 });
+            if let Some((index, factor)) = retime {
+                self.retime_camera_segment(index, factor);
+            }
+            if let Some(index) = ease_segment {
+                if let Some(key) = self.project.rig.eye.keys.get_mut(index) {
+                    key.ease = 1.0;
+                }
+                self.mark_animation_changed();
+            }
             let total: f64 = segments.iter().map(|segment| segment.length_m).sum();
             ui.label(
                 egui::RichText::new(format!(
@@ -6909,12 +7384,18 @@ impl VistaForgeApp {
         }
         ui.horizontal(|ui| {
             ui.label("Dossier");
-            let folder = ui.add(
+            ui.add(
                 egui::TextEdit::singleline(&mut self.anim_export_dir)
-                    .desired_width(ui.available_width() - 8.0),
+                    .desired_width(ui.available_width() - 44.0),
             );
-            if folder.hovered() {
-                self.help.register(folder.rect, help::HelpTopic::Export);
+            if ui.small_button("…").clicked() {
+                let current = self.anim_export_dir.clone();
+                self.file_picker.open(
+                    file_picker::PickTarget::AnimationExportDir,
+                    file_picker::PickMode::Directory,
+                    &current,
+                    &[],
+                );
             }
         });
         let frames = self.project.rig.frame_count();
@@ -7182,8 +7663,19 @@ impl VistaForgeApp {
                 Workspace::Help => {}
                 Workspace::Terrain => self.terrain_ui(ui, ctx),
                 Workspace::Modifiers => self.modifiers_ui(ui, ctx),
-                Workspace::Rock => self.rock_ui(ui, ctx),
-                Workspace::Detail => self.detail_ui(ui, ctx),
+                Workspace::Rock => {
+                    self.rock_ui(ui, ctx);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(
+                            "Détail de surface : sillons, cratères, vésicules, oolites, bancs.",
+                        )
+                        .small()
+                        .strong(),
+                    );
+                    self.detail_ui(ui, ctx);
+                }
                 Workspace::Sculpt => self.sculpt_panel_ui(ui, ctx),
                 Workspace::Mesh3d => self.mesh3d_panel_ui(ui, ctx),
                 Workspace::Animation => self.animation_panel_ui(ui, ctx),
@@ -7218,7 +7710,7 @@ impl VistaForgeApp {
             file_picker::PickTarget::ImportTerrain => self.files_import_path = path,
             file_picker::PickTarget::ExportTerrain => self.files_export_path = path,
             file_picker::PickTarget::Animation => self.anim_io_path = path,
-            file_picker::PickTarget::BlenderDir => self.blender_export_dir = path,
+            file_picker::PickTarget::AnimationExportDir => self.anim_export_dir = path,
             file_picker::PickTarget::Texture => {
                 self.project.materials.texture_path = path;
                 self.mark_dirty();
@@ -7422,63 +7914,30 @@ impl VistaForgeApp {
         let blender_header = egui::CollapsingHeader::new("Blender")
             .default_open(true)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Dossier");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.blender_export_dir)
-                            .desired_width(ui.available_width() - 40.0),
-                    );
-                    if ui.small_button("…").clicked() {
-                        let current = self.blender_export_dir.clone();
-                        self.file_picker.open(
-                            file_picker::PickTarget::BlenderDir,
-                            file_picker::PickMode::Directory,
-                            &current,
-                            &[],
-                        );
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Subdivision");
-                    ui.add(
-                        egui::DragValue::new(&mut self.blender_subdivision)
-                            .speed(1.0)
-                            .range(1..=4),
-                    );
-                    ui.checkbox(
-                        &mut self.blender_export_animation,
-                        "camera_animation.glb",
+                ui.label(
+                    egui::RichText::new(
+                        "Le passage vers Blender se fait depuis le module Maillage 3D : le \
+                         heightmap n'est plus exporté directement, il est d'abord cuisiné puis \
+                         sculpté, et c'est ce maillage final qui part en GLB/OBJ/STL/VFM.",
                     )
-                    .on_hover_text(
-                        "Écrit aussi la trajectoire caméra/cible dans le dossier, pour l'addon Blender.",
-                    );
-                    ui.label(
-                        egui::RichText::new("scene.glb + textures + scene.json")
-                            .small()
-                            .weak(),
-                    );
-                });
-                if self
-                    .task
-                    .as_ref()
-                    .is_some_and(|task| task.kind == jobs::TaskKind::Blender)
-                {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Export Blender en cours…");
-                    });
-                } else if ui
+                    .small(),
+                );
+                if ui
                     .add_sized(
                         [ui.available_width(), 28.0],
-                        egui::Button::new("Exporter pour Blender (GLB)"),
+                        egui::Button::new("Ouvrir le module Maillage 3D"),
+                    )
+                    .on_hover_text(
+                        "Section Vue et export : GLB (couleurs de sommets), OBJ (n-gons), STL, VFM.",
                     )
                     .clicked()
                 {
-                    self.files_export_blender(ctx);
+                    self.workspace = Workspace::Mesh3d;
                 }
                 ui.label(
                     egui::RichText::new(
-                        "Importer dans Blender : File > Import > glTF 2.0, ou l'addon bridge/blender/vistaforge_io.py pour les trajectoires.",
+                        "Les trajectoires caméra restent exportables depuis le module Animation \
+                         (.glb, .vfcam, CSV).",
                     )
                     .small()
                     .weak(),
@@ -7607,63 +8066,185 @@ impl VistaForgeApp {
         }
     }
 
-    fn files_export_blender(&mut self, ctx: &egui::Context) {
-        let out_dir = PathBuf::from(self.blender_export_dir.trim());
-        if out_dir.as_os_str().is_empty() {
-            self.files_status = "Blender : dossier vide".into();
-            return;
-        }
-        let project = self.project.clone();
-        let heightfield = Arc::clone(&self.heightfield);
-        let subdivision = self.blender_subdivision;
-        let include_animation = self.blender_export_animation;
-        let status_dir = out_dir.display().to_string();
-        let title = format!("Export Blender vers {status_dir}…");
-        if self.start_task(
-            ctx,
-            jobs::TaskKind::Blender,
-            title.clone(),
-            move |progress| {
-                progress.set_phase("Construction du maillage et des textures…");
-                progress.set_indeterminate();
-                let options = vf_export::ExportOptions {
-                    subdivision,
-                    ..vf_export::ExportOptions::default()
-                };
-                let report =
-                    match vf_export::export_project(&project, &heightfield, &out_dir, &options) {
-                        Ok(report) => report,
-                        Err(error) => {
-                            return jobs::TaskResult::Failed(format!("Blender : échec — {error}"));
-                        }
-                    };
-                let mut note = None;
-                if include_animation && project.rig.enabled {
-                    progress.set_phase("Export de la trajectoire caméra…");
-                    progress.set(0.85);
-                    match vf_export::export_animation(
-                        &out_dir.join("camera_animation.glb"),
-                        &project.rig,
-                        &heightfield,
-                        project.seed,
-                    ) {
-                        Ok(animation) => {
-                            note = Some(format!(
-                                "trajectoire {} images → camera_animation.glb",
-                                animation.frames
-                            ));
-                        }
-                        Err(error) => {
-                            note = Some(format!("trajectoire non exportée : {error}"));
+    /// Inside / outside / up / down offset of the pursuit aim.
+    ///
+    /// Constant offset plus an optional per-key curve that adds to it, so a
+    /// shot can look inside the bend at the start and outside at the end
+    /// without authoring explicit camera angles.
+    fn pursuit_angles_ui(&mut self, ui: &mut egui::Ui) {
+        let duration = self.project.rig.duration_s.max(0.1);
+        let mut changed = false;
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Décalage de poursuite")
+                .small()
+                .strong(),
+        );
+        {
+            let pursuit = &mut self.project.rig.target.pursuit;
+            changed |= ui
+                .checkbox(&mut pursuit.enabled, "Décaler l'angle de visée")
+                .on_hover_text(
+                    "Tourne la direction caméra → cible autour de l'œil : vise l'intérieur ou \
+                     l'extérieur du virage, ou plus haut/bas, sans changer la distance de mise au \
+                     point.",
+                )
+                .changed();
+            ui.add_enabled_ui(pursuit.enabled, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (label, yaw, pitch, hover) in [
+                        (
+                            "Intérieur",
+                            25.0,
+                            0.0,
+                            "Regarder vers l'intérieur du virage.",
+                        ),
+                        (
+                            "Extérieur",
+                            -25.0,
+                            0.0,
+                            "Regarder vers l'extérieur du virage.",
+                        ),
+                        ("Haut", 0.0, 20.0, "Viser plus haut que la cible."),
+                        ("Bas", 0.0, -20.0, "Viser plus bas que la cible."),
+                        ("Aucun", 0.0, 0.0, "Revenir à la visée directe."),
+                    ] {
+                        if ui.button(label).on_hover_text(hover).clicked() {
+                            pursuit.yaw_deg = yaw;
+                            pursuit.pitch_deg = pitch;
+                            changed = true;
                         }
                     }
+                });
+                changed |= param_f32(
+                    ui,
+                    "Lacet (intérieur > 0)",
+                    "°",
+                    &mut pursuit.yaw_deg,
+                    -75.0,
+                    75.0,
+                    0.0,
+                );
+                changed |= param_f32(
+                    ui,
+                    "Tangage (haut > 0)",
+                    "°",
+                    &mut pursuit.pitch_deg,
+                    -60.0,
+                    60.0,
+                    0.0,
+                );
+                ui.horizontal(|ui| {
+                    if pursuit.keys.is_empty() {
+                        if ui
+                            .button("Décalage par keyframe…")
+                            .on_hover_text(
+                                "Ajoute une courbe d'offsets entre deux temps : le décalage \
+                                 constant devient la base, la courbe le module le long du vol.",
+                            )
+                            .clicked()
+                        {
+                            pursuit.keys = vec![
+                                vf_core::PursuitKey {
+                                    time_s: 0.0,
+                                    yaw_deg: 0.0,
+                                    pitch_deg: 0.0,
+                                },
+                                vf_core::PursuitKey {
+                                    time_s: duration,
+                                    yaw_deg: 0.0,
+                                    pitch_deg: 0.0,
+                                },
+                            ];
+                            changed = true;
+                        }
+                    } else if ui
+                        .button("Supprimer la courbe")
+                        .on_hover_text("Garde seulement le décalage constant.")
+                        .clicked()
+                    {
+                        pursuit.keys.clear();
+                        changed = true;
+                    }
+                    if !pursuit.keys.is_empty()
+                        && ui
+                            .button("Ajouter un temps")
+                            .on_hover_text("Nouvelle clé de décalage à la fin de la séquence.")
+                            .clicked()
+                    {
+                        let last = pursuit
+                            .keys
+                            .iter()
+                            .map(|key| key.time_s)
+                            .fold(0.0f32, f32::max);
+                        pursuit.keys.push(vf_core::PursuitKey {
+                            time_s: (last + 1.0).min(duration),
+                            yaw_deg: pursuit.yaw_deg,
+                            pitch_deg: pursuit.pitch_deg,
+                        });
+                        changed = true;
+                    }
+                });
+                if !pursuit.keys.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Courbe par keyframe (s'ajoute au décalage constant)")
+                            .small()
+                            .weak(),
+                    );
+                    let mut remove = None;
+                    for (index, key) in pursuit.keys.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut key.time_s)
+                                        .speed(0.05)
+                                        .range(0.0..=600.0)
+                                        .prefix("t ")
+                                        .suffix(" s"),
+                                )
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut key.yaw_deg)
+                                        .speed(0.5)
+                                        .range(-90.0..=90.0)
+                                        .prefix("lacet ")
+                                        .suffix("°"),
+                                )
+                                .changed();
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut key.pitch_deg)
+                                        .speed(0.5)
+                                        .range(-60.0..=60.0)
+                                        .prefix("tangage ")
+                                        .suffix("°"),
+                                )
+                                .changed();
+                            if ui
+                                .small_button("−")
+                                .on_hover_text("Supprimer ce temps")
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                        });
+                    }
+                    if let Some(index) = remove {
+                        pursuit.keys.remove(index);
+                        changed = true;
+                    }
                 }
-                progress.set(1.0);
-                jobs::TaskResult::BlenderExported { report, note }
-            },
-        ) {
-            self.files_status = format!("{title} (l'interface reste utilisable)");
-            self.status = self.files_status.clone();
+            });
+        }
+        if changed {
+            self.project
+                .rig
+                .target
+                .pursuit
+                .keys
+                .sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+            self.mark_animation_changed();
         }
     }
 
@@ -8767,8 +9348,26 @@ impl VistaForgeApp {
             repaint.request_repaint();
         });
         self.hillshade_task = Some(HillshadeTask { receiver, revision });
+        self.sculpt_hillshade_at = Some(Instant::now());
         self.sculpt_texture_dirty = false;
-        self.sculpt_status = "Calcul de l'ombrage en arrière-plan…".into();
+    }
+
+    /// Ask for a live shading refresh while a stroke is in progress.
+    ///
+    /// Throttled: the worker holds an `Arc` clone of the heightfield, so the
+    /// next brush stamp has to copy the whole terrain (copy-on-write). One
+    /// refresh every ~120 ms keeps the canvas alive without paying that copy at
+    /// every pointer event. Without this, the canvas only updated when the
+    /// button was released, which made fine sculpting look like it did nothing.
+    fn request_live_hillshade(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .sculpt_hillshade_at
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_millis(120));
+        if due {
+            self.sculpt_hillshade_at = Some(now);
+            self.sculpt_texture_dirty = true;
+        }
     }
 
     fn poll_hillshade(&mut self, ctx: &egui::Context) {
@@ -8788,9 +9387,6 @@ impl VistaForgeApp {
                         egui::TextureOptions::LINEAR,
                     ));
                     self.sculpt_texture_dirty = false;
-                    if self.sculpt_status == "Calcul de l'ombrage en arrière-plan…" {
-                        self.sculpt_status = "Ombrage à jour.".into();
-                    }
                 } else {
                     // The terrain or the light changed while the worker was
                     // busy: compute a fresh pass instead of showing stale shade.
@@ -8961,6 +9557,8 @@ impl VistaForgeApp {
                 brush_mode_label(self.sculpt_brush.mode),
                 self.sculpt_brush.radius_m
             );
+            // Show the fresh relief while the button is still down.
+            self.request_live_hillshade();
         }
         if response.dragged_by(egui::PointerButton::Primary)
             && let Some(pointer) = response.hover_pos()
@@ -8974,6 +9572,7 @@ impl VistaForgeApp {
                 world.1,
             );
             self.sculpt_stroke = Some(stroke);
+            self.request_live_hillshade();
         }
         if primary_released && let Some(stroke) = self.sculpt_stroke.take() {
             if let Some(undo) = stroke.finish(&self.heightfield) {
@@ -9047,40 +9646,90 @@ impl VistaForgeApp {
         );
     }
 
-    fn mesh3d_create_from_terrain(&mut self) {
-        let settings = vf_sculpt::terrain::TerrainMeshSettings {
-            resolution: 256,
-            close_slab: true,
-            floor_z: self.heightfield.min_max().0 - 25.0,
-            uv_scale_m: 8.0,
-            refine_steep: false,
-            max_edge_m: 1.0,
-            max_vertices: 500_000,
-        };
-        let mut document =
-            vf_sculpt::doc::SculptDocument::from_heightfield(&self.heightfield, settings);
-        document.name = self
+    /// Scale one camera segment's duration: the segment's end key moves and
+    /// every later key shifts with it, so the rest of the timing is preserved.
+    fn retime_camera_segment(&mut self, index: usize, factor: f32) {
+        let keys = &mut self.project.rig.eye.keys;
+        if index + 1 >= keys.len() || !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        let start = keys[index].time_s;
+        let end = keys[index + 1].time_s;
+        let duration = (end - start).max(1e-3);
+        let new_end = (start + duration * factor).clamp(start + 0.02, start + 600.0);
+        let delta = new_end - end;
+        for key in keys.iter_mut().skip(index + 1) {
+            key.time_s = (key.time_s + delta).clamp(0.0, 600.0);
+        }
+        if let Some(last) = keys.last().map(|key| key.time_s)
+            && last > self.project.rig.duration_s
+        {
+            self.project.rig.duration_s = last.clamp(0.1, 600.0);
+        }
+        self.rig_status = format!(
+            "Segment {} → {:.2} s ({:+.0} %)",
+            index + 1,
+            (new_end - start).max(0.0),
+            (factor - 1.0) * 100.0
+        );
+        self.mark_animation_changed();
+    }
+
+    /// Send the finished heightmap to the 3D mesh module.
+    ///
+    /// The heightmap is finalised on a worker (modifier stack, cliff pass,
+    /// continuous detail) and turned into the sculpt mesh; the heightmap is
+    /// never modified. Re-importing later discards the sculpting, which the
+    /// panel asks to confirm first.
+    fn transfer_heightmap_to_mesh3d(&mut self, ctx: &egui::Context) {
+        let heightfield = Arc::clone(&self.heightfield);
+        let project = self.project.clone();
+        let settings = self.mesh3d_transfer;
+        let fingerprint = heightfield_fingerprint(&self.heightfield);
+        let size = (self.heightfield.width(), self.heightfield.height());
+        let (spacing_x, spacing_y) = self.heightfield.spacing();
+        let cell = spacing_x.max(spacing_y) as f32;
+        let name = self
             .project_path
             .as_ref()
             .and_then(|path| path.file_stem())
             .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Sculpture".into());
-        self.mesh3d_distance = (document.mesh.bounds().size().length() * 1.35).max(8.0);
-        self.mesh3d_target = document.mesh.bounds().center();
-        // A 3 m brush on a 15 km terrain with ~80 m faces selects no vertex
-        // and looks broken. Start at roughly one cell so the first click is
-        // visible; the cursor and the panel explain the effective radius.
-        let size = document.mesh.bounds().size();
-        let cell = (size.x.max(size.y) / 256.0).max(0.05);
-        document.brush.radius_m = (cell * 1.8).clamp(3.0, 120.0);
-        let radius = document.brush.radius_m;
-        self.mesh3d = Some(document);
-        self.mesh3d_dirty = true;
-        self.mesh3d_stats = None;
-        self.mesh3d_full_at = None;
-        self.mesh3d_status = format!(
-            "Maillage créé depuis le terrain. Rayon initial ajusté à {radius:.1} m (taille des faces). Clic gauche pour sculpter."
-        );
+            .unwrap_or_else(|| project.meta.name.clone());
+        let title = "Passage du heightmap au maillage 3D…".to_string();
+        let started = Instant::now();
+        if self.start_task(
+            ctx,
+            jobs::TaskKind::MeshTransfer,
+            title.clone(),
+            move |progress| {
+                progress.set_indeterminate();
+                let mut phase = |label: &str| progress.set_phase(label);
+                match build_mesh_from_heightmap(&heightfield, &project, settings, &mut phase) {
+                    Ok((mesh, summary)) => {
+                        progress.set_phase("Construction du BVH et des statistiques…");
+                        let mut document = vf_sculpt::doc::SculptDocument::new(name, mesh);
+                        // A brush smaller than one face selects no vertex and
+                        // looks broken: start at roughly one cell.
+                        document.brush.radius_m = (cell * 1.8).clamp(0.5, 60.0);
+                        progress.set(1.0);
+                        jobs::TaskResult::MeshTransferred {
+                            document: Box::new(document),
+                            summary: format!(
+                                "{summary} · {}² · {} ms",
+                                size.0,
+                                started.elapsed().as_millis()
+                            ),
+                            revision: fingerprint,
+                        }
+                    }
+                    Err(error) => {
+                        jobs::TaskResult::Failed(format!("Passage heightmap → maillage : {error}"))
+                    }
+                }
+            },
+        ) {
+            self.status = format!("{title} (l'interface reste utilisable)");
+        }
     }
 
     fn mesh3d_fit_camera(&mut self) {
@@ -9112,24 +9761,140 @@ impl VistaForgeApp {
         self.mesh3d_status = format!("Vue {label} : yaw {yaw:.0}°, pitch {pitch:.0}°.");
     }
 
+    /// Options of the one-way heightmap → mesh transfer, shared by the welcome
+    /// card and the re-import block.
+    fn mesh3d_transfer_options_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Finition reprise du heightmap")
+                .small()
+                .strong(),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Densité");
+            for subdivision in [1u32, 2, 3, 4] {
+                if ui
+                    .selectable_label(
+                        self.mesh3d_transfer.subdivision == subdivision,
+                        format!("×{subdivision}"),
+                    )
+                    .on_hover_text(match subdivision {
+                        1 => "Un sommet par cellule du heightmap.",
+                        2 => "Deux sommets par cellule : capte les bancs de 2 cellules.",
+                        _ => "Raffinement plus fin (ou adaptatif) : plus lourd à sculpter.",
+                    })
+                    .clicked()
+                {
+                    self.mesh3d_transfer.subdivision = subdivision;
+                }
+            }
+        });
+        ui.checkbox(
+            &mut self.mesh3d_transfer.detail,
+            "Inclure le détail rocheux du rendu (géométrie)",
+        )
+        .on_hover_text(
+            "Le détail continu (vf-detail) n'existe que dans le rendu final : cette case le \
+             cuit en vraie géométrie, avec la subdivision adaptative, pour que le maillage et \
+             Blender le voient.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Finesse");
+            ui.add(
+                egui::DragValue::new(&mut self.mesh3d_transfer.tolerance_m)
+                    .speed(0.01)
+                    .range(0.02..=2.0)
+                    .suffix(" m"),
+            )
+            .on_hover_text(
+                "Écart maximal entre le maillage et la surface du heightmap : plus petit = plus \
+                 de triangles et de détail conservé. 0,15 m garde les bancs de quelques mètres.",
+            );
+        });
+        ui.checkbox(
+            &mut self.mesh3d_transfer.cliffs,
+            "Appliquer le pass falaises",
+        )
+        .on_hover_text("Le même pass que le rendu final, avant la conversion en maillage.");
+        ui.checkbox(
+            &mut self.mesh3d_transfer.close_slab,
+            "Fermer la dalle sous le terrain",
+        )
+        .on_hover_text("Nécessaire pour la fracture, l'impression 3D et l'export STL.");
+        let (spacing_x, spacing_y) = self.heightfield.spacing();
+        let cell = spacing_x.max(spacing_y);
+        ui.label(
+            egui::RichText::new(format!(
+                "Heightmap {}×{} · {:.2} m/cellule · budget {} M sommets",
+                self.heightfield.width(),
+                self.heightfield.height(),
+                cell,
+                self.mesh3d_transfer.max_vertices / 1_000_000
+            ))
+            .small()
+            .weak(),
+        );
+    }
+
+    /// Start the 3D module from a closed rock wall instead of the heightmap:
+    /// the same one-way contract, with no terrain behind it.
+    fn mesh3d_from_wall(&mut self) {
+        let wall = vf_sculpt::cliff::wall(self.mesh3d_wall_style.settings());
+        let name = format!("Paroi {}", self.mesh3d_wall_style.label());
+        let mut document = vf_sculpt::doc::SculptDocument::new(name, wall);
+        document.brush.radius_m = 1.5;
+        let bounds = document.mesh.bounds();
+        self.mesh3d_distance = (bounds.size().length() * 1.35).max(8.0);
+        self.mesh3d_target = bounds.center();
+        self.mesh3d_stats = None;
+        self.mesh3d_full_at = None;
+        self.mesh3d_source = None;
+        self.mesh3d = Some(document);
+        self.mesh3d_dirty = true;
+        self.mesh3d_status =
+            "Paroi rocheuse créée : bac à sable 3D, sans heightmap ni retour.".into();
+    }
+
     fn mesh3d_panel_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let _ = ctx;
         if self.mesh3d.is_none() {
             ui.label(
                 egui::RichText::new(
-                    "Le module 3D transforme le terrain en maillage éditable : surplombs, \
-                     fractures, impacts, fusion et parois rocheuses deviennent possibles.",
+                    "Le maillage 3D reprend la finition du heightmap puis devient indépendant : \
+                     surplombs, fractures, impacts, fusion et parois rocheuses. Le heightmap \
+                     n'est jamais modifié par ce module, et il n'y a pas de retour possible.",
                 )
                 .small(),
             );
+            ui.add_space(4.0);
+            self.mesh3d_transfer_options_ui(ui);
+            ui.add_space(4.0);
+            let busy = self
+                .task
+                .as_ref()
+                .is_some_and(|task| task.kind == jobs::TaskKind::MeshTransfer);
             if ui
-                .button("Créer le maillage depuis le terrain")
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(if busy {
+                        "Passage en cours…"
+                    } else {
+                        "Envoyer le heightmap final vers le maillage 3D"
+                    }),
+                )
                 .on_hover_text(
-                    "Convertit le heightfield courant en maillage fermé, prêt à sculpter.",
+                    "Cuit les modificateurs, le pass falaises et le détail, puis construit le \
+                     maillage sculptable. À lancer quand le heightmap est terminé.",
                 )
                 .clicked()
             {
-                self.mesh3d_create_from_terrain();
+                self.transfer_heightmap_to_mesh3d(ctx);
+            }
+            ui.separator();
+            if ui
+                .button("… ou partir d'une paroi rocheuse")
+                .on_hover_text("Maillage de paroi fermé, sans heightmap.")
+                .clicked()
+            {
+                self.mesh3d_from_wall();
             }
             return;
         }
@@ -9156,9 +9921,9 @@ impl VistaForgeApp {
         };
         ui.label(
             egui::RichText::new(format!(
-                "{} · {} faces · {}",
-                stats.vertices,
-                stats.faces,
+                "{} sommets · {} faces · {}",
+                grouped(stats.vertices),
+                grouped(stats.faces),
                 if stats.watertight {
                     "étanche"
                 } else {
@@ -9229,10 +9994,80 @@ impl VistaForgeApp {
             if ui.small_button("Cadrer").clicked() {
                 self.mesh3d_fit_camera();
             }
-            if ui.small_button("Recréer").clicked() {
-                self.mesh3d_create_from_terrain();
-            }
         });
+        // Provenance: the mesh is a one-way copy of the heightmap. Tell the
+        // user when the heightmap moved on, and keep the re-import explicit.
+        let fingerprint = heightfield_fingerprint(&self.heightfield);
+        let stale = self
+            .mesh3d_source
+            .as_ref()
+            .is_some_and(|source| source.fingerprint != fingerprint);
+        if let Some(source) = &self.mesh3d_source {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Reçu du heightmap {}×{} · {}",
+                    source.size.0, source.size.1, source.summary
+                ))
+                .small()
+                .weak(),
+            );
+        }
+        if stale {
+            ui.label(
+                egui::RichText::new(
+                    "Le heightmap a changé depuis l'envoi : ce maillage n'est plus à jour. \
+                     Réimportez-le pour repartir de la nouvelle surface (la sculpture actuelle \
+                     sera perdue).",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(240, 190, 120)),
+            );
+        }
+        egui::CollapsingHeader::new("Réimporter depuis le heightmap")
+            .default_open(stale)
+            .show(ui, |ui| {
+                self.mesh3d_transfer_options_ui(ui);
+                if !self.mesh3d_confirm_reimport {
+                    if ui
+                        .button(if stale {
+                            "Réimporter la surface actuelle…"
+                        } else {
+                            "Réimporter le heightmap…"
+                        })
+                        .on_hover_text(
+                            "Remplace la sculpture par la surface actuelle du heightmap.",
+                        )
+                        .clicked()
+                    {
+                        self.mesh3d_confirm_reimport = true;
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Cette opération remplace tout le maillage : sculpture, débris et \
+                             historique du module 3D seront perdus.",
+                        )
+                        .small(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new("Confirmer la réimportation")
+                                    .color(egui::Color32::from_rgb(245, 140, 120)),
+                            )
+                            .clicked()
+                        {
+                            self.mesh3d = None;
+                            self.mesh3d_source = None;
+                            self.mesh3d_confirm_reimport = false;
+                            self.transfer_heightmap_to_mesh3d(ctx);
+                        }
+                        if ui.button("Annuler").clicked() {
+                            self.mesh3d_confirm_reimport = false;
+                        }
+                    });
+                }
+            });
 
         let footprint_hint = self.mesh3d_footprint_m;
         let header = egui::CollapsingHeader::new("Pinceau de sculpture")
@@ -9755,10 +10590,10 @@ impl VistaForgeApp {
                     );
                 }
                 ui.separator();
-                ui.label("Export");
+                ui.label("Export (Blender et impression 3D)");
                 ui.text_edit_singleline(&mut self.mesh3d_export_path);
                 ui.horizontal(|ui| {
-                    for format in ["glb", "obj", "vfm"] {
+                    for format in ["glb", "obj", "stl", "vfm"] {
                         if ui.button(format.to_uppercase()).clicked() {
                             let mut path = std::path::PathBuf::from(&self.mesh3d_export_path);
                             if path.extension().is_none() {
@@ -9814,7 +10649,24 @@ impl VistaForgeApp {
 
     fn mesh3d_canvas_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if self.mesh3d.is_none() {
-            self.mesh3d_create_from_terrain();
+            // The 3D module never builds itself from the terrain on its own:
+            // the heightmap must be sent explicitly (one-way bridge).
+            let available = ui.available_size();
+            let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(
+                rect,
+                egui::CornerRadius::same(8),
+                egui::Color32::from_rgb(22, 27, 34),
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Aucun maillage 3D\nEnvoyez le heightmap final depuis le panneau de gauche",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_rgba_unmultiplied(220, 230, 245, 210),
+            );
+            return;
         }
         let available = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
@@ -11133,35 +11985,57 @@ impl eframe::App for VistaForgeApp {
                     {
                         self.workspace = Workspace::Help;
                     }
-                    ui.label(egui::RichText::new(&self.status).small());
+                    let status: String = if self.status.chars().count() > 72 {
+                        let short: String = self.status.chars().take(69).collect();
+                        format!("{short}…")
+                    } else {
+                        self.status.clone()
+                    };
+                    ui.label(egui::RichText::new(status).small())
+                        .on_hover_text(&self.status);
                 });
             });
         });
 
-        egui::Panel::top("functions").show(ui, |ui| {
+        egui::Panel::top("modules").show(ui, |ui| {
+            // Row 1: the workflow modules. Row 2: the sub-tabs of the current
+            // module, so the heightmap tools no longer compete with the 3D mesh
+            // and the animation for the same strip.
             ui.horizontal_wrapped(|ui| {
-                for workspace in Workspace::ALL {
-                    let active = self.workspace == workspace;
-                    let text = egui::RichText::new(workspace.label()).size(13.0);
-                    let tab = ui.selectable_label(active, text);
+                let active_module = Module::of(self.workspace);
+                for module in Module::ALL {
+                    let active = module == active_module;
+                    let text = egui::RichText::new(module.label()).size(15.0).strong();
+                    let tab = ui
+                        .selectable_label(active, text)
+                        .on_hover_text(module.hover());
                     if tab.hovered() {
                         self.help
-                            .register(tab.rect, help_topic_for_workspace(workspace));
+                            .register(tab.rect, help_topic_for_workspace(module.workspaces()[0]));
                     }
-                    if tab.clicked() {
-                        if self.workspace == Workspace::Animation
-                            && workspace != Workspace::Animation
-                        {
-                            self.anim_playing = false;
-                            self.anim_editor.trace = false;
-                        }
-                        self.workspace = workspace;
-                        if workspace == Workspace::Animation {
-                            self.ensure_animation_workspace(&ctx);
-                        }
+                    if tab.clicked() && !active {
+                        self.switch_module(module, &ctx);
                     }
                 }
             });
+            let module = Module::of(self.workspace);
+            if module.workspaces().len() > 1 {
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    for workspace in module.workspaces() {
+                        let active = self.workspace == *workspace;
+                        let text = egui::RichText::new(workspace.label()).size(13.0);
+                        let tab = ui.selectable_label(active, text);
+                        if tab.hovered() {
+                            self.help
+                                .register(tab.rect, help_topic_for_workspace(*workspace));
+                        }
+                        if tab.clicked() && !active {
+                            self.switch_workspace(*workspace, &ctx);
+                        }
+                    }
+                });
+            }
         });
 
         egui::Panel::left("controls")
@@ -11491,21 +12365,13 @@ fn normalized_project_path(raw: &str) -> PathBuf {
 
 fn default_scene() -> (Project, HeightField) {
     let seed = Seed::new(42);
-    let params = vf_core::terrain_params::modern_preset("alpine")
-        .expect("built-in preset")
-        .with_size_seed(514, seed.0);
-    let mut project = Project::new("Alpine valley", seed, 514);
-    project.source = TerrainSource::Modern { params };
-    project.geology = vf_core::GeologySettings::preset("sandstone").unwrap_or_default();
-    project.erosion_enabled = true;
-    project.erosion = ErosionParams::scaled_for(514);
-    let heightfield = vf_geology::build(
-        &project.source,
-        Some(&project.erosion),
-        &project.geology,
-        seed,
-    )
-    .expect("default terrain");
+    // Neutral start: a flat heightmap with no geology, no erosion and no
+    // modifier. The user adds relief from the heightmap tools; nothing is
+    // applied behind their back.
+    let mut project = Project::new("Sans titre", seed, 1026);
+    project.water.enabled = false;
+    let heightfield =
+        vf_geology::build(&project.source, None, &project.geology, seed).expect("neutral terrain");
     project.sync_terrain(&heightfield);
     project.camera = vf_scene::auto_frame(&heightfield, 16.0 / 9.0);
     project.render.width = 1280;
@@ -11578,7 +12444,6 @@ fn help_topic_for_workspace(workspace: Workspace) -> help::HelpTopic {
         Workspace::Terrain => help::HelpTopic::Terrain,
         Workspace::Modifiers => help::HelpTopic::Modifiers,
         Workspace::Rock => help::HelpTopic::Rock,
-        Workspace::Detail => help::HelpTopic::Detail,
         Workspace::Sculpt => help::HelpTopic::Sculpt,
         Workspace::Mesh3d => help::HelpTopic::Sculpt,
         Workspace::Animation => help::HelpTopic::Path,
@@ -11776,5 +12641,58 @@ mod preview_tests {
         let (_, pitch) = angle(ViewPreset::Bottom);
         close(pitch, -89.0);
         assert!(mesh3d_orbit_for(ViewPreset::Perspective).is_none());
+    }
+
+    /// The one-way bridge must hand the 3D module the *finished* heightmap,
+    /// at the heightfield's own resolution rather than a fixed coarse grid.
+    #[test]
+    fn the_heightmap_transfer_keeps_the_native_resolution() {
+        let heightfield =
+            vf_core::HeightField::new(33, 25, 10.0, 10.0, vec![0.0; 33 * 25]).expect("field");
+        let mut project = Project::new("transfert", Seed::new(5), 33);
+        project.modifiers.items.clear();
+        project.geology.enabled = false;
+        project.detail.enabled = false;
+        project.render.cliffs = false;
+        let settings = MeshTransferSettings {
+            subdivision: 1,
+            detail: false,
+            tolerance_m: 0.15,
+            cliffs: false,
+            close_slab: false,
+            max_vertices: 100_000,
+            floor_margin_m: 5.0,
+        };
+        let (mesh, summary) =
+            build_mesh_from_heightmap(&heightfield, &project, settings, |_| {}).expect("mesh");
+        assert!(summary.contains("heightmap direct"), "{summary}");
+        // 32×24 cells at one vertex per cell: 33×25 = 825 vertices, two
+        // triangles per cell.
+        assert_eq!(mesh.positions.len(), 33 * 25);
+        assert_eq!(mesh.face_count(), 32 * 24 * 2);
+        // A flat heightfield must stay flat (no invented relief).
+        assert!(mesh.positions.iter().all(|p| p.z.abs() < 1e-3));
+
+        // Closing the slab adds the floor and the four walls.
+        let settings = MeshTransferSettings {
+            close_slab: true,
+            ..settings
+        };
+        let (closed, _) =
+            build_mesh_from_heightmap(&heightfield, &project, settings, |_| {}).expect("mesh");
+        assert!(closed.face_count() > mesh.face_count());
+        assert!(closed.positions.iter().any(|p| p.z < -4.0));
+    }
+
+    #[test]
+    fn the_heightmap_fingerprint_follows_in_place_edits() {
+        let mut field =
+            vf_core::HeightField::new(17, 17, 10.0, 10.0, vec![0.0; 17 * 17]).expect("field");
+        let before = heightfield_fingerprint(&field);
+        assert_eq!(before, heightfield_fingerprint(&field));
+        let mut heights = field.heights().to_vec();
+        heights[3 * 17 + 5] = 12.0;
+        field = vf_core::HeightField::new(17, 17, 10.0, 10.0, heights).expect("edited field");
+        assert_ne!(before, heightfield_fingerprint(&field));
     }
 }

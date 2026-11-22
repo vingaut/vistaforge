@@ -98,9 +98,10 @@ pub enum TaskKind {
     ComposeWorld,
     BakeModifiers,
     Densify,
-    Blender,
     AnimationExport,
     AnimationImport,
+    /// Heightmap → 3D mesh transfer (the one-way bridge).
+    MeshTransfer,
 }
 
 /// Payload produced by a background operation.
@@ -139,15 +140,19 @@ pub enum TaskResult {
         old_width: usize,
         new_width: usize,
     },
-    BlenderExported {
-        report: vf_export::ExportReport,
-        note: Option<String>,
-    },
     AnimationExported {
         report: AnimationReport,
     },
     AnimationImported {
         imported: ImportedAnimation,
+    },
+    /// The heightmap was finalised and turned into a sculpt document.
+    MeshTransferred {
+        document: Box<vf_sculpt::doc::SculptDocument>,
+        /// One-line account of what was baked (modifiers, cliffs, detail).
+        summary: String,
+        /// Project revision the transfer was built from.
+        revision: u64,
     },
     Failed(String),
 }

@@ -9,6 +9,137 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Explicit orientation attached to a key, in degrees.
+///
+/// `yaw_deg` rotates around the world Z axis (positive = turn left),
+/// `pitch_deg` around the screen-right axis (positive = look up) and
+/// `roll_deg` around the view axis. They replace the look-at direction at that
+/// key; between two keys the rig fades back to the pursuit aim, so a single
+/// oriented key never pops.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KeyAngles {
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+    pub roll_deg: f32,
+}
+
+impl KeyAngles {
+    pub fn is_finite(self) -> bool {
+        self.yaw_deg.is_finite() && self.pitch_deg.is_finite() && self.roll_deg.is_finite()
+    }
+
+    /// Wrap the angles into (-180, 180] and clamp the pitch short of the poles.
+    pub fn normalized(self) -> Self {
+        fn wrap(value: f32) -> f32 {
+            let mut wrapped = (value + 180.0).rem_euclid(360.0) - 180.0;
+            if wrapped <= -180.0 {
+                wrapped += 360.0;
+            }
+            wrapped
+        }
+        Self {
+            yaw_deg: wrap(self.yaw_deg),
+            pitch_deg: self.pitch_deg.clamp(-89.0, 89.0),
+            roll_deg: wrap(self.roll_deg),
+        }
+    }
+}
+
+/// One authored offset for the pursuit aim, at a given time.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PursuitKey {
+    pub time_s: f32,
+    /// Positive = toward the inside of the turn, negative = outside.
+    pub yaw_deg: f32,
+    /// Positive = look higher than the target, negative = lower.
+    pub pitch_deg: f32,
+}
+
+/// Angular offset applied to the pursuit aim point.
+///
+/// `yaw_deg`/`pitch_deg` are a constant offset; `keys` adds a per-key curve on
+/// top (interpolated, empty = constant only). The rotation is applied around the
+/// eye, so the aim point keeps its distance and the focus distance does not
+/// change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PursuitAngles {
+    pub enabled: bool,
+    /// Positive = toward the inside of the curve, negative = outside.
+    pub yaw_deg: f32,
+    /// Positive = above the target, negative = below.
+    pub pitch_deg: f32,
+    /// Extra offsets authored per keyframe, seconds.
+    pub keys: Vec<PursuitKey>,
+}
+
+impl Default for PursuitAngles {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            yaw_deg: 0.0,
+            pitch_deg: 0.0,
+            keys: Vec::new(),
+        }
+    }
+}
+
+impl PursuitAngles {
+    /// True when the offset actually moves the aim.
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && (self.yaw_deg.abs() > 1e-4
+                || self.pitch_deg.abs() > 1e-4
+                || self
+                    .keys
+                    .iter()
+                    .any(|key| key.yaw_deg.abs() > 1e-4 || key.pitch_deg.abs() > 1e-4))
+    }
+
+    /// Constant offset plus the interpolated per-key curve at `time_s`.
+    pub fn offset_at(&self, time_s: f32) -> (f32, f32) {
+        if self.keys.is_empty() {
+            return (self.yaw_deg, self.pitch_deg);
+        }
+        let mut keys = self.keys.clone();
+        keys.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+        let (mut yaw, mut pitch) = (self.yaw_deg, self.pitch_deg);
+        if time_s <= keys[0].time_s {
+            return (yaw + keys[0].yaw_deg, pitch + keys[0].pitch_deg);
+        }
+        let last = keys[keys.len() - 1];
+        if time_s >= last.time_s {
+            return (yaw + last.yaw_deg, pitch + last.pitch_deg);
+        }
+        for pair in keys.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if time_s >= a.time_s && time_s <= b.time_s {
+                let span = (b.time_s - a.time_s).max(1e-6);
+                let t = (time_s - a.time_s) / span;
+                let t = t * t * (3.0 - 2.0 * t);
+                yaw += a.yaw_deg + (b.yaw_deg - a.yaw_deg) * t;
+                pitch += a.pitch_deg + (b.pitch_deg - a.pitch_deg) * t;
+                return (yaw, pitch);
+            }
+        }
+        (yaw, pitch)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if !self.yaw_deg.is_finite() || !self.pitch_deg.is_finite() {
+            return Err("pursuit angles must be finite".into());
+        }
+        if self.keys.iter().any(|key| {
+            !key.time_s.is_finite() || !key.yaw_deg.is_finite() || !key.pitch_deg.is_finite()
+        }) {
+            return Err("pursuit keys must be finite".into());
+        }
+        Ok(())
+    }
+}
+
 /// One authored key on a 3D path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +154,8 @@ pub struct PathKey {
     pub out_handle: [f64; 3],
     /// 0 = linear segment, 1 = fully eased.
     pub ease: f32,
+    /// Explicit orientation for this key; `None` keeps the pursuit aim.
+    pub angles: Option<KeyAngles>,
 }
 
 impl Default for PathKey {
@@ -33,6 +166,7 @@ impl Default for PathKey {
             in_handle: [-300.0, 0.0, 0.0],
             out_handle: [300.0, 0.0, 0.0],
             ease: 0.5,
+            angles: None,
         }
     }
 }
@@ -52,12 +186,19 @@ impl PathKey {
             // follow by lagging behind the curve. Users can still raise
             // `Adoucissement` on a key when they want an ease in/out.
             ease: 0.0,
+            angles: None,
         }
     }
 
     pub fn with_handles(mut self, in_handle: [f64; 3], out_handle: [f64; 3]) -> Self {
         self.in_handle = in_handle;
         self.out_handle = out_handle;
+        self
+    }
+
+    /// Set (or clear) the explicit orientation of this key.
+    pub fn with_angles(mut self, angles: Option<KeyAngles>) -> Self {
+        self.angles = angles.map(KeyAngles::normalized);
         self
     }
 }
@@ -102,6 +243,9 @@ impl Path3D {
                 || key.out_handle.iter().any(|v| !v.is_finite())
             {
                 return Err("path key contains non-finite values".into());
+            }
+            if key.angles.is_some_and(|angles| !angles.is_finite()) {
+                return Err("path key angles must be finite".into());
             }
         }
         if self.keys.last().is_some_and(|key| key.time_s <= 0.0) {
@@ -156,6 +300,8 @@ pub struct TargetRig {
     pub offset: [f64; 3],
     /// Smoothing of the aim point, 0 = snap, 1 = heavy.
     pub smoothing: f32,
+    /// Angular offset of the pursuit aim (inside/outside/up/down).
+    pub pursuit: PursuitAngles,
 }
 
 impl TargetMode {
@@ -178,6 +324,7 @@ impl Default for TargetRig {
             lead_s: 0.35,
             offset: [0.0, 0.0, 0.0],
             smoothing: 0.35,
+            pursuit: PursuitAngles::default(),
         }
     }
 }
@@ -717,6 +864,9 @@ impl CameraRig {
         if self.target.mode == TargetMode::Path {
             self.target.path.validate()?;
         }
+        // The pursuit curve is read whatever the target mode, so it must be
+        // validated unconditionally.
+        self.target.pursuit.validate()?;
         if !(1.0..=170.0).contains(&self.optics.fov_y_deg) {
             return Err("rig fov must be in 1..=170 degrees".into());
         }

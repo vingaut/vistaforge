@@ -13,17 +13,36 @@ fractures traversantes, impacts, coulées de lave, blocs qui tombent et s'empile
 ![Espace Maillage 3D](screenshots/maillage3d.png)
 
 ## Démarrage rapide
-1. Ouvrir un projet, puis l'onglet **Maillage 3D**.
-2. Le maillage est créé automatiquement depuis le terrain à la première visite
-   (256 cellules sur le côté long, dalle fermée sous le point le plus bas). Le
-   rayon du pinceau est ajusté à la taille des faces pour que le premier clic
-   soit visible.
-3. **Clic gauche** : sculpter. **Clic droit** ou **Maj + clic gauche** : orbite.
-   **Molette** : zoom. Le curseur montre la zone d'effet et la normale de contact (voir
-   ci-dessous).
-4. Le **gizmo d'orientation** en haut à droite recadre la vue (face, axe, maison).
-5. Le panneau gauche contient les outils, la roche, le remesh, la fracture, les
+
+Le module 3D est le **second temps** du travail : on termine d'abord le heightmap
+(Base, Sculpter, Modificateurs, Roche & détail, Érosion, Eau), puis on l'envoie
+**une seule fois** au maillage.
+
+1. Terminez le heightmap dans le module **Heightmap**.
+2. Ouvrez l'onglet **Maillage 3D** : il affiche « Aucun maillage 3D » tant que
+   rien n'a été envoyé.
+3. Choisissez la **finition reprise** (densité, finesse, détail, falaises, dalle)
+   puis cliquez **Envoyer le heightmap final vers le maillage 3D**. Le passage
+   cuit la pile de modificateurs, le pass falaises et le détail continu du
+   rendu, puis construit un maillage à la résolution du heightmap (et non plus
+   une grille de 256 cellules comme avant) : c'est la surface finale qui devient
+   sculptable.
+4. **Clic gauche** : sculpter. **Clic droit** ou **Maj + clic gauche** : orbite.
+   **Molette** : zoom. Le curseur montre la zone d'effet et la normale de contact.
+5. Le **gizmo d'orientation** en haut à droite recadre la vue (face, axe, maison).
+6. Le panneau gauche contient les outils, la roche, le remesh, la fracture, les
    parois et l'export.
+
+> **Sens unique.** Le maillage ne réécrit jamais le heightmap, et le heightmap
+> ne met jamais à jour le maillage. Si vous retouchez le heightmap après
+> l'envoi, le panneau 3D l'indique (« Le heightmap a changé depuis l'envoi ») et
+> propose **Réimporter depuis le heightmap**, qui remplace la sculpture après
+> confirmation. C'est le seul aller-retour possible, et il est explicite.
+
+> **Blender.** Le passage vers Blender se fait depuis ce module (GLB, OBJ, STL,
+> VFM) : le heightmap n'est plus exporté directement. La section Blender de
+> l'onglet Fichiers renvoie ici.
+
 
 Le rendu du viewport est un rasteriseur CPU multi-thread (z-buffer, filaire réel,
 modes Roche / Peinture / Normales / Masque / Matériaux / Profondeur / Occlusion).
@@ -248,6 +267,9 @@ disponible. Le panneau `SculptStats` affiche sommets, faces, mémoire, composant
 étanchéité, aire et volume.
 
 ## Export et Blender
+
+C'est **le seul chemin vers Blender** : la section Blender de l'onglet Fichiers
+ne propose plus d'export du heightmap, elle renvoie ici.
 
 | Format | Ce qui est conservé |
 | --- | --- |

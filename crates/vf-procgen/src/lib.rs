@@ -28,6 +28,13 @@ pub fn generate(
     let mut hf = match source {
         TerrainSource::Classic { params } => classic::generate(params)?,
         TerrainSource::Modern { params } => modern::generate(params)?,
+        // Neutral base: a constant altitude, no noise at all. The user adds
+        // relief on purpose (generation preset, brush, modifier, erosion).
+        TerrainSource::Flat { size, height_m } => {
+            let size = (*size).clamp(2, 16_384) as usize;
+            let spacing = DEFAULT_WORLD_EXTENT_M / (size - 1) as f64;
+            HeightField::new(size, size, spacing, spacing, vec![*height_m; size * size])?
+        }
         TerrainSource::Dem { .. } => {
             return Err(vf_core::Error::Unsupported(
                 "DEM sources must be imported through vf-io".into(),
@@ -59,5 +66,21 @@ mod tests {
         let eroded = generate(&source, Some(&params), Seed::new(8)).unwrap();
         assert_ne!(plain.heights(), eroded.heights());
         assert_eq!(eroded.width(), 129);
+    }
+
+    /// The neutral source is what a new project starts from: a constant height,
+    /// no noise, no erosion effect.
+    #[test]
+    fn a_flat_source_is_a_constant_heightfield() {
+        let source = TerrainSource::flat(65, 12.5);
+        let plain = generate(&source, None, Seed::new(3)).unwrap();
+        assert_eq!((plain.width(), plain.height()), (65, 65));
+        assert!(plain.heights().iter().all(|height| *height == 12.5));
+        let eroded = generate(&source, Some(&ErosionParams::default()), Seed::new(3)).unwrap();
+        assert_eq!(
+            eroded.heights(),
+            plain.heights(),
+            "eroding a flat surface must not invent relief"
+        );
     }
 }

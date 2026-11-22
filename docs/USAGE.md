@@ -21,6 +21,30 @@ cargo run --release -p vf-app
 Sans `--seed`, un seed aléatoire est tiré puis affiché : conservez-le pour
 reproduire exactement le paysage.
 
+### Modules : Heightmap → Maillage 3D → Animation
+
+La barre de modules sépare les trois temps du travail :
+
+| Module | Sous-onglets | Rôle |
+| --- | --- | --- |
+| **Heightmap** | Base, Sculpter, Modificateurs, Roche & détail, Érosion, Eau | tout ce qui se règle sur la grille d'altitude |
+| **Maillage 3D** | — | sculpture du maillage final, fracture, parois, export Blender |
+| **Animation** | Tracé, Réglages, Profil, Lecture | caméra, cible, clés, vitesses |
+| **Scène** | Matières, Lumière, Caméra, Rendu | lumière, palette, rendu final |
+| **Fichiers** | — | projet, DEM, heightmaps, trajectoires |
+| **Aide** | — | fiches contextuelles |
+
+Le passage du heightmap au maillage est **à sens unique** : on termine le
+heightmap, on l'envoie une fois (le module 3D cuit modificateurs, falaises et
+détail continu, à la résolution du heightmap), puis la sculpture vit sa vie. Un
+retour est possible mais explicite : **Réimporter depuis le heightmap**, avec
+confirmation. L'export Blender part désormais **uniquement** du maillage 3D.
+
+Un projet neuf démarre sur une surface **neutre** (altitude constante, aucun
+bruit, aucun modificateur, ni géologie ni érosion). Le relief s'ajoute avec
+l'onglet **Base** (Plat / Classic / Modern), les pinceaux, les modificateurs ou
+l'érosion : rien n'est appliqué dans le dos de l'utilisateur.
+
 ## Annuler, rétablir et opérations longues
 
 Dans l'interface, **Annuler** et **Rétablir** sont dans la barre d'outils et
@@ -97,6 +121,12 @@ pendant le calcul. Une seule opération de fichier ou de terrain est acceptée �
 la fois ; le bouton ou le raccourci suivant attend la fin de la précédente.
 
 ## Génération de terrain
+
+Depuis l'interface, l'onglet **Base** propose trois points de départ : **Plat**
+(surface neutre, rien n'est appliqué), **Classic** et **Modern**. Le bouton
+change de libellé (« Réinitialiser à plat » / « Générer le relief ») et
+remplace le heightmap courant ; les sculptures déjà faites sont perdues, donc
+enregistrez le projet avant.
 
 | Mode | Paramètres principaux | Style |
 |---|---|---|

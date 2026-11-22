@@ -9,8 +9,8 @@
 
 use glam::DVec3;
 use vf_core::{
-    AircraftPreset, Camera, CameraLink, CameraRig, HeightField, MotionProfile, Path3D, Seed,
-    TargetMode,
+    AircraftPreset, Camera, CameraLink, CameraRig, HeightField, KeyAngles, MotionProfile, Path3D,
+    Seed, TargetMode,
 };
 use vf_procgen::Noise;
 
@@ -323,7 +323,14 @@ impl<'a> RigSimulation<'a> {
         // constant combines the user smoothing, the body look lag and a small
         // floor. This is what stops the aim (and therefore the horizon) from
         // snapping when the avoidance vector changes.
-        let mut desired_target = sample_target(self.rig, t, self.eye_pos, self.eye_vel);
+        // Lateral acceleration drives the inside/outside pursuit offset.
+        let speed_sq = self.eye_vel.length_squared();
+        let lateral = if speed_sq > 1e-6 {
+            self.eye_acc - self.eye_vel * (self.eye_acc.dot(self.eye_vel) / speed_sq)
+        } else {
+            DVec3::ZERO
+        };
+        let mut desired_target = sample_aim(self.rig, t, self.eye_pos, self.eye_vel, lateral);
         if self.rig.constraints.relative_altitude
             && matches!(
                 self.rig.target.mode,
@@ -495,6 +502,39 @@ impl<'a> RigSimulation<'a> {
         }
         let mut up = right.cross(forward).normalize_or_zero();
 
+        // Explicit orientation authored on the camera keys. The weight fades
+        // to zero between two ordinary keys, so a single oriented key never
+        // pops the framing.
+        let explicit = sample_key_angles(&self.rig.eye, self.time);
+        let mut key_roll = 0.0f64;
+        if let Some((angles, weight)) = explicit
+            && weight > 1e-3
+        {
+            let yaw = (angles.yaw_deg as f64).to_radians() * weight;
+            let pitch = (angles.pitch_deg as f64).to_radians() * weight;
+            let mut oriented = forward;
+            if yaw.abs() > 1e-9 {
+                let (s, c) = yaw.sin_cos();
+                let axis = up.normalize_or_zero();
+                oriented = (oriented * c
+                    + axis.cross(oriented) * s
+                    + axis * axis.dot(oriented) * (1.0 - c))
+                    .normalize_or_zero();
+            }
+            if pitch.abs() > 1e-9 {
+                let axis = oriented.cross(UP).normalize_or_zero();
+                let (s, c) = pitch.sin_cos();
+                oriented = (oriented * c
+                    + axis.cross(oriented) * s
+                    + axis * axis.dot(oriented) * (1.0 - c))
+                    .normalize_or_zero();
+            }
+            forward = oriented;
+            right = forward.cross(UP).normalize_or_zero();
+            up = right.cross(forward).normalize_or_zero();
+            key_roll = (angles.roll_deg as f64).to_radians() * weight;
+        }
+
         // Shake: deterministic low-frequency noise, applied as small yaw/pitch
         // perturbations before the roll.
         let shake = &self.rig.body;
@@ -524,7 +564,7 @@ impl<'a> RigSimulation<'a> {
             up = right.cross(forward).normalize_or_zero();
         }
 
-        let roll = (self.roll + self.rig.optics.roll_deg).to_radians() as f64;
+        let roll = (self.roll + self.rig.optics.roll_deg).to_radians() as f64 + key_roll;
         let (s, c) = roll.sin_cos();
         let rolled_up = up * c + right * s;
         let rolled_right = right * c - up * s;
@@ -799,7 +839,7 @@ fn target_uses_relative_ground(rig: &CameraRig) -> bool {
 
 fn initial_target(rig: &CameraRig, eye: DVec3) -> DVec3 {
     let velocity = path_derivative(&rig.eye, 0.0);
-    sample_target(rig, 0.0, eye, velocity)
+    sample_aim(rig, 0.0, eye, velocity, DVec3::ZERO)
 }
 
 /// Aim point for the authored target, before `TargetRig::offset` is added.
@@ -847,6 +887,105 @@ pub fn sample_target(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3) -> DV
             eye + direction * 500.0
         }
     }
+}
+
+/// Explicit orientation carried by the camera keys, with its fade weight.
+///
+/// Returns `None` when no key carries angles. `weight` rises to 1 on a key that
+/// has them and falls to 0 on a neighbour that does not, so a partially
+/// authored path frames smoothly instead of snapping.
+pub fn sample_key_angles(path: &Path3D, t: f32) -> Option<(KeyAngles, f64)> {
+    if path.keys.len() < 2 || !path.keys.iter().any(|key| key.angles.is_some()) {
+        return None;
+    }
+    let keys = &path.keys;
+    let mut index = 0;
+    while index + 1 < keys.len() && t > keys[index + 1].time_s {
+        index += 1;
+    }
+    let a = &keys[index];
+    let b = keys.get(index + 1).unwrap_or(a);
+    let span = (b.time_s - a.time_s).max(1e-6);
+    let raw = f64::from(((t - a.time_s) / span).clamp(0.0, 1.0));
+    let blend = raw * raw * (3.0 - 2.0 * raw);
+    let weight_a = if a.angles.is_some() { 1.0 } else { 0.0 };
+    let weight_b = if b.angles.is_some() { 1.0 } else { 0.0 };
+    let weight = weight_a + (weight_b - weight_a) * blend;
+    if weight <= 1e-4 {
+        return None;
+    }
+    let zero = KeyAngles::default();
+    let angles_a = a.angles.unwrap_or(zero);
+    let angles_b = b.angles.unwrap_or(zero);
+    // When only one end of the segment is authored, hold its angles: the fade
+    // weight already fades the whole effect out toward the other key.
+    let (angles_a, angles_b) = match (a.angles.is_some(), b.angles.is_some()) {
+        (true, false) => (angles_a, angles_a),
+        (false, true) => (angles_b, angles_b),
+        _ => (angles_a, angles_b),
+    };
+    let lerp = |x: f32, y: f32| x + (y - x) * blend as f32;
+    Some((
+        KeyAngles {
+            yaw_deg: lerp(angles_a.yaw_deg, angles_b.yaw_deg),
+            pitch_deg: lerp(angles_a.pitch_deg, angles_b.pitch_deg),
+            roll_deg: lerp(angles_a.roll_deg, angles_b.roll_deg),
+        },
+        weight,
+    ))
+}
+
+/// Aim point including the pursuit angle offset (inside/outside/up/down).
+///
+/// The rotation happens around the eye, so the aim keeps its distance and the
+/// focus distance is unchanged. Positive `yaw_deg` turns toward the inside of
+/// the curve (the direction the trajectory bends toward); positive
+/// `pitch_deg` looks higher than the aim point.
+pub fn sample_aim(rig: &CameraRig, t: f32, eye: DVec3, velocity: DVec3, lateral: DVec3) -> DVec3 {
+    let aim = sample_target(rig, t, eye, velocity);
+    let pursuit = &rig.target.pursuit;
+    if !pursuit.is_active() {
+        return aim;
+    }
+    // The offset follows the *aim time*, so it travels with the look point.
+    let offset_t = match rig.target.mode {
+        TargetMode::EyeAhead => t + rig.target.lead_s.clamp(-5.0, 5.0),
+        TargetMode::Trail => t - rig.target.lead_s.clamp(0.0, 5.0),
+        _ => t,
+    };
+    let (yaw_deg, pitch_deg) = pursuit.offset_at(offset_t);
+    let distance = (aim - eye).length();
+    if distance < 1e-3 {
+        return aim;
+    }
+    let mut direction = (aim - eye) / distance;
+    let world_up = DVec3::Z;
+    if yaw_deg.abs() > 1e-4 {
+        // `up × d` points to the left of the view; a positive yaw turns there.
+        let left = world_up.cross(direction).normalize_or_zero();
+        // The bend points toward the lateral acceleration: when it is on the
+        // left of the travel direction, positive yaw aims inside.
+        let travel_left = world_up.cross(velocity).normalize_or_zero();
+        let sign = if travel_left.length_squared() < 1e-6
+            || lateral.length_squared() < 1e-6
+            || travel_left.dot(lateral) >= 0.0
+        {
+            1.0
+        } else {
+            -1.0
+        };
+        let angle = f64::from(yaw_deg.to_radians()) * sign;
+        let (sin, cos) = angle.sin_cos();
+        direction = (direction * cos + left * sin).normalize_or_zero();
+    }
+    if pitch_deg.abs() > 1e-4 {
+        let right = direction.cross(world_up).normalize_or_zero();
+        let angle = f64::from(pitch_deg.to_radians());
+        let (sin, cos) = angle.sin_cos();
+        // `right × d` is the view up vector.
+        direction = (direction * cos + right.cross(direction) * sin).normalize_or_zero();
+    }
+    eye + direction * distance
 }
 
 /// Cubic Bezier sample by time, parameterised by **arc length** inside each
@@ -1293,6 +1432,120 @@ mod tests {
 
     fn field() -> HeightField {
         vf_procgen::classic::generate(&ClassicParams::default().with_size_seed(129, 7)).unwrap()
+    }
+
+    /// Camera sample at an authored time, with constraints off so the terrain
+    /// cannot mask an orientation change.
+    fn sample_straight(rig: &CameraRig, time: f32) -> RigSample {
+        let hf = field();
+        let track = RigTrack::new(rig, &hf, Seed::new(3)).expect("track");
+        track.sample_at(time)
+    }
+
+    fn straight_rig() -> CameraRig {
+        let mut rig = CameraRig::preset("drone").unwrap();
+        rig.eye.keys = vec![
+            vf_core::PathKey::new(0.0, [0.0, 0.0, 800.0]),
+            vf_core::PathKey::new(10.0, [1000.0, 0.0, 800.0]),
+        ];
+        rig.duration_s = 10.0;
+        rig.constraints.enabled = false;
+        rig.target.mode = TargetMode::EyeAhead;
+        rig.target.lead_s = 1.0;
+        rig
+    }
+
+    #[test]
+    fn explicit_key_angles_turn_the_camera_away_from_the_aim() {
+        let mut rig = straight_rig();
+        let reference = sample_straight(&rig, 5.0);
+        // The look direction toward the aim point is roughly +X.
+        let before = reference.camera.forward();
+        assert!(before.x > 0.9, "{before:?}");
+        for key in &mut rig.eye.keys {
+            key.angles = Some(KeyAngles {
+                yaw_deg: 40.0,
+                pitch_deg: 0.0,
+                roll_deg: 0.0,
+            });
+        }
+        let turned = sample_straight(&rig, 5.0).camera.forward();
+        // Positive yaw turns left: the direction gains +Y.
+        assert!(turned.y > 0.3, "{turned:?}");
+        assert!(turned.x > 0.0);
+    }
+
+    #[test]
+    fn a_single_oriented_key_fades_back_to_the_pursuit_aim() {
+        let mut rig = straight_rig();
+        rig.eye.keys[1].angles = Some(KeyAngles {
+            yaw_deg: 60.0,
+            ..Default::default()
+        });
+        let (angles, at_key) = sample_key_angles(&rig.eye, 10.0).expect("angles at the key");
+        assert!((at_key - 1.0).abs() < 1e-3);
+        assert!((angles.yaw_deg - 60.0).abs() < 1e-3);
+        // Halfway through the segment the effect is already faded.
+        let (_, middle) = sample_key_angles(&rig.eye, 5.0).expect("interpolated");
+        assert!(middle > 0.4 && middle < 0.6, "{middle}");
+        // On the un-oriented key there is no effect at all.
+        assert!(sample_key_angles(&rig.eye, 0.0).is_none());
+    }
+
+    #[test]
+    fn pursuit_offset_turns_the_aim_inside_and_keeps_its_distance() {
+        let mut rig = straight_rig();
+        // Turning left: lateral acceleration points to +Y.
+        let eye = DVec3::new(0.0, 0.0, 800.0);
+        let velocity = DVec3::new(100.0, 0.0, 0.0);
+        let lateral = DVec3::new(0.0, 5.0, 0.0);
+        let plain = sample_aim(&rig, 5.0, eye, velocity, lateral);
+        let plain_distance = (plain - eye).length();
+        rig.target.pursuit.enabled = true;
+        rig.target.pursuit.yaw_deg = 30.0;
+        let inside = sample_aim(&rig, 5.0, eye, velocity, lateral);
+        assert!((inside - eye).length() - plain_distance < 0.5);
+        // Inside a left turn is +Y: the offset aim moves that way.
+        assert!(
+            inside.y > plain.y + 1.0,
+            "plain={plain:?} inside={inside:?}"
+        );
+        // Negative yaw aims outside, symmetric.
+        rig.target.pursuit.yaw_deg = -30.0;
+        let outside = sample_aim(&rig, 5.0, eye, velocity, lateral);
+        assert!(outside.y < plain.y - 1.0);
+        // Pitch aims above the plain aim.
+        rig.target.pursuit.yaw_deg = 0.0;
+        rig.target.pursuit.pitch_deg = 20.0;
+        let above = sample_aim(&rig, 5.0, eye, velocity, lateral);
+        assert!(above.z > plain.z + 10.0, "above={above:?}");
+    }
+
+    #[test]
+    fn pursuit_keys_interpolate_between_the_constant_offset() {
+        let mut pursuit = vf_core::PursuitAngles {
+            enabled: true,
+            yaw_deg: 10.0,
+            pitch_deg: 0.0,
+            keys: vec![
+                vf_core::PursuitKey {
+                    time_s: 0.0,
+                    yaw_deg: 0.0,
+                    pitch_deg: 0.0,
+                },
+                vf_core::PursuitKey {
+                    time_s: 10.0,
+                    yaw_deg: 20.0,
+                    pitch_deg: 5.0,
+                },
+            ],
+        };
+        assert!((pursuit.offset_at(0.0).0 - 10.0).abs() < 1e-3);
+        assert!((pursuit.offset_at(10.0).0 - 30.0).abs() < 1e-3);
+        let mid = pursuit.offset_at(5.0).0;
+        assert!((mid - 20.0).abs() < 0.5, "{mid}");
+        pursuit.keys.clear();
+        assert!((pursuit.offset_at(5.0).0 - 10.0).abs() < 1e-6);
     }
 
     #[test]

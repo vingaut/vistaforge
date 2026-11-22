@@ -61,15 +61,21 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Détail adaptatif** : maillage qui se densifie localement selon la forme
   (comme les couches adaptatives d'un slicer), tolérance en mètres, UV monde
   continues, export OBJ à quads pour Blender.
-- **Maillage 3D sculptable** : nouveau module qui transforme le terrain en maillage
-  n-gon éditable — 19 outils (marteau, burins, gouge, lime, argile, surplomb,
-  fusion/lave, impact, fracture, grain…), remesh triangles/quads/voxel avec budget,
-  fracture de Voronoï, impacts, métaballs, débris physiques, parois rocheuses avec
-  surplombs et neuf profils de roche. Export `.glb`, `.obj`, `.vfm`, `.stl`.
-  Curseur de pinceau en espace écran (croix, zone d'effet, normale moyenne,
-  rayon effectif), gizmo d'orientation cliquable dans la vue 3D et aperçu allégé
-  pendant les interactions.
+- **Maillage 3D sculptable, reçu du heightmap** : le module 3D reprend la finition du
+  heightmap (modificateurs, falaises, détail continu) **à sa résolution**, puis devient
+  un maillage n-gon éditable — 19 outils (marteau, burins, gouge, lime, argile,
+  surplomb, fusion/lave, impact, fracture, grain…), remesh triangles/quads/voxel avec
+  budget, fracture de Voronoï, impacts, métaballs, débris physiques, parois rocheuses
+  avec surplombs et neuf profils de roche. Le passage est **à sens unique** :
+  réimporter remplace la sculpture après confirmation. Export `.glb`, `.obj`, `.stl`,
+  `.vfm` — **seul chemin vers Blender**. Curseur de pinceau en espace écran,
+  gizmo d'orientation cliquable et aperçu allégé pendant les interactions.
   Voir [`docs/MAILLAGE3D.md`](docs/MAILLAGE3D.md).
+- **Projet neutre et modules séparés** : un nouveau projet démarre sur une surface
+  plate sans bruit, ni géologie, ni érosion, ni modificateur ; tout s'ajoute avec
+  l'onglet **Base**, les pinceaux, les modificateurs ou l'érosion. La barre de modules
+  sépare **Heightmap**, **Maillage 3D**, **Animation**, **Scène**, **Fichiers** et
+  **Aide** ; « Roche » et « Détail » sont réunis dans un seul sous-onglet.
 - **Navigation** : orbite, zoom et **pan** (clic droit, molette ou Maj+glisser) ;
   bascule **GPU / CPU** et **aperçus Brouillon/Normal/Haute/Finale**. La caméra
   d'inspection est conservée lors des générations, imports, annulations et
@@ -90,7 +96,10 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
   inertie du profil optionnelle, garde au sol amortie et contournement de parois,
   lecture **en vue design** ou caméra, profils de vol avec
   comparaison, cibles **Fixe / Avance / Décalage rigide / Retard / Tracé / Manuel**
-  et copie-synchronisation du tracé de l'œil, export PNG/MP4 et **trajectoire seule**
+  et copie-synchronisation du tracé de l'œil, **angles par clé** (lacet/tangage/roulis
+  avec retour progressif à la visée), **décalage de poursuite** intérieur/extérieur/haut/bas
+  constant ou par keyframe, canaux vitesse/**accélération** avec limites du profil et
+  boutons ±10 %/Ease par segment, export PNG/MP4 et **trajectoire seule**
   (`.vfcam`, GLB caméra, CSV) réimportable dans Blender et VistaForge. Voir
   [`docs/ANIMATION.md`](docs/ANIMATION.md), [`docs/RIG.md`](docs/RIG.md) et
   [`docs/FICHIERS.md`](docs/FICHIERS.md).
@@ -117,7 +126,7 @@ projet `.vfproj`, CLI, interface de bureau et serveur MCP.
 - **Interfaces** : CLI `vistaforge`, GUI `vistaforge-app` (viewport GPU wgpu/Vulkan +
   aperçu CPU adaptatif), serveur MCP stdio `vistaforge-mcp` (29 outils, confirmation des
   chemins au workspace, aperçus renvoyés en image MCP).
-- **Qualité** : 387 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
+- **Qualité** : 395 tests, `cargo clippy -D warnings`, CI Ubuntu 24.04 + Windows.
 
 | Interface | Aperçu |
 |---|---|

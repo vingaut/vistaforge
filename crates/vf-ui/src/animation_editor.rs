@@ -9,7 +9,7 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use glam::DVec3;
 use vf_core::{Camera, CameraRig, HeightField, PathKey, TargetMode};
-use vf_flight::rig::{RigSample, path_derivative, sample_path, sample_target};
+use vf_flight::rig::{RigSample, path_derivative, sample_aim, sample_path};
 
 use crate::animation_ui::{
     AnimSelection, ComparisonTrail, pick_terrain, preset_color, screen_ray, world_to_screen,
@@ -672,7 +672,14 @@ fn current_target(rig: &CameraRig, eye: DVec3, time: f32) -> Option<DVec3> {
         return None;
     }
     let velocity = path_derivative(&rig.eye, time);
-    Some(sample_target(rig, time, eye, velocity) + DVec3::from_array(rig.target.offset))
+    // Same aim as the simulation, pursuit offset included. `offset` is a link
+    // parameter for the moving modes; a fixed target is an absolute point.
+    let aim = sample_aim(rig, time, eye, velocity, DVec3::ZERO);
+    if rig.target.mode == vf_core::TargetMode::Fixed {
+        Some(aim)
+    } else {
+        Some(aim + DVec3::from_array(rig.target.offset))
+    }
 }
 
 fn draw_keys(

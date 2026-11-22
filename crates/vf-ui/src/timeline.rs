@@ -48,11 +48,12 @@ pub enum Channel {
     TargetY,
     TargetZ,
     Speed,
+    Acceleration,
     Bank,
 }
 
 impl Channel {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::EyeX,
         Self::EyeY,
         Self::EyeZ,
@@ -60,6 +61,7 @@ impl Channel {
         Self::TargetY,
         Self::TargetZ,
         Self::Speed,
+        Self::Acceleration,
         Self::Bank,
     ];
 
@@ -72,6 +74,7 @@ impl Channel {
             Self::TargetY => "Cible Y (m)",
             Self::TargetZ => "Cible Z (m)",
             Self::Speed => "Vitesse (m/s)",
+            Self::Acceleration => "Accélération (m/s²)",
             Self::Bank => "Roulis (°)",
         }
     }
@@ -85,12 +88,12 @@ impl Channel {
             Self::EyeX | Self::TargetX => Some(0),
             Self::EyeY | Self::TargetY => Some(1),
             Self::EyeZ | Self::TargetZ => Some(2),
-            Self::Speed | Self::Bank => None,
+            Self::Speed | Self::Acceleration | Self::Bank => None,
         }
     }
 
     pub fn read_only(self) -> bool {
-        matches!(self, Self::Speed | Self::Bank)
+        matches!(self, Self::Speed | Self::Acceleration | Self::Bank)
     }
 }
 
@@ -99,6 +102,8 @@ impl Channel {
 #[derive(Debug, Clone, Default)]
 pub struct Curves {
     pub speed: Vec<(f32, f32)>,
+    /// Finite difference of `speed`, m/s². Derived, never authored.
+    pub accel: Vec<(f32, f32)>,
     pub bank: Vec<(f32, f32)>,
 }
 
@@ -124,6 +129,9 @@ pub struct TimelineState {
     pub snap_s: f32,
     pub open: bool,
     drag: Option<KeyDrag>,
+    /// Y range frozen at the start of a drag, so the curve does not rescale
+    /// under the cursor while it is being moved.
+    frozen_range: Option<(f64, f64)>,
     scrub: bool,
 }
 
@@ -137,6 +145,7 @@ impl Default for TimelineState {
             snap_s: 0.0,
             open: true,
             drag: None,
+            frozen_range: None,
             scrub: false,
         }
     }
@@ -429,6 +438,9 @@ pub fn show(
             drag.last_time
         ));
     }
+    if !state.dragging_key() {
+        state.frozen_range = None;
+    }
     if state.scrub {
         if down {
             if let Some(pointer) = pointer
@@ -534,6 +546,11 @@ fn begin_drag(
         2
     };
     let start_value = position[axis];
+    // Freeze the Y scale for the whole gesture: recomputing it at every frame
+    // makes the curve rescale under the cursor, which is what made the graph
+    // feel unpredictable.
+    let frozen = channel_range(rig, state.channel, state, None);
+    state.frozen_range = Some(frozen);
     state.drag = Some(KeyDrag {
         target,
         index,
@@ -975,6 +992,58 @@ fn draw_graph(
     }
     draw_time_grid(painter, rect, state, plot);
 
+    // Body limits: without them the speed and acceleration curves have no
+    // reference, which is what made the graph feel like a monitor.
+    let limits: &[(f64, &str, Color32)] = match state.channel {
+        Channel::Speed => &[
+            (
+                f64::from(rig.body.max_speed_mps),
+                "max",
+                Color32::from_rgb(240, 170, 90),
+            ),
+            (
+                f64::from(vf_flight::rig::cruise_speed_mps(&rig.body)),
+                "croisière",
+                Color32::from_rgb(120, 190, 140),
+            ),
+        ],
+        Channel::Acceleration => &[
+            (
+                f64::from(rig.body.accel_forward_mps2),
+                "+a",
+                Color32::from_rgb(240, 150, 120),
+            ),
+            (
+                -f64::from(rig.body.accel_forward_mps2),
+                "-a",
+                Color32::from_rgb(240, 150, 120),
+            ),
+            (
+                f64::from(rig.body.accel_lateral_mps2),
+                "lat",
+                Color32::from_rgb(150, 190, 240),
+            ),
+        ],
+        _ => &[],
+    };
+    for (value, label, color) in limits {
+        if *value < lo || *value > hi {
+            continue;
+        }
+        let y = value_to_y(*value);
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1.0, color.gamma_multiply(0.65)),
+        );
+        painter.text(
+            Pos2::new(plot.right() - 3.0, y - 1.0),
+            egui::Align2::RIGHT_BOTTOM,
+            *label,
+            egui::FontId::monospace(8.0),
+            color.gamma_multiply(0.85),
+        );
+    }
+
     // Curve.
     let samples = 192;
     let mut points = Vec::with_capacity(samples);
@@ -1144,6 +1213,7 @@ fn channel_value(
         Channel::Speed => curves
             .and_then(|curves| sample_curve(&curves.speed, time))
             .or_else(|| Some(path_derivative(&rig.eye, time).length() as f32)),
+        Channel::Acceleration => curves.and_then(|curves| sample_curve(&curves.accel, time)),
         Channel::Bank => curves.and_then(|curves| sample_curve(&curves.bank, time)),
     }
 }
@@ -1170,6 +1240,9 @@ fn channel_range(
     state: &TimelineState,
     curves: Option<&Curves>,
 ) -> (f64, f64) {
+    if let Some(frozen) = state.frozen_range {
+        return frozen;
+    }
     let mut values: Vec<f64> = Vec::new();
     let samples = 96;
     for index in 0..=samples {

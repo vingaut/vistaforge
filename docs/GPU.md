@@ -132,6 +132,28 @@ Points de conception :
   / `VISTAFORGE_COMPUTE_GPU` choisissent l'adaptateur (nom ou clé
   `backend|nom`). La CLI et l'application les acceptent.
 
+### Finesse perçue : ce qui a été corrigé dans le viewport
+
+Le viewport 3D ne calculait pas le détail comme le rendu final. Trois corrections
+rapprochent les deux :
+
+- **un seul plafond de maillage** : activer le détail divisait la résolution du
+  terrain par deux (1 025 au lieu de 2 049 segments) ; c'est le même plafond pour
+  les deux chemins ;
+- **normales sur la grille native** : les différences centrées utilisaient un
+  stencil de ±`step` cellules, ce qui lissait toute crête plus étroite que deux
+  quads ; elles utilisent ±1 cellule comme le rendu ;
+- **empreinte du détail = une demi-cellule** (`0.5 × spacing`), la même valeur que
+  `vf_mesh::build_shape_adaptive` : le viewport atténue désormais les mêmes
+  longueurs d'onde que le PNG.
+
+Côté sculpture, le canvas 2D se rafraîchit **pendant** le trait (throttlé à
+~120 ms) au lieu d'attendre le relâchement du bouton : c'était la cause principale
+de l'impression que « le détail ne tient pas ». Le détail continu reste une
+propriété du rendu (et du maillage 3D, qui le cuit) : le heightmap stocké garde sa
+résolution, et un détail plus fin que deux cellules demande de densifier la
+grille (Bouton **Densifier ×2**) ou de sculpter dans le module 3D.
+
 Le calcul GPU n'est pas un chemin déterministe au bit près : les pilotes peuvent
 fusionner multiplications et additions. Les tests comparent le GPU au CPU avec
 une tolérance de 2 × 10⁻³ sur les normales ; le CPU reste la référence pour les

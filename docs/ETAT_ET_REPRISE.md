@@ -5,9 +5,88 @@
 > une autre. Il décrit ce qui fonctionne, ce qui a été ajouté, ce qui reste à
 > faire et les pièges déjà rencontrés.
 
-Dernière mise à jour : **2026-11-22** (maillage 3D : gizmo d'orientation, moteur de calcul CPU/GPU, déterminisme du remesh).
+Dernière mise à jour : **2026-11-22 (soir)** (séquence heightmap → maillage, terrain neutre, modules, angles et poursuite en animation).
 
 > **Note du 20 novembre** : le comparateur avant/après a été **retiré** de l'interface. Les mentions ci-dessous sont historiques ; la vue se choisit désormais par un simple sélecteur **GPU / CPU** dans la barre d'outils. La suite (simplification, relief rocheux procédural, hautes résolutions) est décrite dans [`SESSION_2026-11-20.md`](SESSION_2026-11-20.md).
+
+---
+
+## 0tresvicies. Session du 22 novembre (soir) — séquence Heightmap → Maillage, modules, animation
+
+> **État : livré, testé.** `cargo test --workspace` : **395 tests verts** ;
+> clippy `-D warnings` et `fmt --check` propres.
+
+### 1. Le heightmap d'abord, le maillage ensuite (sens unique)
+
+- **Projet neutre** : `Project::new` part d'une source `TerrainSource::Flat`
+  (altitude constante), sans géologie, sans érosion, sans détail et pile de
+  modificateurs vide. L'écran de démarrage suit la même règle (l'eau est
+  désactivée : une nappe à 8 mm noierait un terrain plat). Tout effet s'ajoute
+  avec l'onglet **Base** (Plat / Classic / Modern), les pinceaux, les
+  modificateurs ou l'érosion.
+- **Passage complet** : `build_mesh_from_heightmap` applique la même chaîne que
+  le rendu final (pile de modificateurs → pass falaises → détail continu) puis
+  construit le maillage **à la résolution du heightmap** (l'ancien code imposait
+  256 cellules, d'où les ajustements perdus). Options : densité ×1..×4, finesse
+  (tolérance adaptative, 0,15 m par défaut), détail, falaises, dalle fermée,
+  budget de sommets. Travail sur un thread avec jauge.
+- **Sens unique** : le module 3D ne se crée plus tout seul ; tant que rien n'est
+  envoyé il affiche « Aucun maillage 3D ». Le panneau mémorise l'empreinte du
+  heightmap d'origine (`heightfield_fingerprint`) et affiche un avertissement si
+  le heightmap a changé ; **Réimporter depuis le heightmap** remplace la
+  sculpture après confirmation explicite.
+- **Blender uniquement depuis le maillage** : la section Blender de l'onglet
+  Fichiers est remplacée par un renvoi vers le module 3D ; la section export du
+  maillage devient « Export (Blender et impression 3D) » avec GLB/OBJ/STL/VFM.
+  Les trajectoires restent exportables depuis Animation.
+
+### 2. Modules et cohérence des outils
+
+- Barre de **modules** (Heightmap, Maillage 3D, Animation, Scène, Fichiers,
+  Aide) et **sous-onglets** : Heightmap = Base, Sculpter, Modificateurs,
+  Roche & détail, Érosion, Eau ; Scène = Matières, Lumière, Caméra, Rendu.
+- **Roche + Détail fusionnés** dans « Roche & détail » : les deux panneaux
+  s'enchaînent, les doublons d'onglet disparaissent.
+- La case d'érosion du panneau Base est retirée (elle doublonnait l'onglet
+  Érosion) ; un simple rappel indique que l'érosion s'applique après génération.
+
+### 3. Finesse du heightmap : diagnostic et corrections
+
+- **Cause principale** : le canvas de sculpture et la vue 3D ne s'invalidaient
+  qu'au relâchement du bouton ; pendant le trait, l'écran montrait l'état
+  d'avant. Le hillshade se rafraîchit maintenant pendant le geste, throttlé à
+  ~120 ms (`request_live_hillshade`), avec copie-on-write maîtrisée.
+- **Vue 3D** : plafond de maillage unique (le détail ne divise plus la
+  résolution par deux), normales sur la grille native (±1 cellule au lieu de
+  ±`step`), empreinte du détail = une demi-cellule comme le rendu.
+- Le détail continu reste une propriété du rendu (et du maillage 3D, qui le
+  cuit) ; un détail plus fin que deux cellules demande de densifier la grille.
+
+### 4. Animation : angles, poursuite, vitesses
+
+- **Angles par clé** : `PathKey.angles: Option<KeyAngles>` (lacet/tangage/
+  roulis), sérialisé avec `serde(default)` — les projets existants se chargent
+  sans migration. Échantillonnage `sample_key_angles` avec poids de fondu : le
+  cadre revient progressivement à la visée sur les clés voisines non orientées.
+  UI dans le panneau de clé (case + trois champs + « Revenir à la visée »).
+- **Décalage de poursuite** (`TargetRig.pursuit`) : rotation de la direction
+  caméra → cible autour de l'œil, sans changer la distance de mise au point.
+  Boutons Intérieur/Extérieur/Haut/Bas/Aucun, lacet/tangage réglables, et
+  courbe **par keyframe** qui s'ajoute au décalage constant. Appliqué dans
+  `sample_aim`, utilisé par la simulation et par l'overlay de conception.
+- **Vitesses plus intuitives** : canal **accélération** (différence finie de la
+  vitesse) dans le graphe, avec les limites du profil tracées (vitesse max,
+  croisière, ±accélération avant, accélération latérale) ; plage verticale
+  **figée pendant un glisser** ; tableau des segments avec `−` / `+` (±10 % de
+  durée, les clés suivantes suivent) et `Ease` par segment.
+
+### 5. À suivre
+
+- Topologie résidente sur le GPU (clé de révision) pour supprimer le transfert
+  par appel.
+- Noyaux GPU pour le remesh et la projection sur la surface de référence.
+- Maillage 3D non exposé au MCP.
+- Binaires Linux retirés de `dist/` ; seul `dist/windows-x86_64/` est publié.
 
 ---
 

@@ -103,9 +103,9 @@ par défaut vise alors le viewport CPU). Les captures sont écrites dans le doss
 Variables utiles pour une capture isolée :
 
 ```bash
-VISTAFORGE_WORKSPACE=Animation   # Terrain, Modificateurs, Roche, Détail, Sculpter,
-                                 # Maillage 3D, Animation, Érosion, Eau, Matières,
-                                 # Lumière, Caméra, Rendu
+VISTAFORGE_WORKSPACE=Animation   # Base, Sculpter, Modificateurs, Roche & détail,
+                                 # Érosion, Eau, Maillage 3D, Animation, Matières,
+                                 # Lumière, Caméra, Rendu, Fichiers
 VISTAFORGE_ANIM_TAB=Timing       # Path, Timing, Profile, Preview
 VISTAFORGE_HELP_TOPIC=Profile    # ouvre et épingle une fiche au démarrage
 ```
